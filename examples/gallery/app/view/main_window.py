@@ -113,7 +113,7 @@ class MainWindow(FluentWindow):
         self.setMicaEffectEnabled(cfg.get(cfg.micaEnabled))
 
         # create splash screen
-        self.splashScreen = SplashScreen(self.windowIcon(), self)
+        self. splashScreen = SplashScreen(self.windowIcon(), self)
         self.splashScreen.setIconSize(QSize(106, 106))
         self.splashScreen.raise_()
 
