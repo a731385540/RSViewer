@@ -1,9 +1,9 @@
 # coding:utf-8
 import sys
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QIcon
-from PyQt5.QtWidgets import QApplication, QWidget, QHBoxLayout
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import QApplication, QWidget, QHBoxLayout
 
 from qfluentwidgets import (FluentIcon, TransparentDropDownPushButton, RoundMenu, CommandBar, Action,
                             setTheme, Theme, setFont, CommandBarView, Flyout, FlyoutAnimationType,
@@ -33,6 +33,7 @@ class Demo1(QWidget):
         self.addButton(FluentIcon.ADD, 'Add')
         self.commandBar.addSeparator()
 
+        self.isEdit = False
         self.commandBar.addAction(Action(FluentIcon.EDIT, 'Edit', triggered=self.onEdit, checkable=True))
         self.addButton(FluentIcon.COPY, 'Copy')
         self.addButton(FluentIcon.SHARE, 'Share')
@@ -52,8 +53,9 @@ class Demo1(QWidget):
         action.triggered.connect(lambda: print(text))
         self.commandBar.addAction(action)
 
-    def onEdit(self, isChecked):
-        print('Enter edit mode' if isChecked else 'Exit edit mode')
+    def onEdit(self):
+        self.isEdit = not self.isEdit
+        print('Enter edit mode' if self.isEdit else 'Exit edit mode')
 
     def createDropDownButton(self):
         button = TransparentDropDownPushButton('Menu', self, FluentIcon.MENU)
@@ -104,15 +106,9 @@ class Demo2(FramelessWindow):
 
 
 if __name__ == '__main__':
-    # enable dpi scale
-    QApplication.setHighDpiScaleFactorRoundingPolicy(
-        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
-
     app = QApplication(sys.argv)
     w1 = Demo1()
     w1.show()
     w2 = Demo2()
     w2.show()
-    app.exec_()
+    app.exec()

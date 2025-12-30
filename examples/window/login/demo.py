@@ -1,8 +1,8 @@
 import sys
 
-from PyQt5.QtCore import Qt, QTranslator, QLocale, QRect
-from PyQt5.QtGui import QIcon, QPixmap, QColor
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtCore import Qt, QTranslator, QLocale, QRect
+from PySide6.QtGui import QIcon, QPixmap, QColor
+from PySide6.QtWidgets import QApplication
 from qfluentwidgets import setThemeColor, FluentTranslator, setTheme, Theme, SplitTitleBar, isDarkTheme, FluentWidget
 from Ui_LoginWindow import Ui_Form
 
@@ -26,7 +26,7 @@ class LoginWindow(FluentWidget, Ui_Form):
         self.setWindowIcon(QIcon(":/images/logo.png"))
         self.resize(1000, 650)
 
-        desktop = QApplication.desktop().availableGeometry()
+        desktop = QApplication.screens()[0].availableGeometry()
         w, h = desktop.width(), desktop.height()
         self.move(w//2 - self.width()//2, h//2 - self.height()//2)
 
@@ -41,12 +41,6 @@ if __name__ == '__main__':
     # use dark theme mode
     # setTheme(Theme.DARK)
 
-    # enable dpi scale
-    QApplication.setHighDpiScaleFactorRoundingPolicy(
-        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
-
     app = QApplication(sys.argv)
 
     # Internationalization
@@ -55,4 +49,4 @@ if __name__ == '__main__':
 
     w = LoginWindow()
     w.show()
-    app.exec_()
+    app.exec()

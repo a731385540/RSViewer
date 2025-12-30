@@ -1,7 +1,8 @@
 # coding:utf-8
-from PyQt5.QtCore import QPoint, Qt, QStandardPaths
-from PyQt5.QtGui import QColor
-from PyQt5.QtWidgets import QAction, QWidget, QLabel, QVBoxLayout, QFileDialog, QActionGroup
+from PySide6.QtCore import QPoint, Qt, QStandardPaths
+from PySide6.QtGui import QColor
+from PySide6.QtGui import QAction, QActionGroup
+from  PySide6.QtWidgets import QWidget, QLabel, QVBoxLayout, QFileDialog
 from qfluentwidgets import (RoundMenu, PushButton, Action, CommandBar, Action, TransparentDropDownPushButton,
                             setFont, CommandBarView, Flyout, ImageLabel, FlyoutAnimationType, CheckableMenu,
                             MenuIndicatorType, AvatarWidget, isDarkTheme, BodyLabel, CaptionLabel, HyperlinkButton)
@@ -51,7 +52,7 @@ class MenuInterface(GalleryInterface):
         self.addExampleCard(
             self.tr('Rounded corners menu'),
             self.button1,
-            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/menu/menu/demo.py'
+            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/menu/menu/demo.py'
         )
 
         # custom widget menu
@@ -62,7 +63,7 @@ class MenuInterface(GalleryInterface):
         self.addExampleCard(
             self.tr('Rounded corners menu with custom widget'),
             self.button3,
-            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/menu/widget_menu/demo.py'
+            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/menu/widget_menu/demo.py'
         )
 
 
@@ -74,14 +75,14 @@ class MenuInterface(GalleryInterface):
         self.addExampleCard(
             self.tr('Checkable menu'),
             self.button2,
-            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/menu/menu/demo.py'
+            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/menu/menu/demo.py'
         )
 
         # command bar
         self.addExampleCard(
             self.tr('Command bar'),
             self.createCommandBar(),
-            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/menu/menu/demo.py',
+            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/menu/menu/command_bar.py',
             stretch=1
         )
 
@@ -103,7 +104,7 @@ class MenuInterface(GalleryInterface):
         self.addExampleCard(
             self.tr('Command bar flyout'),
             widget,
-            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/menu/menu/demo.py',
+            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/menu/command_bar/demo.py',
             stretch=1
         )
 
@@ -180,7 +181,7 @@ class MenuInterface(GalleryInterface):
 
     def createCommandBar(self):
         bar = CommandBar(self)
-        bar.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         bar.addActions([
             Action(FIF.ADD, self.tr('Add')),
             Action(FIF.ROTATE, self.tr('Rotate')),
@@ -225,10 +226,10 @@ class MenuInterface(GalleryInterface):
 
     def saveImage(self):
         path, ok = QFileDialog.getSaveFileName(
-            parent=self,
-            caption=self.tr('Save image'),
-            directory=QStandardPaths.writableLocation(QStandardPaths.DesktopLocation),
-            filter='PNG (*.png)'
+            self,
+            self.tr('Save image'),
+            QStandardPaths.writableLocation(QStandardPaths.DesktopLocation),
+            'PNG (*.png)'
         )
         if not ok:
             return

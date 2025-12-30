@@ -1,9 +1,10 @@
 # coding:utf-8
 import sys
 
-from PyQt5.QtCore import Qt, QSize
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QAction, QGridLayout
-from qfluentwidgets import (Action, DropDownPushButton, DropDownToolButton, PushButton, PrimaryPushButton,
+from PySide6.QtCore import Qt, QSize
+from PySide6.QtGui import QAction
+from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QGridLayout
+from qfluentwidgets import (Action, Action, DropDownPushButton, DropDownToolButton, PushButton, PrimaryPushButton,
                             HyperlinkButton, setTheme, Theme, ToolButton, ToggleButton, RoundMenu,
                             SplitPushButton, SplitToolButton, PrimaryToolButton, PrimarySplitPushButton,
                             PrimarySplitToolButton, PrimaryDropDownPushButton, PrimaryDropDownToolButton,
@@ -222,16 +223,10 @@ class PushButtonDemo(ButtonView):
 
 
 if __name__ == '__main__':
-    # enable dpi scale
-    QApplication.setHighDpiScaleFactorRoundingPolicy(
-        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
-
     app = QApplication(sys.argv)
     w1 = ToolButtonDemo()
     w1.show()
 
     w2 = PushButtonDemo()
     w2.show()
-    app.exec_()
+    app.exec()

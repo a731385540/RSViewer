@@ -1,7 +1,9 @@
 # coding:utf-8
-from PyQt5.QtCore import Qt, QRectF
-from PyQt5.QtGui import QPixmap, QPainter, QColor, QBrush, QPainterPath, QLinearGradient
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QLabel
+import json
+
+from PySide6.QtCore import Qt, Signal, QRectF
+from PySide6.QtGui import QPixmap, QPainter, QColor, QBrush, QPainterPath, QLinearGradient
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel
 
 from qfluentwidgets import ScrollArea, isDarkTheme, FluentIcon
 from ..common.config import cfg, HELP_URL, REPO_URL, EXAMPLE_URL, FEEDBACK_URL
@@ -87,12 +89,12 @@ class BannerWidget(QWidget):
         else:
             gradient.setColorAt(0, QColor(0, 0, 0, 255))
             gradient.setColorAt(1, QColor(0, 0, 0, 0))
-            
+
         painter.fillPath(path, QBrush(gradient))
 
         # draw banner image
         pixmap = self.banner.scaled(
-            self.size(), transformMode=Qt.SmoothTransformation)
+            self.size(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
         painter.fillPath(path, QBrush(pixmap))
 
 

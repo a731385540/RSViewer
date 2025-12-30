@@ -2,8 +2,8 @@
 import sys
 from pathlib import Path
 
-from PyQt5.QtCore import QUrl, Qt
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout
+from PySide6.QtCore import QUrl, Qt
+from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout
 
 from qfluentwidgets import setTheme, Theme
 from qfluentwidgets.multimedia import SimpleMediaPlayBar, StandardMediaPlayBar, VideoWidget
@@ -18,7 +18,7 @@ class Demo1(QWidget):
         self.resize(500, 300)
 
         # self.player = QMediaPlayer(self)
-        # self.player.setMedia(QMediaContent(QUrl.fromLocalFile(filename)))
+        # self.player.setMedia(QUrl.fromLocalFile(filename))
         # self.player.setPosition()
 
         self.simplePlayBar = SimpleMediaPlayBar(self)
@@ -54,11 +54,6 @@ class Demo2(QWidget):
 
 
 if __name__ == '__main__':
-    QApplication.setHighDpiScaleFactorRoundingPolicy(
-        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
-
     app = QApplication([])
     demo1 = Demo1()
     demo1.show()

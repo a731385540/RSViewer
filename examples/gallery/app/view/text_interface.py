@@ -1,6 +1,6 @@
 # coding:utf-8
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QCompleter
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QCompleter
 from qfluentwidgets import (LineEdit, SpinBox, DoubleSpinBox, TimeEdit, DateTimeEdit, DateEdit,
                             TextEdit, SearchLineEdit, PasswordLineEdit)
 
@@ -27,7 +27,7 @@ class TextInterface(GalleryInterface):
         self.addExampleCard(
             title=self.tr("A LineEdit with a clear button"),
             widget=lineEdit,
-            sourcePath='https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/text/line_edit/demo.py'
+            sourcePath='https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/text/line_edit/demo.py'
         )
 
         # line edit with completer
@@ -63,7 +63,7 @@ class TextInterface(GalleryInterface):
         self.addExampleCard(
             title=self.tr("A autosuggest line edit"),
             widget=lineEdit,
-            sourcePath='https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/text/line_edit/demo.py'
+            sourcePath='https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/text/line_edit/demo.py'
         )
 
         # password line edit
@@ -80,35 +80,35 @@ class TextInterface(GalleryInterface):
         self.addExampleCard(
             title=self.tr("A SpinBox with a spin button"),
             widget=SpinBox(self),
-            sourcePath='https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/text/spin_box/demo.py'
+            sourcePath='https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/text/spin_box/demo.py'
         )
 
         # double spin box
         self.addExampleCard(
             title=self.tr("A DoubleSpinBox with a spin button"),
             widget=DoubleSpinBox(self),
-            sourcePath='https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/text/spin_box/demo.py'
+            sourcePath='https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/text/spin_box/demo.py'
         )
 
         # date edit
         self.addExampleCard(
             title=self.tr("A DateEdit with a spin button"),
             widget=DateEdit(self),
-            sourcePath='https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/text/spin_box/demo.py'
+            sourcePath='https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/text/spin_box/demo.py'
         )
 
         # time edit
         self.addExampleCard(
             title=self.tr("A TimeEdit with a spin button"),
             widget=TimeEdit(self),
-            sourcePath='https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/text/spin_box/demo.py'
+            sourcePath='https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/text/spin_box/demo.py'
         )
 
         # date time edit
         self.addExampleCard(
             title=self.tr("A DateTimeEdit with a spin button"),
             widget=DateTimeEdit(self),
-            sourcePath='https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/text/spin_box/demo.py'
+            sourcePath='https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/text/spin_box/demo.py'
         )
 
         # text edit
@@ -119,6 +119,6 @@ class TextInterface(GalleryInterface):
         self.addExampleCard(
             title=self.tr("A simple TextEdit"),
             widget=textEdit,
-            sourcePath='https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/text/line_edit/demo.py',
+            sourcePath='https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/text/line_edit/demo.py',
             stretch=1
         )

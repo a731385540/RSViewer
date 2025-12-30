@@ -1,8 +1,8 @@
 # coding:utf-8
 import sys
 
-from PyQt5.QtCore import Qt, QCalendar, QDate
-from PyQt5.QtWidgets import QApplication, QWidget, QHBoxLayout
+from PySide6.QtCore import Qt, QCalendar, QDate
+from PySide6.QtWidgets import QApplication, QWidget, QHBoxLayout
 
 from qfluentwidgets import FastCalendarPicker, setTheme, Theme, FluentTranslator, FlyoutAnimationType
 
@@ -17,7 +17,6 @@ class Demo(QWidget):
         self.picker = FastCalendarPicker(self)
         self.picker.dateChanged.connect(print)
 
-        # enable reset button
         # self.picker.setResetEnabled(True)
 
         # customize animation
@@ -36,11 +35,6 @@ class Demo(QWidget):
 
 
 if __name__ == '__main__':
-    # enable dpi scale
-    QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
-
     app = QApplication(sys.argv)
 
     # install translator
@@ -49,4 +43,4 @@ if __name__ == '__main__':
 
     w = Demo()
     w.show()
-    app.exec_()
+    app.exec()

@@ -1,9 +1,9 @@
 # coding:utf-8
 import sys
 
-from PyQt5.QtCore import Qt, pyqtSignal, QEasingCurve, QUrl
-from PyQt5.QtGui import QIcon, QDesktopServices
-from PyQt5.QtWidgets import QLabel, QHBoxLayout, QVBoxLayout, QApplication, QFrame, QWidget
+from PySide6.QtCore import Qt, Signal, QEasingCurve, QUrl
+from PySide6.QtGui import QIcon, QDesktopServices
+from PySide6.QtWidgets import QLabel, QHBoxLayout, QVBoxLayout, QApplication, QFrame, QWidget
 
 from qfluentwidgets import (NavigationBar, NavigationItemPosition, NavigationWidget, MessageBox,
                             isDarkTheme, setTheme, Theme, setThemeColor, SearchLineEdit,
@@ -26,7 +26,7 @@ class Widget(QWidget):
 class StackedWidget(QFrame):
     """ Stacked widget """
 
-    currentChanged = pyqtSignal(int)
+    currentChanged = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent=parent)
@@ -178,7 +178,7 @@ class Window(FramelessWindow):
         self.setWindowTitle('PyQt-Fluent-Widgets')
         self.titleBar.setAttribute(Qt.WA_StyledBackground)
 
-        desktop = QApplication.desktop().availableGeometry()
+        desktop = QApplication.screens()[0].availableGeometry()
         w, h = desktop.width(), desktop.height()
         self.move(w//2 - self.width()//2, h//2 - self.height()//2)
 
@@ -222,12 +222,7 @@ class Window(FramelessWindow):
 
 
 if __name__ == '__main__':
-    QApplication.setHighDpiScaleFactorRoundingPolicy(
-        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
-
     app = QApplication(sys.argv)
     w = Window()
     w.show()
-    app.exec_()
+    app.exec()

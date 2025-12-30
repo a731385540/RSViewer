@@ -1,8 +1,8 @@
 # coding:utf-8
 import sys
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QIcon
-from PyQt5.QtWidgets import QApplication, QAction, QSystemTrayIcon
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon, QAction
+from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 from qfluentwidgets import MessageBox, setTheme, Theme, ImageLabel, Action, MenuAnimationType, MenuItemDelegate, CheckableMenu, MenuIndicatorType
 from qfluentwidgets import FluentIcon as FIF
 from qfluentwidgets.components.material import AcrylicMenu, AcrylicSystemTrayMenu, AcrylicCheckableMenu
@@ -109,13 +109,7 @@ class Demo(ImageLabel):
 
 
 if __name__ == '__main__':
-    # enable dpi scale
-    QApplication.setHighDpiScaleFactorRoundingPolicy(
-        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
-
     app = QApplication(sys.argv)
     w = Demo()
     w.show()
-    app.exec_()
+    app.exec()

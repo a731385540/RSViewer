@@ -1,16 +1,14 @@
 # coding:utf-8
 import sys
-from PyQt5 import QtGui
 
-from PyQt5.QtCore import Qt, QSize, QUrl, QPoint
-from PyQt5.QtGui import QIcon, QDesktopServices, QColor
-from PyQt5.QtWidgets import QHBoxLayout, QVBoxLayout, QApplication, QWidget, QStackedWidget
+from PySide6.QtCore import Qt, QSize, QUrl, QPoint
+from PySide6.QtGui import QIcon, QDesktopServices, QColor
+from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QApplication, QWidget, QStackedWidget
 
 from qfluentwidgets import (NavigationItemPosition, MessageBox, MSFluentTitleBar, MSFluentWindow,
                             TabBar, SubtitleLabel, setFont, TabCloseButtonDisplayMode, IconWidget,
                             TransparentDropDownToolButton, TransparentToolButton, setTheme, Theme, isDarkTheme)
 from qfluentwidgets import FluentIcon as FIF
-from qframelesswindow import AcrylicWindow
 
 
 class Widget(QWidget):
@@ -150,7 +148,7 @@ class Window(MSFluentWindow):
         self.setWindowIcon(QIcon(':/qfluentwidgets/images/logo.png'))
         self.setWindowTitle('PyQt-Fluent-Widgets')
 
-        desktop = QApplication.desktop().availableGeometry()
+        desktop = QApplication.screens()[0].availableGeometry()
         w, h = desktop.width(), desktop.height()
         self.move(w//2 - self.width()//2, h//2 - self.height()//2)
 
@@ -182,14 +180,9 @@ class Window(MSFluentWindow):
 
 
 if __name__ == '__main__':
-    QApplication.setHighDpiScaleFactorRoundingPolicy(
-        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
-
     # setTheme(Theme.DARK)
 
     app = QApplication(sys.argv)
     w = Window()
     w.show()
-    app.exec_()
+    app.exec()

@@ -811,7 +811,7 @@
                <item>
                 <widget class="BodyLabel" name="taskLabel1">
                  <property name="text">
-                  <string>全军出🐔，誓死保卫鸽鸽🏀！！</string>
+                  <string>全军出鸡，誓死保卫鸽鸽！！</string>
                  </property>
                  <property name="pixelFontSize" stdset="0">
                   <number>14</number>

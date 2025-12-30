@@ -1,5 +1,5 @@
 # coding:utf-8
-from PyQt5.QtGui import QColor
+from PySide6.QtGui import QColor
 from qfluentwidgets.components.widgets.acrylic_label import AcrylicLabel
 from qfluentwidgets import FluentIcon as FIF
 
@@ -30,7 +30,7 @@ class MaterialInterface(GalleryInterface):
         self.addExampleCard(
             self.tr('Acrylic label'),
             self.label,
-            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/material/acrylic_label/demo.py',
+            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/material/acrylic_label/demo.py',
             stretch=1
         )
 

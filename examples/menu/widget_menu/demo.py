@@ -1,10 +1,10 @@
 # coding:utf-8
 import sys
-from PyQt5 import QtGui
+from PySide6 import QtGui
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QIcon, QColor
-from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QHBoxLayout
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon, QColor
+from PySide6.QtWidgets import QApplication, QWidget, QLabel, QHBoxLayout
 
 from qfluentwidgets import (RoundMenu, FluentIcon, Action, AvatarWidget, BodyLabel,
                             HyperlinkButton, CaptionLabel, setFont, setTheme, Theme, isDarkTheme)
@@ -72,13 +72,7 @@ class Demo(QWidget):
 
 
 if __name__ == '__main__':
-    # enable dpi scale
-    QApplication.setHighDpiScaleFactorRoundingPolicy(
-        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
-
     app = QApplication(sys.argv)
     w = Demo()
     w.show()
-    app.exec_()
+    app.exec()

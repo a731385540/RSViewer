@@ -2,8 +2,8 @@
 import sys
 
 from uuid import uuid1
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QApplication, QWidget, QHBoxLayout, QStackedWidget, QVBoxLayout
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QWidget, QHBoxLayout, QStackedWidget, QVBoxLayout
 
 from qfluentwidgets import (BreadcrumbBar, setFont, setTheme, Theme, LineEdit, PrimaryToolButton,
                             SubtitleLabel, FluentIcon)
@@ -66,12 +66,7 @@ class Demo(QWidget):
 
 
 if __name__ == '__main__':
-    # enable dpi scale
-    QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
-
     app = QApplication(sys.argv)
     w = Demo()
     w.show()
-    app.exec_()
+    app.exec()

@@ -1,10 +1,8 @@
 # coding: utf-8
 import sys
-#from pathlib import Path
-#sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QApplication, QWidget, QHBoxLayout, QStackedWidget, QFrame
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QWidget, QHBoxLayout, QStackedWidget, QFrame
 from qfluentwidgets import NavigationInterface, NavigationItemPosition, FluentIcon as FIF
 
 
@@ -76,11 +74,7 @@ class Window(QWidget):
 
 
 if __name__ == '__main__':
-    QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
-
     app = QApplication(sys.argv)
     w = Window()
     w.show()
-    app.exec_()
+    app.exec()

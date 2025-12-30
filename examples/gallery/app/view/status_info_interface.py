@@ -1,7 +1,7 @@
 # coding:utf-8
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QPixmap, QColor
-from PyQt5.QtWidgets import QWidget, QHBoxLayout, QLabel, QVBoxLayout
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QPixmap, QColor
+from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel, QVBoxLayout
 from qfluentwidgets import (StateToolTip, InfoBadge, ToolTipFilter, PushButton, PixmapLabel,
                             InfoBar, InfoBarIcon, FluentIcon, InfoBarPosition, ProgressBar,
                             IndeterminateProgressBar, SpinBox, ProgressRing, IndeterminateProgressRing)
@@ -29,7 +29,7 @@ class StatusInfoInterface(GalleryInterface):
         self.addExampleCard(
             self.tr('State tool tip'),
             button,
-            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/status_info/state_tool_tip/demo.py'
+            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/status_info/state_tool_tip/demo.py'
         )
 
         # tool tip
@@ -39,7 +39,7 @@ class StatusInfoInterface(GalleryInterface):
         self.addExampleCard(
             self.tr('A button with a simple ToolTip'),
             button,
-            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/status_info/tool_tip/demo.py'
+            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/status_info/tool_tip/demo.py'
         )
 
         label = PixmapLabel()
@@ -52,7 +52,7 @@ class StatusInfoInterface(GalleryInterface):
         self.addExampleCard(
             self.tr('A label with a ToolTip'),
             label,
-            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/status_info/tool_tip/demo.py'
+            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/status_info/tool_tip/demo.py'
         )
 
         # info badge
@@ -69,7 +69,7 @@ class StatusInfoInterface(GalleryInterface):
         self.addExampleCard(
             self.tr('InfoBadge in different styles'),
             w,
-            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/status_info/info_bar/demo.py'
+            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/status_info/info_bar/demo.py'
         )
 
         # short info bar
@@ -86,7 +86,7 @@ class StatusInfoInterface(GalleryInterface):
         self.addExampleCard(
             self.tr('A closable InfoBar'),
             infoBar,
-            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/status_info/info_bar/demo.py'
+            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/status_info/info_bar/demo.py'
         )
 
         # long info bar
@@ -104,7 +104,7 @@ class StatusInfoInterface(GalleryInterface):
         self.addExampleCard(
             self.tr('A closable InfoBar with long message'),
             infoBar,
-            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/status_info/info_bar/demo.py',
+            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/status_info/info_bar/demo.py',
         )
 
         # add custom widget to info bar
@@ -123,7 +123,7 @@ class StatusInfoInterface(GalleryInterface):
         self.addExampleCard(
             self.tr('An InfoBar with custom icon, background color and widget.'),
             infoBar,
-            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/status_info/info_bar/demo.py',
+            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/status_info/info_bar/demo.py',
         )
 
         # different type info bar
@@ -154,7 +154,7 @@ class StatusInfoInterface(GalleryInterface):
         self.addExampleCard(
             self.tr('InfoBar with different pop-up locations'),
             w,
-            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/status_info/info_bar/demo.py',
+            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/status_info/info_bar/demo.py',
         )
 
         # indeterminate progress bar
@@ -163,7 +163,7 @@ class StatusInfoInterface(GalleryInterface):
         card = self.addExampleCard(
             self.tr('An indeterminate progress bar'),
             bar,
-            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/status_info/progress_bar/demo.py',
+            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/status_info/progress_bar/demo.py',
         )
         card.topLayout.setContentsMargins(12, 24, 12, 24)
 
@@ -173,7 +173,7 @@ class StatusInfoInterface(GalleryInterface):
         self.addExampleCard(
             self.tr('An determinate progress bar'),
             ProgressWidget(bar, self),
-            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/status_info/progress_bar/demo.py',
+            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/status_info/progress_bar/demo.py',
         )
 
         # Indeterminate progress ring
@@ -182,7 +182,7 @@ class StatusInfoInterface(GalleryInterface):
         self.addExampleCard(
             self.tr('An indeterminate progress ring'),
             ring,
-            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/status_info/progress_ring/demo.py',
+            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/status_info/progress_ring/demo.py',
         )
 
         # progress ring
@@ -192,7 +192,7 @@ class StatusInfoInterface(GalleryInterface):
         self.addExampleCard(
             self.tr('An determinate progress ring'),
             ProgressWidget(ring, self),
-            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/status_info/progress_ring/demo.py',
+            'https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/status_info/progress_ring/demo.py',
         )
 
     def onStateButtonClicked(self):

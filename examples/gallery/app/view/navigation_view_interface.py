@@ -1,6 +1,6 @@
 # coding:utf-8
-from PyQt5.QtCore import Qt, QEasingCurve
-from PyQt5.QtWidgets import QWidget, QStackedWidget, QVBoxLayout, QLabel, QHBoxLayout, QFrame, QSizePolicy
+from PySide6.QtCore import Qt, QEasingCurve
+from PySide6.QtWidgets import QWidget, QStackedWidget, QVBoxLayout, QLabel, QHBoxLayout, QFrame, QSizePolicy
 from qfluentwidgets import (Pivot, qrouter, SegmentedWidget, TabBar, CheckBox, ComboBox,
                             TabCloseButtonDisplayMode, BodyLabel, SpinBox, BreadcrumbBar,
                             SegmentedToggleToolWidget, FluentIcon)
@@ -35,20 +35,20 @@ class NavigationViewInterface(GalleryInterface):
         self.addExampleCard(
             title=self.tr('Breadcrumb bar'),
             widget=breadcrumb,
-            sourcePath='https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/navigation/breadcrumb_bar/demo.py',
+            sourcePath='https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/navigation/breadcrumb_bar/demo.py',
             stretch=1
         )
 
         self.addExampleCard(
             title=self.tr('A basic pivot'),
             widget=PivotInterface(self),
-            sourcePath='https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/navigation/pivot/demo.py'
+            sourcePath='https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/navigation/pivot/demo.py'
         )
 
         self.addExampleCard(
             title=self.tr('A segmented control'),
             widget=SegmentedInterface(self),
-            sourcePath='https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/navigation/segmented_widget/demo.py'
+            sourcePath='https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/navigation/segmented_widget/demo.py'
         )
 
         self.addExampleCard(
@@ -60,7 +60,7 @@ class NavigationViewInterface(GalleryInterface):
         card = self.addExampleCard(
             title=self.tr('A tab bar'),
             widget=TabInterface(self),
-            sourcePath='https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/master/examples/navigation/tab_view/demo.py',
+            sourcePath='https://github.com/zhiyiYo/PyQt-Fluent-Widgets/blob/PySide6/examples/navigation/tab_view/demo.py',
             stretch=1
         )
         card.topLayout.setContentsMargins(12, 0, 0, 0)

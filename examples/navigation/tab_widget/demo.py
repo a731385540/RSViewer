@@ -1,9 +1,9 @@
 # coding:utf-8
 import sys
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QIcon
-from PyQt5.QtWidgets import QVBoxLayout, QApplication, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import QVBoxLayout, QApplication, QWidget
 
 from qfluentwidgets import TabWidget, SubtitleLabel, setFont, IconWidget
 
@@ -55,10 +55,6 @@ class Window(QWidget):
         self.setWindowIcon(QIcon(':/qfluentwidgets/images/logo.png'))
         self.setWindowTitle('PyQt-Fluent-Widgets')
 
-        desktop = QApplication.desktop().availableGeometry()
-        w, h = desktop.width(), desktop.height()
-        self.move(w//2 - self.width()//2, h//2 - self.height()//2)
-
     def addNewPage(self):
         text = f'硝子酱一级棒卡哇伊×{self.tabCount}'
         self.tabWidget.addTab(
@@ -67,14 +63,9 @@ class Window(QWidget):
 
 
 if __name__ == '__main__':
-    QApplication.setHighDpiScaleFactorRoundingPolicy(
-        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
-
     # setTheme(Theme.DARK)
 
     app = QApplication(sys.argv)
     w = Window()
     w.show()
-    app.exec_()
+    app.exec()

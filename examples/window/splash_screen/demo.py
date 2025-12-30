@@ -1,9 +1,9 @@
 # coding:utf-8
 import sys
 
-from PyQt5.QtCore import Qt, QEventLoop, QTimer, QSize
-from PyQt5.QtGui import QIcon
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtCore import Qt, QEventLoop, QTimer, QSize
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import QApplication
 
 from qfluentwidgets import SplashScreen
 from qframelesswindow import FramelessWindow, StandardTitleBar
@@ -43,12 +43,7 @@ class Demo(FramelessWindow):
 
 
 if __name__ == '__main__':
-    # enable dpi scale
-    QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
-
     app = QApplication(sys.argv)
     w = Demo()
     w.show()
-    app.exec_()
+    app.exec()

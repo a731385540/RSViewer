@@ -6,19 +6,19 @@ from qfluentwidgets import (SettingCardGroup, SwitchSettingCard, FolderListSetti
                             ComboBoxSettingCard, ExpandLayout, Theme, InfoBar, CustomColorSettingCard,
                             setTheme, setThemeColor, isDarkTheme)
 from qfluentwidgets import FluentIcon as FIF
-from PyQt5.QtCore import Qt, pyqtSignal, QUrl, QStandardPaths
-from PyQt5.QtGui import QDesktopServices
-from PyQt5.QtWidgets import QWidget, QLabel, QFontDialog, QFileDialog
+from PySide6.QtCore import Qt, Signal, QUrl, QStandardPaths
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import QWidget, QLabel, QFontDialog, QFileDialog
 
 
 class SettingInterface(ScrollArea):
     """ Setting interface """
 
-    checkUpdateSig = pyqtSignal()
-    musicFoldersChanged = pyqtSignal(list)
-    acrylicEnableChanged = pyqtSignal(bool)
-    downloadFolderChanged = pyqtSignal(str)
-    minimizeToTrayChanged = pyqtSignal(bool)
+    checkUpdateSig = Signal()
+    musicFoldersChanged = Signal(list)
+    acrylicEnableChanged = Signal(bool)
+    downloadFolderChanged = Signal(str)
+    minimizeToTrayChanged = Signal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent=parent)
@@ -281,7 +281,7 @@ class SettingInterface(ScrollArea):
 
     def __onDeskLyricFontCardClicked(self):
         """ desktop lyric font button clicked slot """
-        font, isOk = QFontDialog.getFont(
+        isOk, font = QFontDialog.getFont(
             cfg.desktopLyricFont, self.window(), self.tr("Choose font"))
         if isOk:
             cfg.desktopLyricFont = font

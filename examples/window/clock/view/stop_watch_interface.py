@@ -1,7 +1,7 @@
 # coding:utf-8
-from PyQt5.QtWidgets import QWidget
-from qfluentwidgets import FluentIcon
+from PySide6.QtWidgets import QWidget
 
+from qfluentwidgets import FluentIcon
 from view.Ui_StopWatchInterface import Ui_StopWatchInterface
 
 

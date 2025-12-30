@@ -1,12 +1,9 @@
 # coding:utf-8
 import sys
 
-#from pathlib import Path
-#sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
-
-from PyQt5.QtCore import QDate, Qt, QTime
-from PyQt5.QtWidgets import QApplication
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout
+from PySide6.QtCore import QDate, Qt, QTime
+from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout
 
 from qfluentwidgets import TimePicker, AMTimePicker, DatePicker, ZhDatePicker, setTheme, Theme, PickerColumnFormatter
 
@@ -39,10 +36,6 @@ class Demo(QWidget):
         self.timePicker2 = TimePicker(self)
         self.timePicker3 = TimePicker(self, showSeconds=True)
 
-        # enable reset button
-        # self.datePicker1.setResetEnabled(True)
-        # self.timePicker1.setResetEnabled(True)
-
         # disable scroll button repeat if needed
         # self.datePicker1.setScrollButtonRepeatEnabled(False)
         # self.timePicker1.setScrollButtonRepeatEnabled(False)
@@ -61,6 +54,13 @@ class Demo(QWidget):
         # self.timePicker1.setTime(QTime(13, 15))
         # self.timePicker2.setTime(QTime(13, 15))
 
+        # enable reset button
+        # self.datePicker1.setResetEnabled(True)
+        # self.datePicker2.setResetEnabled(True)
+        # self.timePicker1.setResetEnabled(True)
+        # self.timePicker2.setResetEnabled(True)
+        # self.timePicker3.setResetEnabled(True)
+
         self.resize(500, 500)
         self.vBoxLayout.addWidget(self.datePicker1, 0, Qt.AlignHCenter)
         self.vBoxLayout.addWidget(self.datePicker2, 0, Qt.AlignHCenter)
@@ -70,12 +70,7 @@ class Demo(QWidget):
 
 
 if __name__ == '__main__':
-    QApplication.setHighDpiScaleFactorRoundingPolicy(
-        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
-
     app = QApplication(sys.argv)
     w = Demo()
     w.show()
-    app.exec_()
+    app.exec()

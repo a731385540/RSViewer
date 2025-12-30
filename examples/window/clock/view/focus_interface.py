@@ -1,6 +1,6 @@
 # coding:utf-8
-from PyQt5.QtGui import QColor
-from PyQt5.QtWidgets import QWidget, QGraphicsDropShadowEffect
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import QWidget, QGraphicsDropShadowEffect
 from qfluentwidgets import FluentIcon, setFont, InfoBarIcon
 
 from view.Ui_FocusInterface import Ui_FocusInterface

@@ -1,7 +1,8 @@
 # coding: utf-8
-from PyQt5.QtCore import QUrl, QSize, QTimer
-from PyQt5.QtGui import QIcon, QDesktopServices, QColor
-from PyQt5.QtWidgets import QApplication
+from typing import List
+from PySide6.QtCore import Qt, Signal, QEasingCurve, QUrl, QSize, QTimer
+from PySide6.QtGui import QIcon, QDesktopServices, QColor
+from PySide6.QtWidgets import QApplication, QHBoxLayout, QFrame, QWidget
 
 from qfluentwidgets import (NavigationAvatarWidget, NavigationItemPosition, MessageBox, FluentWindow,
                             SplashScreen, SystemThemeListener, isDarkTheme)
@@ -113,11 +114,11 @@ class MainWindow(FluentWindow):
         self.setMicaEffectEnabled(cfg.get(cfg.micaEnabled))
 
         # create splash screen
-        self. splashScreen = SplashScreen(self.windowIcon(), self)
+        self.splashScreen = SplashScreen(self.windowIcon(), self)
         self.splashScreen.setIconSize(QSize(106, 106))
         self.splashScreen.raise_()
 
-        desktop = QApplication.desktop().availableGeometry()
+        desktop = QApplication.screens()[0].availableGeometry()
         w, h = desktop.width(), desktop.height()
         self.move(w//2 - self.width()//2, h//2 - self.height()//2)
         self.show()

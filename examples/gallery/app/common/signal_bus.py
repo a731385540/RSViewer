@@ -1,13 +1,13 @@
 # coding: utf-8
-from PyQt5.QtCore import QObject, pyqtSignal
+from PySide6.QtCore import QObject, Signal
 
 
 class SignalBus(QObject):
     """ Signal bus """
 
-    switchToSampleCard = pyqtSignal(str, int)
-    micaEnableChanged = pyqtSignal(bool)
-    supportSignal = pyqtSignal()
+    switchToSampleCard = Signal(str, int)
+    micaEnableChanged = Signal(bool)
+    supportSignal = Signal()
 
 
 signalBus = SignalBus()

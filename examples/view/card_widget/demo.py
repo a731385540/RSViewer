@@ -2,9 +2,9 @@
 import sys
 from pathlib import Path
 
-from PyQt5.QtCore import Qt, QPoint, QSize, QUrl, QRect, QPropertyAnimation
-from PyQt5.QtGui import QIcon, QFont, QColor, QPainter
-from PyQt5.QtWidgets import QApplication, QWidget, QHBoxLayout, QVBoxLayout, QGraphicsOpacityEffect
+from PySide6.QtCore import Qt, QPoint, QSize, QUrl, QRect, QPropertyAnimation
+from PySide6.QtGui import QIcon, QFont, QColor, QPainter
+from PySide6.QtWidgets import QApplication, QWidget, QHBoxLayout, QVBoxLayout, QGraphicsOpacityEffect
 
 from qfluentwidgets import (CardWidget, setTheme, Theme, IconWidget, BodyLabel, CaptionLabel, PushButton,
                             TransparentToolButton, FluentIcon, RoundMenu, Action, ElevatedCardWidget,
@@ -502,12 +502,6 @@ class Demo3(MSFluentWindow):
 
 
 if __name__ == '__main__':
-    # enable dpi scale
-    QApplication.setHighDpiScaleFactorRoundingPolicy(
-        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
-
     # setTheme(Theme.DARK)
 
     app = QApplication(sys.argv)
@@ -517,4 +511,4 @@ if __name__ == '__main__':
     w2.show()
     w3 = Demo3()
     w3.show()
-    app.exec_()
+    app.exec()
