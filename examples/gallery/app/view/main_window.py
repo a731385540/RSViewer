@@ -75,7 +75,8 @@ class MainWindow(FluentWindow):
     def initNavigation(self):
         # add navigation items
         t = Translator()
-        self.addSubInterface(self.homeInterface, FIF.HOME, self.tr('Home'))
+
+
         self.addSubInterface(self.iconInterface, Icon.EMOJI_TAB_SYMBOLS, t.icons)
         self.navigationInterface.addSeparator()
 
@@ -93,15 +94,15 @@ class MainWindow(FluentWindow):
         self.addSubInterface(self.viewInterface, Icon.GRID, t.view, pos)
 
         # add custom widget to bottom
-        self.navigationInterface.addItem(
-            routeKey='price',
-            icon=Icon.PRICE,
-            text=t.price,
-            onClick=self.onSupport,
-            selectable=False,
-            tooltip=t.price,
-            position=NavigationItemPosition.BOTTOM
-        )
+        # self.navigationInterface.addItem(
+        #     routeKey='price',
+        #     icon=Icon.PRICE,
+        #     text=t.price,
+        #     onClick=self.onSupport,
+        #     selectable=False,
+        #     tooltip=t.price,
+        #     position=NavigationItemPosition.BOTTOM
+        # )
         self.addSubInterface(
             self.settingInterface, FIF.SETTING, self.tr('Settings'), NavigationItemPosition.BOTTOM)
 
