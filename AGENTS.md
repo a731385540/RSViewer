@@ -12,7 +12,7 @@ RSViewer 是一个仅供个人、非商业使用的 Windows 桌面媒体管理�
 
 ### 当前成熟度
 
-项目处于早期基础设施阶段。目前是可启动的桌面应用壳，不是已经可用的媒体管理器。媒体扫描、数据库、封面库、图片阅读器和视频播放器均尚未实现。
+项目处于早期 MVP 阶段。EhViewer 本地漫画库已经可配置、可分页浏览、搜索、筛选、打开详情并进入单页漫画阅读器；通用媒体扫描、自有完整媒体索引、双页/长图阅读模式、阅读进度和视频播放器仍未实现。
 
 ## 2. 技术栈与运行环境
 
@@ -20,7 +20,7 @@ RSViewer 是一个仅供个人、非商业使用的 Windows 桌面媒体管理�
 - GUI：PySide6，依赖范围见 `requirements.txt`。
 - Fluent UI：PySide6-Fluent-Widgets。
 - 主要平台：Windows 10/11；Mica 效果仅在符合条件的 Windows 11 环境启用。
-- 当前持久化：QFluentWidgets 的 JSON 配置。
+- 当前持久化：QFluentWidgets 的 JSON 配置，以及独立 SQLite 中的 RSViewer 用户复数标签。
 - 规划持久化：SQLite 媒体索引与文件系统缩略图缓存。
 - 规划媒体能力：Qt Multimedia；在确认格式覆盖不足前不要过早引入 VLC/mpv 等额外运行时。
 
@@ -33,7 +33,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-应用必须从仓库根目录启动，因为当前配置路径 `app/config/config.json` 是相对当前工作目录解析的。这是已知技术债。
+配置文件通过项目根目录解析为稳定绝对路径，因此从其他当前工作目录启动也能读取同一份开发配置。打包前仍应迁移到 `QStandardPaths.AppConfigLocation`。
 
 ## 3. 当前目录结构
 
@@ -46,15 +46,21 @@ RSViewer/
 ├─ main.py                           # 唯一应用入口
 └─ app/
    ├─ common/
-   │  ├─ config.py                   # 配置模型、验证器、JSON 加载
+   │  ├─ config.py                   # 配置模型、稳定配置路径、JSON 加载
    │  └─ style_sheet.py              # 自定义 QSS 路径与主题注册
+   ├─ domain/manga.py                # 漫画领域模型
+   ├─ repositories/user_library_repository.py # RSViewer 独立用户标签库
+   ├─ sources/ehviewer_source.py     # EhViewer DB 只读适配与惰性页面加载
    ├─ resource/qss/
    │  ├─ dark/setting_interface.qss  # 设置页深色样式
    │  └─ light/setting_interface.qss # 设置页浅色样式
    └─ view/
       ├─ main_window.py              # Fluent 主窗口、导航、主题监听
-      ├─ media_interface.py          # 漫画/视频路由的轻量占位页面
-      └─ setting_interface.py        # 设置页和配置绑定
+      ├─ local_manga_interface.py    # 本地漫画分页、搜索、标签与封面卡片
+      ├─ manga_detail_interface.py   # 单本详情与按需页面预览
+      ├─ manga_reader_interface.py   # 单页阅读、缩放、预读和全屏控制
+      ├─ media_interface.py          # 未实现媒体路由的轻量占位页面
+      └─ setting_interface.py        # 设置页、数据源路径和配置绑定
 ```
 
 `app/config/config.json` 是运行时生成的用户配置，已被 `.gitignore` 忽略，不应提交。`.idea/`、`__pycache__/`、构建目录同样不应提交。
@@ -71,13 +77,15 @@ RSViewer/
 
 定义全局 `cfg`。当前配置项：
 
-- `libraryFolders`：用户选择的本地、映射盘或 NAS/UNC 媒体目录。
+- `ehViewerDatabase`：只读外部 EhViewer SQLite 文件。
+- `ehViewerMangaRoot`：与外部库对应的漫画下载根目录，支持本地、映射盘或 UNC 路径。
+- `libraryFolders`：其他图片/视频使用的本地、映射盘或 NAS/UNC 媒体目录。
 - `micaEnabled`：窗口 Mica 效果。
 - `dpiScale`：Qt 缩放比例，需要重启。
 - `language`：语言选择，需要重启；目前业务界面尚未真正国际化。
 - `themeMode` 和 `themeColor`：继承自 QFluentWidgets 的 `QConfig`。
 
-配置通过 `qconfig.load("app/config/config.json", cfg)` 加载和保存。业务数据库不能塞入此 JSON；媒体条目、进度、收藏和扫描状态以后应进入 SQLite。
+配置通过基于 `config.py` 所在项目根目录解析的绝对路径加载 `app/config/config.json`。业务数据库不能塞入此 JSON；媒体条目、进度、收藏和扫描状态以后应进入 SQLite。
 
 ### `app/common/style_sheet.py`
 
@@ -92,13 +100,17 @@ RSViewer/
 
 ### `app/view/main_window.py`
 
-主窗口基于 `FluentWindow`，负责窗口大小、图标、Splash、侧边导航、系统主题监听和 Mica 刷新。当前主导航包含可展开的“漫画”、独立“视频”和底部“设置”。“漫画”子路由包括本地资源、收藏、在线资源和历史记录；在线资源只是预留入口。
+主窗口基于 `FluentWindow`，负责窗口大小、图标、Splash、侧边导航、系统主题监听和 Mica 刷新。当前保留独立的虚拟“漫画”父路由，其下包含“本地资源”、收藏、在线资源和历史记录；父路由与启动默认页都打开 `LocalMangaInterface`，以后可替换父路由首页而不删除“本地资源”子项。另有独立“视频”和底部“设置”。数据源配置变化时由主窗口重建 Source 并通知列表与详情页。
 
 `SystemThemeListener` 是持有资源的后台监听器，关闭窗口时必须 `terminate()` 和 `deleteLater()`。
 
 ### `app/view/media_interface.py`
 
-当前为漫画和视频路由提供统一的轻量占位页面。它只负责标题与说明，不包含扫描、数据库或媒体解析逻辑。各页面通过稳定且唯一的 `objectName` 作为 Fluent 导航 route key；修改名称可能影响路由状态，非必要不要变更。
+仅为收藏、历史、在线资源和视频等尚未实现路由提供轻量占位页。本地漫画已经由 `LocalMangaInterface` 实现，应用默认进入该页，不再保留无内容的漫画展示首页。各页面通过稳定且唯一的 `objectName` 作为 Fluent 导航 route key。
+
+### `app/view/manga_reader_interface.py`
+
+漫画阅读器作为主窗口堆叠页运行，普通状态为窗口内阅读，按 `F11` 或工具栏按钮后由主窗口隐藏标题栏与导航并切换全屏，`Esc` 恢复窗口。当前实现单页模式、上一页/下一页、页码跳转、适应窗口、原始大小、缩放和拖动；图片在 `QThreadPool` 后台解码，优先当前页并预读后两页和前一页，缓存最多五页。离开或关闭时必须取消仍在运行的解码任务。
 
 ### `app/view/setting_interface.py`
 
@@ -112,7 +124,7 @@ OptionsSettingCard
   -> QFluentWidgets 样式管理器刷新所有已注册 QSS
 ```
 
-媒体目录目前只被写入配置，还没有扫描器消费它。
+设置页还提供 EhViewer 数据库文件与漫画根目录选择器，变更后立即重建只读数据源并后台刷新本地漫画；快捷键使用点击后捕获一次按键的交互，组合键或单键按下即保存，`Esc` 取消。通用 `libraryFolders` 仍未被扫描器消费。
 
 ### 外部 EhViewer 数据源约束
 
@@ -125,7 +137,7 @@ OptionsSettingCard
 - 不允许在 `eh.db` 中新增 RSViewer 表，也不允许对它执行 RSViewer migration。
 - RSViewer 自有的媒体索引、路径映射、阅读进度、视频数据和设置扩展必须写入另一份独立 SQLite 文件。
 
-`testData/manga/` 是对应的本地漫画样例。典型结构是一个下载目录包含 `.ehviewer` sidecar 和按页码命名的 WebP 图片。当前样例页码范围为 1–39，但第 19 页缺失，说明下载可能不完整；扫描和阅读逻辑必须自然排序现有页面并容忍缺页，不能假设编号连续。
+`ehViewerMangaRoot` 指向对应下载根目录。典型结构是一个下载目录包含 `.ehviewer` sidecar、`.thumb` 缩略图和按页码命名的图片。列表只枚举一次根目录；当前页和后续三页在后台优先读取 `.thumb`，缩略图缺失或损坏时只对相应漫画枚举并使用自然排序后的第一页；详情页才枚举单本的全部页面。扫描和阅读逻辑必须自然排序现有页面并容忍缺页，不能假设编号连续。
 
 ## 5. 当前系统数据流
 
@@ -154,18 +166,20 @@ OptionsSettingCard
 
 ### 媒体流
 
-尚未实现。目标数据流应保持以下边界：
+当前 EhViewer 漫画流已经实现以下边界：
 
 ```text
-本地目录/映射盘/UNC 路径
-  -> Source 统一文件访问
-  -> Worker 后台扫描与元数据提取
-  -> Repository 写入 SQLite
-  -> Service 查询、排序、搜索和生成缩略图
-  -> View 展示封面库
-  -> Reader/Player 打开媒体
-  -> Repository 保存阅读或播放进度
+配置中的 eh.db + 本地/映射盘/UNC 漫画根目录
+  -> Worker 后台执行 EhViewerDataSource
+  -> SQLite 只读元数据查询 + 根目录单次枚举
+  -> LocalMangaInterface 分页、搜索、筛选和封面展示
+  -> 后台预读当前页及后续三页封面；无有效缩略图时回退第一页
+  -> 打开详情时才枚举该漫画全部页面并后台生成预览
+  -> 开始阅读后后台解码当前页并预读相邻页，可在窗口和全屏之间切换
+  -> UserLibraryRepository 在独立 SQLite 保存复数标签
 ```
+
+列表阶段禁止递归或逐本枚举页面；21,389 部漫画的真实库验证为 0 个页面路径常驻。通用媒体流仍按 `Source -> Worker -> Repository -> Service -> View` 目标继续实现。
 
 网络和磁盘 I/O 不得阻塞 Qt GUI 线程。
 
@@ -199,26 +213,33 @@ NAS 第一阶段按普通文件系统路径处理，包括已挂载盘符和可�
 - 窗口居中、Splash、Fluent 图标和 Windows 系统主题监听。
 - 浅色、深色、跟随系统和自定义主题色配置。
 - 设置页 light/dark QSS 已接入 Fluent 样式管理器；修复过主题切换时内容区变白、标题颜色错误和明显默认边框的问题。
-- 已加入“漫画”导航树（本地资源、收藏、在线资源预留、历史记录）、独立“视频”入口及对应占位页。
-- 本地/映射盘/NAS 路径的媒体目录配置入口。
+- 应用默认直接进入本地漫画库；保留虚拟“漫画”父路由和独立“本地资源”子项，不再创建空展示首页。
+- EhViewer 外部 DB 与漫画根目录可在设置中选择，变更后自动刷新；外部 DB 全程只读。
+- 本地漫画支持封面/标题布局、分页、搜索、主标签/复数标签筛选、详情与页面预览；当前页会预读后续三页封面，缩略图不可用时回退漫画第一页。
+- 漫画阅读器支持窗口内与全屏模式、键盘/按钮翻页、页码跳转、适应窗口、原始尺寸、缩放、拖动和相邻页后台预读。
+- 快捷键设置采用点击捕获交互，支持单键和 `Ctrl+S` 等组合键即时确认，`Esc` 取消。
+- 大型库采用列表元数据与详情页面两级惰性加载；21,389 部真实漫画列表读取约 0.42 秒，完整首屏约 1.33 秒。
+- RSViewer 独立 SQLite 保存用户复数标签，连接均显式提交、回滚和关闭。
+- 本地/映射盘/NAS 路径的其他媒体目录配置入口。
 - DPI、语言和 Mica 配置模型。
 - 模板 Gallery、演示资源、音乐配置和无用生成资源已清理。
 - `README.md`、`requirements.txt` 和 `.gitignore` 已建立。
-- 已做过 `compileall`、`git diff --check` 以及无界面窗口/双主题渲染验证。
+- 已做过 `compileall`、`git diff --check`、自动化数据源测试、真实大型库计时，以及默认页/详情/快速退出的 Qt offscreen 冒烟验证。
 
 ## 8. 正在开发的内容
 
-漫画和视频导航已经建立，但所有媒体页面仍是占位页。正在推进的是 MVP 媒体库设计，下一项应从“EhViewer 只读数据源适配器 + RSViewer 自有媒体数据模型/SQLite schema + 本地/UNC 扫描服务”开始，而不是继续堆叠界面。
+EhViewer 本地漫画浏览和基础阅读链路已经可用，下一阶段应补齐 RSViewer 自有媒体 schema/migration、通用本地/UNC 扫描服务，以及双页/长图模式和阅读进度。收藏、历史、在线资源和视频仍是占位页。
 
-工作区提示：模板清理、设置页重构和主题修复目前仍是未提交改动。`git status` 会显示约 353 个有意删除的跟踪文件以及新的文档/QSS；不要误判为意外丢失后恢复它们。
+工作区当前包含本次惰性加载、数据源配置、默认导航和测试改动；`testData/`、`app/config/config.json` 与 `app/data/` 是忽略的本机数据，不得提交或删除。
 
 ## 9. 已知问题与技术债
 
-- 配置路径依赖当前工作目录；从其他目录执行 `python path/to/main.py` 可能读写错误位置。应迁移到 `QStandardPaths.AppConfigLocation` 或基于项目/可执行文件的稳定路径。
-- `libraryFolders` 只保存目录列表，尚无可达性检测、扫描、断线状态或重连机制；UNC/NAS 实际场景尚未验证。
-- 没有媒体数据库、迁移机制、缩略图缓存及缓存失效策略。
-- 尚未实现 EhViewer SQLite 只读适配器，当前只是分析并记录了 schema 兼容约束。
-- 没有自动化测试，仅有人工/脚本化冒烟验证。
+- 开发配置路径已不依赖当前工作目录，但打包前仍应迁移到 `QStandardPaths.AppConfigLocation`；RSViewer 自有数据库和缓存也应迁移到应用数据目录。
+- `libraryFolders` 只保存其他媒体目录列表，尚无通用扫描、可达性检测、断线状态或重连机制；UNC/NAS 的大规模真实场景仍需专项验证。
+- 当前 RSViewer SQLite 只保存复数标签，尚无完整媒体 schema、版本化 migration、缩略图缓存及缓存失效策略。
+- 为保证大型库首屏速度，漫画卡片在列表阶段不显示精确页数；页数在打开单本详情并完成按需枚举后可用。
+- 阅读器当前只有单页模式，尚未保存阅读进度，也没有双页、长图连续滚动和磁盘级解码缓存。
+- 数据源已有小型自动化测试，但空库、数据库损坏、UNC 断线、取消中的慢速 NAS 和超长路径仍需覆盖。
 - 语言枚举和 Fluent 翻译器已存在，但 RSViewer 自身的中文文案是硬编码，切换英语不会完整翻译。
 - 依赖只声明范围，没有锁定可复现版本；本机验证版本是 PySide6 6.10.1 和 PySide6-Fluent-Widgets 1.10.5。
 - 尚无打包和发布流程。
@@ -228,16 +249,15 @@ NAS 第一阶段按普通文件系统路径处理，包括已挂载盘符和可�
 
 按优先级推进：
 
-1. 稳定运行时目录：配置、RSViewer 自有 SQLite 和缓存放到明确的应用数据目录。
-2. 实现 EhViewer `eh.db` 只读数据源适配器，保持既有 schema 完全不变。
-3. 定义 RSViewer 自有媒体领域模型和独立 SQLite schema，并加入可重复执行的迁移机制。
-4. 实现本地目录、映射盘和 UNC 路径扫描；扫描必须后台执行、可取消、可报告进度和错误。
-5. 提取图片/视频基础元数据，建立磁盘缩略图缓存。
-6. 将漫画本地资源、收藏、历史记录占位页接入查询服务和封面网格。
-7. 实现图片/漫画阅读器：自然排序、单页/双页/长图、缩放、翻页和进度。
-8. 实现 Qt Multimedia 视频播放器和播放进度。
-9. 增加收藏、最近浏览、标签，以及针对数据层和扫描器的自动化测试。
-10. 最后再完善在线资源接口、打包、更新和发布流程。
+1. 将配置、RSViewer 自有 SQLite 和缓存从开发目录迁移到 `QStandardPaths` 应用数据目录，并设计兼容迁移。
+2. 定义 RSViewer 完整媒体领域模型和独立 SQLite schema，加入可重复执行的版本化 migration。
+3. 实现本地目录、映射盘和 UNC 通用扫描；必须后台执行、可取消、可报告进度和错误。
+4. 提取图片/视频基础元数据，建立磁盘缩略图缓存。
+5. 在现有单页阅读器上补充双页、长图连续滚动和阅读进度保存。
+6. 将收藏与历史占位页接入查询服务和封面网格。
+7. 实现 Qt Multimedia 视频播放器和播放进度。
+8. 扩充自动化测试，覆盖损坏 DB、空目录、目录不可达、UNC 断线、中文/特殊字符、超长路径和大目录取消。
+9. 最后再完善在线资源接口、打包、更新和发布流程。
 
 ## 11. 开发规范
 

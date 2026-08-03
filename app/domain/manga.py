@@ -22,6 +22,11 @@ class MangaItem:
     page_count: int
 
     @property
+    def cover_image_path(self) -> Path:
+        """列表优先使用 EhViewer 的小缩略图，避免解码原始大图。"""
+        return self.thumbnail_path or self.cover_path
+
+    @property
     def display_title(self) -> str:
         return self.original_title or self.english_title or self.folder.name
 

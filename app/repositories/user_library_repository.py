@@ -1,5 +1,6 @@
 import sqlite3
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
@@ -55,21 +56,20 @@ class UserLibraryRepository:
         self.initialize()
         if not gids:
             return {}
-        placeholders = ",".join("?" for _ in gids)
+        requested_gids = set(gids)
         result: Dict[int, List[str]] = {}
         with self._connect() as connection:
             rows = connection.execute(
-                f"""
+                """
                 SELECT assignments.gid, labels.name
                 FROM manga_multi_labels AS assignments
                 JOIN multi_labels AS labels ON labels.id = assignments.label_id
-                WHERE assignments.gid IN ({placeholders})
                 ORDER BY labels.name COLLATE NOCASE
-                """,
-                tuple(gids),
+                """
             )
             for gid, name in rows:
-                result.setdefault(int(gid), []).append(str(name))
+                if gid in requested_gids:
+                    result.setdefault(int(gid), []).append(str(name))
         return {gid: tuple(names) for gid, names in result.items()}
 
     def create_label(self, name: str) -> int:
@@ -104,7 +104,15 @@ class UserLibraryRepository:
                 (gid, label_id),
             )
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self):
         connection = sqlite3.connect(str(self.database_path))
         connection.execute("PRAGMA foreign_keys = ON")
-        return connection
+        try:
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()

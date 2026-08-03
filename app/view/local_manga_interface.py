@@ -1,14 +1,17 @@
 import math
+from collections import OrderedDict
 from dataclasses import replace
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
-from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
+from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import (
     QAction,
     QBrush,
     QColor,
     QFontMetrics,
+    QImage,
+    QImageReader,
     QLinearGradient,
     QPainter,
     QPainterPath,
@@ -100,10 +103,27 @@ class FadeTextLabel(QLabel):
 class CoverLabel(QWidget):
     """按封面比例裁切图片并绘制圆角。"""
 
-    def __init__(self, image_path: Path, parent=None):
+    def __init__(
+        self,
+        image_path: Path,
+        image=None,
+        defer_load=False,
+        parent=None,
+    ):
         super().__init__(parent)
-        self._pixmap = QPixmap(str(image_path))
+        if image is not None and not image.isNull():
+            self._pixmap = QPixmap.fromImage(image)
+        elif defer_load:
+            self._pixmap = QPixmap()
+        else:
+            self._pixmap = QPixmap(str(image_path))
+        self._loading = defer_load and image is None
         self.setMinimumSize(72, 96)
+
+    def setImage(self, image):
+        self._loading = False
+        self._pixmap = QPixmap.fromImage(image) if not image.isNull() else QPixmap()
+        self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -118,7 +138,8 @@ class CoverLabel(QWidget):
             placeholder = self.palette().color(QPalette.AlternateBase)
             painter.fillRect(self.rect(), placeholder)
             painter.setPen(self.palette().color(QPalette.PlaceholderText))
-            painter.drawText(self.rect(), Qt.AlignCenter, self.tr("无封面"))
+            text = self.tr("加载中…") if self._loading else self.tr("无封面")
+            painter.drawText(self.rect(), Qt.AlignCenter, text)
             return
 
         scaled = self._pixmap.scaled(
@@ -136,6 +157,12 @@ def visible_tags(item: MangaItem) -> str:
     return " · ".join(plain_tags[:4])
 
 
+def manga_metadata_text(item: MangaItem, translate) -> str:
+    if item.page_count:
+        return translate("{} · {} 页").format(item.category_name, item.page_count)
+    return item.category_name
+
+
 class MangaGridCard(CardWidget):
     """大封面漫画卡片。"""
 
@@ -144,6 +171,7 @@ class MangaGridCard(CardWidget):
         item: MangaItem,
         open_callback=None,
         label_menu_callback=None,
+        cover_image=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -151,7 +179,12 @@ class MangaGridCard(CardWidget):
         self.labelMenuCallback = label_menu_callback
         if open_callback is not None:
             self.clicked.connect(lambda: open_callback(self.item))
-        self.coverLabel = CoverLabel(item.cover_path, self)
+        self.coverLabel = CoverLabel(
+            item.cover_image_path,
+            image=cover_image,
+            defer_load=True,
+            parent=self,
+        )
         self.titleLabel = FadeTextLabel(item.display_title, parent=self)
         self.englishTitleLabel = FadeTextLabel(
             item.secondary_title,
@@ -159,7 +192,7 @@ class MangaGridCard(CardWidget):
             parent=self,
         )
         self.metaLabel = CaptionLabel(
-            self.tr("{} · {} 页").format(item.category_name, item.page_count),
+            manga_metadata_text(item, self.tr),
             self,
         )
 
@@ -195,6 +228,7 @@ class MangaListCard(CardWidget):
         item: MangaItem,
         open_callback=None,
         label_menu_callback=None,
+        cover_image=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -205,7 +239,12 @@ class MangaListCard(CardWidget):
         self.setFixedHeight(116)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        self.coverLabel = CoverLabel(item.cover_path, self)
+        self.coverLabel = CoverLabel(
+            item.cover_image_path,
+            image=cover_image,
+            defer_load=True,
+            parent=self,
+        )
         self.coverLabel.setFixedSize(72, 96)
         self.titleLabel = FadeTextLabel(item.display_title, parent=self)
         self.englishTitleLabel = FadeTextLabel(
@@ -214,7 +253,7 @@ class MangaListCard(CardWidget):
             parent=self,
         )
         self.metaLabel = CaptionLabel(
-            self.tr("{} · {} 页").format(item.category_name, item.page_count),
+            manga_metadata_text(item, self.tr),
             self,
         )
         self.tagsLabel = FadeTextLabel(visible_tags(item), muted=True, parent=self)
@@ -242,6 +281,59 @@ class MangaListCard(CardWidget):
         super().contextMenuEvent(event)
 
 
+class CoverPreloadSignals(QObject):
+    imageReady = Signal(int, object)
+    finished = Signal()
+
+
+class CoverPreloadWorker(QRunnable):
+    """后台预读当前页和后续页封面，并为缺失缩略图的漫画寻找第一页。"""
+
+    def __init__(self, source: EhViewerDataSource, items):
+        super().__init__()
+        self.source = source
+        self.items = tuple(items)
+        self.cancelled = False
+        self.signals = CoverPreloadSignals()
+
+    def run(self):
+        for item in self.items:
+            if self.cancelled:
+                return
+            image = QImage()
+            try:
+                cover_path = self.source.find_cover_path(item)
+                image = self._readImage(cover_path)
+                if image.isNull():
+                    first_page = self.source.find_first_page_path(item)
+                    if first_page != cover_path:
+                        image = self._readImage(first_page)
+            except (OSError, RuntimeError):
+                image = QImage()
+            if self.cancelled:
+                return
+            try:
+                self.signals.imageReady.emit(item.gid, image)
+            except RuntimeError:
+                return
+        try:
+            self.signals.finished.emit()
+        except RuntimeError:
+            pass
+
+    @staticmethod
+    def _readImage(path):
+        if path is None:
+            return QImage()
+        reader = QImageReader(str(path))
+        reader.setAutoTransform(True)
+        source_size = reader.size()
+        if source_size.isValid():
+            source_size.scale(QSize(180, 245), Qt.KeepAspectRatio)
+            reader.setScaledSize(source_size)
+        return reader.read()
+
+
 class MangaLoadSignals(QObject):
     loaded = Signal(object)
     failed = Signal(str)
@@ -257,6 +349,7 @@ class MangaLoadWorker(QRunnable):
         self.source = source
         self.user_repository = user_repository
         self.signals = MangaLoadSignals()
+        self.cancelled = False
 
     def run(self):
         try:
@@ -268,15 +361,23 @@ class MangaLoadWorker(QRunnable):
                 replace(item, multiple_labels=assignments.get(item.gid, ()))
                 for item in items
             ]
-            self.signals.loaded.emit(
-                (
-                    items,
-                    self.source.list_primary_labels(),
-                    self.user_repository.list_labels(),
-                )
-            )
+            if not self.cancelled:
+                try:
+                    self.signals.loaded.emit(
+                        (
+                            items,
+                            self.source.list_primary_labels(),
+                            self.user_repository.list_labels(),
+                        )
+                    )
+                except RuntimeError:
+                    pass
         except Exception as error:
-            self.signals.failed.emit(str(error))
+            if not self.cancelled:
+                try:
+                    self.signals.failed.emit(str(error))
+                except RuntimeError:
+                    pass
 
 
 class LocalMangaInterface(QWidget):
@@ -307,6 +408,8 @@ class LocalMangaInterface(QWidget):
         self._page_size = cfg.get(cfg.mangaPageSize)
         self._last_columns = 0
         self._load_worker = None
+        self._cover_worker = None
+        self._cover_cache = OrderedDict()
 
         self.titleLabel = TitleLabel(self.tr("本地资源"), self)
         self.searchEdit = SearchLineEdit(self)
@@ -476,7 +579,24 @@ class LocalMangaInterface(QWidget):
 
         self.reload()
 
+    def setSource(self, source: EhViewerDataSource):
+        self.source = source
+        self.reload()
+
+    def cancelLoad(self):
+        if self._load_worker is not None:
+            self._load_worker.cancelled = True
+            self._load_worker = None
+        self._cancelCoverPreload()
+
+    def _cancelCoverPreload(self):
+        if self._cover_worker is not None:
+            self._cover_worker.cancelled = True
+            self._cover_worker = None
+
     def reload(self):
+        self.cancelLoad()
+        self._cover_cache.clear()
         self.resultLabel.setText(self.tr("正在读取本地漫画…"))
         worker = MangaLoadWorker(self.source, self.userRepository)
         worker.signals.loaded.connect(self._onLoaded)
@@ -742,6 +862,7 @@ class LocalMangaInterface(QWidget):
         self._empty_label = None
 
         if not self._filtered_items:
+            self._cancelCoverPreload()
             message = self.tr("没有找到符合条件的本地漫画")
             if not self._all_items and self._load_worker is None:
                 message = self.tr("当前数据源中没有可用的本地漫画")
@@ -757,11 +878,49 @@ class LocalMangaInterface(QWidget):
                 item,
                 self.mangaActivated.emit,
                 self._showMultipleLabelMenu,
+                self._cover_cache.get(item.gid),
                 self.scrollWidget,
             )
             for item in page_items
         ]
         self._relayoutCards()
+        self._preloadCovers()
+
+    def _preloadCovers(self):
+        self._cancelCoverPreload()
+        start = (self._page - 1) * self._page_size
+        end = min(len(self._filtered_items), start + self._page_size * 4)
+        items = [
+            item
+            for item in self._filtered_items[start:end]
+            if item.gid not in self._cover_cache
+        ]
+        if not items:
+            return
+        worker = CoverPreloadWorker(self.source, items)
+        worker.signals.imageReady.connect(
+            lambda gid, image: self._onCoverReady(worker, gid, image)
+        )
+        worker.signals.finished.connect(lambda: self._finishCoverPreload(worker))
+        self._cover_worker = worker
+        QThreadPool.globalInstance().start(worker)
+
+    def _onCoverReady(self, worker, gid: int, image):
+        if self._cover_worker is not worker:
+            return
+        self._cover_cache[gid] = image
+        self._cover_cache.move_to_end(gid)
+        cache_limit = max(160, self._page_size * 4)
+        while len(self._cover_cache) > cache_limit:
+            self._cover_cache.popitem(last=False)
+        for card in self._cards:
+            if card.item.gid == gid:
+                card.coverLabel.setImage(image)
+                break
+
+    def _finishCoverPreload(self, worker):
+        if self._cover_worker is worker:
+            self._cover_worker = None
 
     def _clearContentLayout(self):
         while self.contentLayout.count():

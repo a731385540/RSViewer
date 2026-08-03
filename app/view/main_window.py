@@ -1,10 +1,7 @@
-from pathlib import Path
-
 from PySide6.QtCore import QEvent, QSize, QTimer, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
-    QKeySequenceEdit,
     QLineEdit,
     QPlainTextEdit,
     QTextEdit,
@@ -20,11 +17,12 @@ from qfluentwidgets import (
 )
 from qfluentwidgets import FluentIcon as FIF
 
-from app.common.config import cfg
+from app.common.config import PROJECT_ROOT, cfg
 from app.repositories.user_library_repository import UserLibraryRepository
 from app.sources.ehviewer_source import EhViewerDataSource
 from app.view.local_manga_interface import LocalMangaInterface
 from app.view.manga_detail_interface import MangaDetailInterface
+from app.view.manga_reader_interface import MangaReaderInterface
 from app.view.media_interface import MediaInterface
 from app.view.navigation_resize_handle import NavigationResizeHandle
 from app.view.setting_interface import SettingInterface
@@ -36,25 +34,22 @@ class MainWindow(FluentWindow):
         self.initWindow()
         self.themeListener = SystemThemeListener(self)
 
-        self.mangaInterface = MediaInterface(
-            self.tr("漫画"),
-            self.tr("浏览和管理漫画资源。"),
-            "mangaInterface",
-            self,
-        )
-        project_root = Path(__file__).resolve().parents[2]
+        self.mangaSource = self._createMangaSource()
         self.localMangaInterface = LocalMangaInterface(
-            EhViewerDataSource(
-                project_root / "testData" / "db" / "eh.db",
-                project_root / "testData" / "manga",
-            ),
-            UserLibraryRepository(project_root / "app" / "data" / "rsviewer.db"),
+            self.mangaSource,
+            UserLibraryRepository(PROJECT_ROOT / "app" / "data" / "rsviewer.db"),
             self,
         )
-        self.mangaDetailInterface = MangaDetailInterface(self)
-        self.stackedWidget.addWidget(self.mangaDetailInterface)
+        self.mangaDetailInterface = MangaDetailInterface(self.mangaSource, self)
+        self.mangaReaderInterface = MangaReaderInterface(self)
+        self._readerWasMaximized = False
         self.localMangaInterface.mangaActivated.connect(self.openMangaDetail)
         self.mangaDetailInterface.backRequested.connect(self.navigateBack)
+        self.mangaDetailInterface.readRequested.connect(self.openMangaReader)
+        self.mangaReaderInterface.backRequested.connect(self.navigateBack)
+        self.mangaReaderInterface.fullscreenRequested.connect(
+            self.setReaderFullscreen
+        )
         self.favoriteMangaInterface = MediaInterface(
             self.tr("收藏"),
             self.tr("已收藏的漫画将在这里显示。"),
@@ -80,7 +75,10 @@ class MainWindow(FluentWindow):
             self,
         )
         self.settingInterface = SettingInterface(self)
+        self.settingInterface.dataSourceChanged.connect(self.reloadMangaSource)
         self.initNavigation()
+        self.stackedWidget.addWidget(self.mangaDetailInterface)
+        self.stackedWidget.addWidget(self.mangaReaderInterface)
         self.navigationResizeHandle = NavigationResizeHandle(
             self.navigationInterface,
             self,
@@ -94,6 +92,7 @@ class MainWindow(FluentWindow):
         self._updateBackShortcut(cfg.get(cfg.backShortcut))
         cfg.backShortcut.valueChanged.connect(self._updateBackShortcut)
         QApplication.instance().installEventFilter(self)
+        self.openMangaHome()
         self.splashScreen.finish()
         self.themeListener.start()
 
@@ -116,38 +115,40 @@ class MainWindow(FluentWindow):
         QApplication.processEvents()
 
     def initNavigation(self):
-        self.addSubInterface(
-            self.mangaInterface,
-            FIF.BOOK_SHELF,
-            self.tr("漫画"),
-            isTransparent=True,
+        manga_route_key = "mangaInterface"
+        self.navigationInterface.addItem(
+            routeKey=manga_route_key,
+            icon=FIF.BOOK_SHELF,
+            text=self.tr("漫画"),
+            onClick=self.openMangaHome,
+            tooltip=self.tr("漫画"),
         )
         self.addSubInterface(
             self.localMangaInterface,
             FIF.FOLDER,
             self.tr("本地资源"),
-            parent=self.mangaInterface,
+            parent=manga_route_key,
             isTransparent=True,
         )
         self.addSubInterface(
             self.favoriteMangaInterface,
             FIF.HEART,
             self.tr("收藏"),
-            parent=self.mangaInterface,
+            parent=manga_route_key,
             isTransparent=True,
         )
         self.addSubInterface(
             self.onlineMangaInterface,
             FIF.GLOBE,
             self.tr("在线资源"),
-            parent=self.mangaInterface,
+            parent=manga_route_key,
             isTransparent=True,
         )
         self.addSubInterface(
             self.mangaHistoryInterface,
             FIF.HISTORY,
             self.tr("历史记录"),
-            parent=self.mangaInterface,
+            parent=manga_route_key,
             isTransparent=True,
         )
         self.addSubInterface(
@@ -163,16 +164,72 @@ class MainWindow(FluentWindow):
             NavigationItemPosition.BOTTOM,
         )
 
+    def openMangaHome(self):
+        self.stackedWidget.setCurrentWidget(self.localMangaInterface, popOut=False)
+        self.navigationInterface.setCurrentItem("mangaInterface")
+
+    def _createMangaSource(self):
+        return EhViewerDataSource(
+            cfg.get(cfg.ehViewerDatabase),
+            cfg.get(cfg.ehViewerMangaRoot),
+        )
+
+    def reloadMangaSource(self):
+        self.mangaSource = self._createMangaSource()
+        self.localMangaInterface.setSource(self.mangaSource)
+        self.mangaDetailInterface.setSource(self.mangaSource)
+        self.switchTo(self.localMangaInterface)
+
     def openLocalMangaSearch(self):
         self.switchTo(self.localMangaInterface)
         self.localMangaInterface.openSearch()
 
     def openMangaDetail(self, item):
+        if self.mangaReaderInterface.isFullscreen:
+            self.setReaderFullscreen(False)
         self.mangaDetailInterface.setManga(item)
         self.switchTo(self.mangaDetailInterface)
 
+    def openMangaReader(self, item):
+        if not item.page_paths:
+            return
+        self.mangaDetailInterface.cancelLoads()
+        self.mangaReaderInterface.setManga(item)
+        self.switchTo(self.mangaReaderInterface)
+        self.mangaReaderInterface.setFocus()
+
+    def setReaderFullscreen(self, fullscreen: bool):
+        fullscreen = bool(fullscreen)
+        if fullscreen == self.isFullScreen():
+            self.mangaReaderInterface.setFullscreenState(fullscreen)
+            return
+        if fullscreen:
+            self._readerWasMaximized = self.isMaximized()
+            self.navigationInterface.hide()
+            self.navigationResizeHandle.hide()
+            if hasattr(self, "titleBar"):
+                self.titleBar.hide()
+            self.showFullScreen()
+        else:
+            if self._readerWasMaximized:
+                self.showMaximized()
+            else:
+                self.showNormal()
+            self.navigationInterface.show()
+            self.navigationResizeHandle.show()
+            if hasattr(self, "titleBar"):
+                self.titleBar.show()
+        self.mangaReaderInterface.setFullscreenState(fullscreen)
+        self.mangaReaderInterface.setFocus()
+
     def navigateBack(self):
         current = self.stackedWidget.currentWidget()
+        if current is self.mangaReaderInterface:
+            if self.mangaReaderInterface.isFullscreen:
+                self.setReaderFullscreen(False)
+            else:
+                self.switchTo(self.mangaDetailInterface)
+            return True
         if current is self.mangaDetailInterface:
             self.switchTo(self.localMangaInterface)
             return True
@@ -182,7 +239,7 @@ class MainWindow(FluentWindow):
             self.onlineMangaInterface,
             self.mangaHistoryInterface,
         }:
-            self.switchTo(self.mangaInterface)
+            self.switchTo(self.localMangaInterface)
             return True
         return False
 
@@ -202,9 +259,8 @@ class MainWindow(FluentWindow):
 
         if event.type() == QEvent.KeyPress and not event.isAutoRepeat():
             focus = QApplication.focusWidget()
-            if isinstance(
-                focus,
-                (QLineEdit, QTextEdit, QPlainTextEdit, QKeySequenceEdit),
+            if isinstance(focus, (QLineEdit, QTextEdit, QPlainTextEdit)) or (
+                focus is not None and focus.property("capturesShortcut")
             ):
                 return super().eventFilter(watched, event)
             pressed = QKeySequence(event.keyCombination())
@@ -226,6 +282,9 @@ class MainWindow(FluentWindow):
             self.navigationResizeHandle.syncGeometry()
 
     def closeEvent(self, e):
+        self.localMangaInterface.cancelLoad()
+        self.mangaDetailInterface.cancelLoads()
+        self.mangaReaderInterface.cancelLoads()
         QApplication.instance().removeEventFilter(self)
         self.themeListener.terminate()
         self.themeListener.deleteLater()

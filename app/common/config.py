@@ -1,6 +1,7 @@
 # coding:utf-8
 import sys
 from enum import Enum
+from pathlib import Path
 
 from PySide6.QtCore import QLocale
 from qfluentwidgets import (
@@ -43,6 +44,8 @@ class Config(QConfig):
 
     libraryFolders = ConfigItem(
         "Library", "Folders", [], FolderListValidator())
+    ehViewerDatabase = ConfigItem("ExternalData", "EhViewerDatabase", "")
+    ehViewerMangaRoot = ConfigItem("ExternalData", "EhViewerMangaRoot", "")
     mangaPageSize = OptionsConfigItem(
         "Library", "MangaPageSize", 40, OptionsValidator([20, 40, 60, 100]))
     searchShortcut = ConfigItem("Shortcuts", "OpenSearch", "Ctrl+K")
@@ -56,4 +59,6 @@ class Config(QConfig):
         "MainWindow", "Language", Language.AUTO, OptionsValidator(Language), LanguageSerializer(), restart=True)
 
 cfg = Config()
-qconfig.load('app/config/config.json', cfg)
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+CONFIG_PATH = PROJECT_ROOT / "app" / "config" / "config.json"
+qconfig.load(str(CONFIG_PATH), cfg)

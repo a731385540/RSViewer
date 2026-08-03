@@ -1,4 +1,7 @@
+import os
 import sqlite3
+from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -48,34 +51,28 @@ class EhViewerDataSource:
     """以只读方式读取 EhViewer 数据库及其下载目录。"""
 
     def __init__(self, database_path: Path, manga_root: Path):
-        self.database_path = Path(database_path).resolve()
-        self.manga_root = Path(manga_root).resolve()
+        self.database_path = self._configured_path(database_path)
+        self.manga_root = self._configured_path(manga_root)
 
     def list_local_manga(self) -> List[MangaItem]:
+        self._validate_configuration()
         if not self.database_path.is_file():
             raise FileNotFoundError(f"找不到漫画数据库：{self.database_path}")
         if not self.manga_root.is_dir():
             raise FileNotFoundError(f"找不到漫画目录：{self.manga_root}")
 
-        folder_index = self._index_download_folders()
+        folders_by_gid, folders_by_name = self._index_download_folders()
         items = []
-        with self._connect_read_only() as connection:
+        with closing(self._connect_read_only()) as connection:
             connection.row_factory = sqlite3.Row
             for row in connection.execute(self._LOCAL_MANGA_QUERY):
-                folder = self._resolve_folder(row, folder_index)
+                folder = self._resolve_folder(row, folders_by_gid, folders_by_name)
                 if folder is None:
                     continue
 
-                pages = sorted(
-                    (
-                        path
-                        for path in folder.iterdir()
-                        if path.is_file() and path.suffix.casefold() in IMAGE_SUFFIXES
-                    ),
-                    key=natural_page_key,
-                )
-                if not pages:
-                    continue
+                # 列表阶段不枚举页面。大型 NAS 库逐本扫描会产生数百万次
+                # 文件处理，页面只在用户打开某一本详情时按需读取。
+                thumbnail = folder / ".thumb"
 
                 items.append(
                     MangaItem(
@@ -90,17 +87,61 @@ class EhViewerDataSource:
                         multiple_labels=(),
                         tags=self._collect_tags(row),
                         folder=folder,
-                        cover_path=pages[0],
-                        thumbnail_path=self._find_thumbnail(folder),
-                        page_paths=tuple(pages),
-                        page_count=len(pages),
+                        cover_path=thumbnail,
+                        thumbnail_path=thumbnail,
+                        page_paths=(),
+                        page_count=0,
                     )
                 )
 
         return sorted(items, key=lambda item: item.display_title.casefold())
 
+    def load_pages(self, item: MangaItem) -> MangaItem:
+        """按需读取单本漫画页面；只在用户打开详情时调用。"""
+        pages = tuple(
+            sorted(
+                (
+                    path
+                    for path in item.folder.iterdir()
+                    if path.is_file()
+                    and path.suffix.casefold() in IMAGE_SUFFIXES
+                ),
+                key=natural_page_key,
+            )
+        )
+        return replace(
+            item,
+            cover_path=pages[0] if pages else item.cover_path,
+            thumbnail_path=self._find_thumbnail(item.folder),
+            page_paths=pages,
+            page_count=len(pages),
+        )
+
+    def find_cover_path(self, item: MangaItem) -> Optional[Path]:
+        """按需寻找封面，缩略图缺失时回退到自然排序后的第一页。"""
+        thumbnail = self._find_thumbnail(item.folder)
+        return thumbnail or self.find_first_page_path(item)
+
+    @staticmethod
+    def find_first_page_path(item: MangaItem) -> Optional[Path]:
+        """返回单本漫画自然排序后的第一张图片。"""
+        first_page = None
+        with os.scandir(item.folder) as entries:
+            for entry in entries:
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                candidate = Path(entry.path)
+                if candidate.suffix.casefold() not in IMAGE_SUFFIXES:
+                    continue
+                if (
+                    first_page is None
+                    or natural_page_key(candidate) < natural_page_key(first_page)
+                ):
+                    first_page = candidate
+        return first_page
+
     def list_primary_labels(self) -> List[str]:
-        with self._connect_read_only() as connection:
+        with closing(self._connect_read_only()) as connection:
             return [
                 str(row[0]).strip()
                 for row in connection.execute(
@@ -113,27 +154,42 @@ class EhViewerDataSource:
         uri = f"file:{self.database_path.as_posix()}?mode=ro&immutable=1"
         return sqlite3.connect(uri, uri=True)
 
-    def _index_download_folders(self) -> Dict[int, Path]:
-        index = {}
-        for folder in self.manga_root.iterdir():
-            if not folder.is_dir():
-                continue
-            gid_text = folder.name.split("-", 1)[0]
-            if gid_text.isdigit():
-                index[int(gid_text)] = folder.resolve()
-        return index
+    def _index_download_folders(self) -> Tuple[Dict[int, Path], Dict[str, Path]]:
+        """仅枚举根目录一次，避免为每个漫画目录增加 NAS 往返。"""
+        by_gid = {}
+        by_name = {}
+        with os.scandir(self.manga_root) as entries:
+            for entry in entries:
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+                folder = Path(entry.path)
+                by_name[entry.name] = folder
+                gid_text = entry.name.split("-", 1)[0]
+                if gid_text.isdigit():
+                    by_gid[int(gid_text)] = folder
+        return by_gid, by_name
 
     def _resolve_folder(
         self,
         row: sqlite3.Row,
-        folder_index: Dict[int, Path],
+        folders_by_gid: Dict[int, Path],
+        folders_by_name: Dict[str, Path],
     ) -> Optional[Path]:
         dirname = (row["DIRNAME"] or "").strip()
-        if dirname:
-            exact_path = self.manga_root / dirname
-            if exact_path.is_dir():
-                return exact_path.resolve()
-        return folder_index.get(int(row["GID"]))
+        if dirname and dirname in folders_by_name:
+            return folders_by_name[dirname]
+        return folders_by_gid.get(int(row["GID"]))
+
+    @staticmethod
+    def _configured_path(value) -> Path:
+        text = str(value).strip()
+        return Path(text).expanduser() if text else Path()
+
+    def _validate_configuration(self):
+        if self.database_path == Path():
+            raise ValueError("请先在设置中选择 EhViewer 数据库")
+        if self.manga_root == Path():
+            raise ValueError("请先在设置中选择本地漫画根目录")
 
     @staticmethod
     def _find_thumbnail(folder: Path) -> Optional[Path]:

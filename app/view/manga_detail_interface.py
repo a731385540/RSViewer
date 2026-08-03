@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
-    InfoBar,
     PrimaryPushButton,
     ScrollArea,
     SimpleCardWidget,
@@ -25,6 +24,7 @@ from qfluentwidgets import (
 from qfluentwidgets import FluentIcon as FIF
 
 from app.domain.manga import MangaItem
+from app.sources.ehviewer_source import EhViewerDataSource
 from app.view.local_manga_interface import CoverLabel, visible_tags
 
 
@@ -86,8 +86,45 @@ class PreviewLoadWorker(QRunnable):
                     Qt.KeepAspectRatio,
                     Qt.SmoothTransformation,
                 )
-            self.signals.imageReady.emit(index, image)
-        self.signals.finished.emit()
+            try:
+                self.signals.imageReady.emit(index, image)
+            except RuntimeError:
+                return
+        try:
+            self.signals.finished.emit()
+        except RuntimeError:
+            pass
+
+
+class PageDiscoverySignals(QObject):
+    loaded = Signal(object)
+    failed = Signal(str)
+
+
+class PageDiscoveryWorker(QRunnable):
+    """仅在打开详情时枚举单本漫画，避免资源列表扫描整个图库。"""
+
+    def __init__(self, source: EhViewerDataSource, item: MangaItem):
+        super().__init__()
+        self.source = source
+        self.item = item
+        self.cancelled = False
+        self.signals = PageDiscoverySignals()
+
+    def run(self):
+        try:
+            item = self.source.load_pages(self.item)
+            if not self.cancelled:
+                try:
+                    self.signals.loaded.emit(item)
+                except RuntimeError:
+                    pass
+        except Exception as error:
+            if not self.cancelled:
+                try:
+                    self.signals.failed.emit(str(error))
+                except RuntimeError:
+                    pass
 
 
 class MangaDetailInterface(QWidget):
@@ -96,13 +133,15 @@ class MangaDetailInterface(QWidget):
     backRequested = Signal()
     readRequested = Signal(object)
 
-    def __init__(self, parent=None):
+    def __init__(self, source: EhViewerDataSource, parent=None):
         super().__init__(parent)
+        self.source = source
         self.setObjectName("mangaDetailInterface")
         self._item: Optional[MangaItem] = None
         self._preview_tiles: List[PreviewTile] = []
         self._preview_columns = 0
         self._preview_worker: Optional[PreviewLoadWorker] = None
+        self._page_worker: Optional[PageDiscoveryWorker] = None
         self.currentCoverPath: Optional[Path] = None
 
         self.backButton = TransparentToolButton(FIF.LEFT_ARROW, self)
@@ -122,7 +161,7 @@ class MangaDetailInterface(QWidget):
         info_layout.setContentsMargins(18, 18, 18, 18)
         info_layout.setSpacing(22)
 
-        self.coverLabel = CoverLabel(Path(), self.infoCard)
+        self.coverLabel = CoverLabel(Path(), parent=self.infoCard)
         self.coverLabel.setFixedSize(220, 300)
         self.originalTitleLabel = SubtitleLabel("", self.infoCard)
         self.originalTitleLabel.setWordWrap(True)
@@ -206,8 +245,21 @@ class MangaDetailInterface(QWidget):
     def currentItem(self) -> Optional[MangaItem]:
         return self._item
 
+    def setSource(self, source: EhViewerDataSource):
+        self.source = source
+        if self._page_worker is not None:
+            self._page_worker.cancelled = True
+            self._page_worker = None
+
     def setManga(self, item: MangaItem):
+        if self._page_worker is not None:
+            self._page_worker.cancelled = True
+            self._page_worker = None
         self._item = item
+        self.readButton.setEnabled(bool(item.page_paths))
+        self.readButton.setText(
+            self.tr("开始阅读") if item.page_paths else self.tr("正在准备…")
+        )
         self.pageTitle.setText(self.tr("漫画详情"))
         self.originalTitleLabel.setText(item.display_title)
         self.englishTitleLabel.setText(item.secondary_title)
@@ -223,7 +275,7 @@ class MangaDetailInterface(QWidget):
                 primary=primary_label,
                 multiple=multiple_labels,
                 category=item.category_name,
-                pages=item.page_count,
+                pages=item.page_count or self.tr("读取中…"),
                 folder=item.folder,
             )
         )
@@ -236,12 +288,28 @@ class MangaDetailInterface(QWidget):
             cover_path = item.cover_path
         self.currentCoverPath = cover_path
         old_cover = self.coverLabel
-        self.coverLabel = CoverLabel(cover_path, self.infoCard)
+        self.coverLabel = CoverLabel(cover_path, parent=self.infoCard)
         self.coverLabel.setFixedSize(220, 300)
         self.infoCard.layout().replaceWidget(old_cover, self.coverLabel)
         old_cover.deleteLater()
 
         self._clearPreview()
+        if item.page_paths:
+            self._showPages(item)
+        else:
+            self.previewTitle.setText(self.tr("正在读取页面…"))
+            worker = PageDiscoveryWorker(self.source, item)
+            worker.signals.loaded.connect(
+                lambda loaded_item: self._finishPageDiscovery(worker, loaded_item)
+            )
+            worker.signals.failed.connect(
+                lambda message: self._failPageDiscovery(worker, message)
+            )
+            self._page_worker = worker
+            QThreadPool.globalInstance().start(worker)
+        self.scrollArea.verticalScrollBar().setValue(0)
+
+    def _showPages(self, item: MangaItem):
         self._preview_tiles = [
             PreviewTile(index, self.previewWidget)
             for index, _path in enumerate(item.page_paths, 1)
@@ -257,18 +325,38 @@ class MangaDetailInterface(QWidget):
         worker.signals.finished.connect(lambda: self._finishPreviewLoad(worker))
         self._preview_worker = worker
         QThreadPool.globalInstance().start(worker)
-        self.scrollArea.verticalScrollBar().setValue(0)
+
+    def _finishPageDiscovery(self, worker, item: MangaItem):
+        if self._page_worker is not worker:
+            return
+        self._page_worker = None
+        if not item.page_paths:
+            self._item = item
+            self.readButton.setEnabled(False)
+            self.readButton.setText(self.tr("无法阅读"))
+            self.previewTitle.setText(self.tr("未找到可读取的图片页面"))
+            return
+        self.setManga(item)
+
+    def _failPageDiscovery(self, worker, message: str):
+        if self._page_worker is worker:
+            self._page_worker = None
+            self.readButton.setEnabled(False)
+            self.readButton.setText(self.tr("无法阅读"))
+            self.previewTitle.setText(self.tr("页面读取失败：{}").format(message))
+
+    def cancelLoads(self):
+        if self._page_worker is not None:
+            self._page_worker.cancelled = True
+            self._page_worker = None
+        if self._preview_worker is not None:
+            self._preview_worker.cancelled = True
+            self._preview_worker = None
 
     def _requestRead(self):
-        if self._item is None:
+        if self._item is None or not self._item.page_paths:
             return
         self.readRequested.emit(self._item)
-        InfoBar.info(
-            self.tr("阅读器尚未接入"),
-            self.tr("详情与页面数据已准备好，阅读器将在后续版本实现。"),
-            duration=2200,
-            parent=self,
-        )
 
     def _clearPreview(self):
         if self._preview_worker is not None:
