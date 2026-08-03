@@ -43,6 +43,10 @@ class Config(QConfig):
 
     libraryFolders = ConfigItem(
         "Library", "Folders", [], FolderListValidator())
+    mangaPageSize = OptionsConfigItem(
+        "Library", "MangaPageSize", 40, OptionsValidator([20, 40, 60, 100]))
+    searchShortcut = ConfigItem("Shortcuts", "OpenSearch", "Ctrl+K")
+    backShortcut = ConfigItem("Shortcuts", "NavigateBack", "Z")
 
     # main window
     micaEnabled = ConfigItem("MainWindow", "MicaEnabled", isWin11(), BoolValidator())

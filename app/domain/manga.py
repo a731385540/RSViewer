@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -12,9 +12,13 @@ class MangaItem:
     original_title: str
     category: int
     category_name: str
+    primary_label: str
+    multiple_labels: Tuple[str, ...]
     tags: Tuple[str, ...]
     folder: Path
     cover_path: Path
+    thumbnail_path: Optional[Path]
+    page_paths: Tuple[Path, ...]
     page_count: int
 
     @property
@@ -29,7 +33,13 @@ class MangaItem:
 
     @property
     def searchable_text(self) -> str:
-        values = (self.english_title, self.original_title, *self.tags)
+        values = (
+            self.english_title,
+            self.original_title,
+            self.primary_label,
+            *self.multiple_labels,
+            *self.tags,
+        )
         return "\n".join(value.casefold() for value in values if value)
 
     def matches(self, query: str) -> bool:

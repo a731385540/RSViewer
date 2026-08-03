@@ -86,14 +86,28 @@ class EhViewerDataSource:
                         category_name=CATEGORY_NAMES.get(
                             int(row["CATEGORY"]), f"分类 {row['CATEGORY']}"
                         ),
+                        primary_label=(row["LABEL"] or "").strip(),
+                        multiple_labels=(),
                         tags=self._collect_tags(row),
                         folder=folder,
                         cover_path=pages[0],
+                        thumbnail_path=self._find_thumbnail(folder),
+                        page_paths=tuple(pages),
                         page_count=len(pages),
                     )
                 )
 
         return sorted(items, key=lambda item: item.display_title.casefold())
+
+    def list_primary_labels(self) -> List[str]:
+        with self._connect_read_only() as connection:
+            return [
+                str(row[0]).strip()
+                for row in connection.execute(
+                    "SELECT LABEL FROM DOWNLOAD_LABELS ORDER BY TIME, _id"
+                )
+                if row[0] and str(row[0]).strip()
+            ]
 
     def _connect_read_only(self) -> sqlite3.Connection:
         uri = f"file:{self.database_path.as_posix()}?mode=ro&immutable=1"
@@ -122,6 +136,20 @@ class EhViewerDataSource:
         return folder_index.get(int(row["GID"]))
 
     @staticmethod
+    def _find_thumbnail(folder: Path) -> Optional[Path]:
+        """兼容 EhViewer 不同版本使用过的隐藏缩略图文件名。"""
+        exact_names = (".thumb", ".thumd", "thumb", "thumd")
+        for name in exact_names:
+            candidate = folder / name
+            if candidate.is_file():
+                return candidate.resolve()
+
+        for candidate in sorted(folder.iterdir(), key=lambda path: path.name.casefold()):
+            if candidate.is_file() and candidate.suffix.casefold() in {".thumb", ".thumd"}:
+                return candidate.resolve()
+        return None
+
+    @staticmethod
     def _collect_tags(row: sqlite3.Row) -> Tuple[str, ...]:
         tags = []
         seen = set()
@@ -146,6 +174,7 @@ class EhViewerDataSource:
             downloads.TITLE,
             downloads.TITLE_JPN,
             downloads.CATEGORY,
+            downloads.LABEL,
             dirname.DIRNAME,
             tags.ARTIST,
             tags.COSPLAYER,

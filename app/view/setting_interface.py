@@ -4,6 +4,7 @@ from qfluentwidgets import (
     FolderListSettingCard,
     OptionsSettingCard,
     ScrollArea,
+    SettingCard,
     SettingCardGroup,
     setTheme,
     setThemeColor,
@@ -11,10 +12,29 @@ from qfluentwidgets import (
 from qfluentwidgets import FluentIcon as FIF
 from qfluentwidgets import InfoBar
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLabel, QWidget
+from PySide6.QtGui import QKeySequence
+from PySide6.QtWidgets import QKeySequenceEdit, QLabel, QWidget
 
 from app.common.config import cfg
 from app.common.style_sheet import StyleSheet
+
+
+class ShortcutSettingCard(SettingCard):
+    """将 Qt 快捷键编辑器绑定到 QFluentWidgets 配置项。"""
+
+    def __init__(self, config_item, icon, title, content, parent=None):
+        super().__init__(icon, title, content, parent)
+        self.configItem = config_item
+        self.sequenceEdit = QKeySequenceEdit(self)
+        self.sequenceEdit.setKeySequence(QKeySequence(cfg.get(config_item)))
+        self.sequenceEdit.setMaximumWidth(180)
+        self.hBoxLayout.addWidget(self.sequenceEdit)
+        self.hBoxLayout.addSpacing(16)
+        self.sequenceEdit.editingFinished.connect(self._saveShortcut)
+
+    def _saveShortcut(self):
+        shortcut = self.sequenceEdit.keySequence().toString(QKeySequence.PortableText)
+        cfg.set(self.configItem, shortcut)
 
 
 class SettingInterface(ScrollArea):
@@ -29,6 +49,8 @@ class SettingInterface(ScrollArea):
 
         self.personalGroup = SettingCardGroup(
             self.tr("界面设置"), self.scrollWidget)
+        self.shortcutGroup = SettingCardGroup(
+            self.tr("快捷键"), self.scrollWidget)
         self.themeCard = OptionsSettingCard(
             cfg.themeMode,
             FIF.BRUSH,
@@ -52,6 +74,20 @@ class SettingInterface(ScrollArea):
             self.tr("媒体目录"),
             self.tr("添加本地目录、映射盘或 NAS 网络共享路径"),
             parent=self.personalGroup,
+        )
+        self.searchShortcutCard = ShortcutSettingCard(
+            cfg.searchShortcut,
+            FIF.SEARCH,
+            self.tr("打开漫画搜索"),
+            self.tr("切换到本地漫画并展开搜索栏"),
+            self.shortcutGroup,
+        )
+        self.backShortcutCard = ShortcutSettingCard(
+            cfg.backShortcut,
+            FIF.RETURN,
+            self.tr("返回上一级"),
+            self.tr("详情页等下一级页面的通用返回快捷键"),
+            self.shortcutGroup,
         )
 
         self.__initWidget()
@@ -77,9 +113,12 @@ class SettingInterface(ScrollArea):
         self.personalGroup.addSettingCard(self.themeCard)
         self.personalGroup.addSettingCard(self.themeColorCard)
         self.personalGroup.addSettingCard(self.libraryFoldersCard)
+        self.shortcutGroup.addSettingCard(self.searchShortcutCard)
+        self.shortcutGroup.addSettingCard(self.backShortcutCard)
         self.expandLayout.setSpacing(28)
         self.expandLayout.setContentsMargins(36, 10, 36, 0)
         self.expandLayout.addWidget(self.personalGroup)
+        self.expandLayout.addWidget(self.shortcutGroup)
 
     def __showRestartTooltip(self):
         """ show restart tooltip """

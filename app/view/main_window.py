@@ -1,7 +1,15 @@
 from pathlib import Path
 
-from PySide6.QtCore import QSize, QTimer
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QEvent, QSize, QTimer, Qt
+from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtWidgets import (
+    QApplication,
+    QKeySequenceEdit,
+    QLineEdit,
+    QPlainTextEdit,
+    QTextEdit,
+    QWidget,
+)
 
 from qfluentwidgets import (
     FluentWindow,
@@ -13,8 +21,10 @@ from qfluentwidgets import (
 from qfluentwidgets import FluentIcon as FIF
 
 from app.common.config import cfg
+from app.repositories.user_library_repository import UserLibraryRepository
 from app.sources.ehviewer_source import EhViewerDataSource
 from app.view.local_manga_interface import LocalMangaInterface
+from app.view.manga_detail_interface import MangaDetailInterface
 from app.view.media_interface import MediaInterface
 from app.view.navigation_resize_handle import NavigationResizeHandle
 from app.view.setting_interface import SettingInterface
@@ -38,8 +48,13 @@ class MainWindow(FluentWindow):
                 project_root / "testData" / "db" / "eh.db",
                 project_root / "testData" / "manga",
             ),
+            UserLibraryRepository(project_root / "app" / "data" / "rsviewer.db"),
             self,
         )
+        self.mangaDetailInterface = MangaDetailInterface(self)
+        self.stackedWidget.addWidget(self.mangaDetailInterface)
+        self.localMangaInterface.mangaActivated.connect(self.openMangaDetail)
+        self.mangaDetailInterface.backRequested.connect(self.navigateBack)
         self.favoriteMangaInterface = MediaInterface(
             self.tr("收藏"),
             self.tr("已收藏的漫画将在这里显示。"),
@@ -70,6 +85,15 @@ class MainWindow(FluentWindow):
             self.navigationInterface,
             self,
         )
+        self.searchShortcut = QShortcut(self)
+        self.searchShortcut.setContext(Qt.ApplicationShortcut)
+        self._updateSearchShortcut(cfg.get(cfg.searchShortcut))
+        self.searchShortcut.activated.connect(self.openLocalMangaSearch)
+        cfg.searchShortcut.valueChanged.connect(self._updateSearchShortcut)
+        self._backKeySequence = QKeySequence()
+        self._updateBackShortcut(cfg.get(cfg.backShortcut))
+        cfg.backShortcut.valueChanged.connect(self._updateBackShortcut)
+        QApplication.instance().installEventFilter(self)
         self.splashScreen.finish()
         self.themeListener.start()
 
@@ -139,6 +163,61 @@ class MainWindow(FluentWindow):
             NavigationItemPosition.BOTTOM,
         )
 
+    def openLocalMangaSearch(self):
+        self.switchTo(self.localMangaInterface)
+        self.localMangaInterface.openSearch()
+
+    def openMangaDetail(self, item):
+        self.mangaDetailInterface.setManga(item)
+        self.switchTo(self.mangaDetailInterface)
+
+    def navigateBack(self):
+        current = self.stackedWidget.currentWidget()
+        if current is self.mangaDetailInterface:
+            self.switchTo(self.localMangaInterface)
+            return True
+        if current in {
+            self.localMangaInterface,
+            self.favoriteMangaInterface,
+            self.onlineMangaInterface,
+            self.mangaHistoryInterface,
+        }:
+            self.switchTo(self.mangaInterface)
+            return True
+        return False
+
+    def _updateSearchShortcut(self, shortcut: str):
+        self.searchShortcut.setKey(QKeySequence(shortcut))
+
+    def _updateBackShortcut(self, shortcut: str):
+        self._backKeySequence = QKeySequence(shortcut)
+
+    def eventFilter(self, watched, event):
+        if isinstance(watched, QWidget) and watched.window() is not self:
+            return super().eventFilter(watched, event)
+
+        if event.type() == QEvent.MouseButtonPress and event.button() == Qt.BackButton:
+            if self.navigateBack():
+                return True
+
+        if event.type() == QEvent.KeyPress and not event.isAutoRepeat():
+            focus = QApplication.focusWidget()
+            if isinstance(
+                focus,
+                (QLineEdit, QTextEdit, QPlainTextEdit, QKeySequenceEdit),
+            ):
+                return super().eventFilter(watched, event)
+            pressed = QKeySequence(event.keyCombination())
+            if (
+                not self._backKeySequence.isEmpty()
+                and pressed.matches(self._backKeySequence)
+                == QKeySequence.SequenceMatch.ExactMatch
+                and self.navigateBack()
+            ):
+                return True
+
+        return super().eventFilter(watched, event)
+
     def resizeEvent(self, e):
         super().resizeEvent(e)
         if hasattr(self, 'splashScreen'):
@@ -147,6 +226,7 @@ class MainWindow(FluentWindow):
             self.navigationResizeHandle.syncGeometry()
 
     def closeEvent(self, e):
+        QApplication.instance().removeEventFilter(self)
         self.themeListener.terminate()
         self.themeListener.deleteLater()
         super().closeEvent(e)

@@ -1,0 +1,309 @@
+from pathlib import Path
+from typing import List, Optional
+
+from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, Signal
+from PySide6.QtGui import QImageReader, QPixmap
+from PySide6.QtWidgets import (
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
+from qfluentwidgets import (
+    BodyLabel,
+    CaptionLabel,
+    InfoBar,
+    PrimaryPushButton,
+    ScrollArea,
+    SimpleCardWidget,
+    SubtitleLabel,
+    TitleLabel,
+    TransparentToolButton,
+)
+from qfluentwidgets import FluentIcon as FIF
+
+from app.domain.manga import MangaItem
+from app.view.local_manga_interface import CoverLabel, visible_tags
+
+
+class PreviewTile(QWidget):
+    """详情页中的单页缩略预览。"""
+
+    def __init__(self, page_number: int, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(126, 184)
+        self.imageLabel = QLabel(self)
+        self.imageLabel.setAlignment(Qt.AlignCenter)
+        self.imageLabel.setFixedSize(116, 154)
+        self.imageLabel.setText(self.tr("加载中…"))
+        number = CaptionLabel(str(page_number), self)
+        number.setAlignment(Qt.AlignCenter)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(4)
+        layout.addWidget(self.imageLabel)
+        layout.addWidget(number)
+
+    def setImage(self, image):
+        if image.isNull():
+            self.imageLabel.setText(self.tr("无法预览"))
+            return
+        self.imageLabel.setText("")
+        self.imageLabel.setPixmap(QPixmap.fromImage(image))
+
+
+class PreviewLoadSignals(QObject):
+    imageReady = Signal(int, object)
+    finished = Signal()
+
+
+class PreviewLoadWorker(QRunnable):
+    """在后台解码页面缩略图，避免打开详情时阻塞界面。"""
+
+    def __init__(self, page_paths):
+        super().__init__()
+        self.pagePaths = tuple(page_paths)
+        self.signals = PreviewLoadSignals()
+        self.cancelled = False
+
+    def run(self):
+        for index, path in enumerate(self.pagePaths):
+            if self.cancelled:
+                break
+            reader = QImageReader(str(path))
+            reader.setAutoTransform(True)
+            source_size = reader.size()
+            if source_size.isValid():
+                source_size.scale(QSize(116, 154), Qt.KeepAspectRatio)
+                reader.setScaledSize(source_size)
+            image = reader.read()
+            if not image.isNull() and (image.width() > 116 or image.height() > 154):
+                image = image.scaled(
+                    QSize(116, 154),
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation,
+                )
+            self.signals.imageReady.emit(index, image)
+        self.signals.finished.emit()
+
+
+class MangaDetailInterface(QWidget):
+    """本地漫画的信息、操作和页面预览。"""
+
+    backRequested = Signal()
+    readRequested = Signal(object)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("mangaDetailInterface")
+        self._item: Optional[MangaItem] = None
+        self._preview_tiles: List[PreviewTile] = []
+        self._preview_columns = 0
+        self._preview_worker: Optional[PreviewLoadWorker] = None
+        self.currentCoverPath: Optional[Path] = None
+
+        self.backButton = TransparentToolButton(FIF.LEFT_ARROW, self)
+        self.backButton.setToolTip(self.tr("返回"))
+        self.backButton.clicked.connect(self.backRequested)
+        self.pageTitle = TitleLabel(self.tr("漫画详情"), self)
+
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(10)
+        header_layout.addWidget(self.backButton)
+        header_layout.addWidget(self.pageTitle)
+        header_layout.addStretch(1)
+
+        self.infoCard = SimpleCardWidget(self)
+        info_layout = QHBoxLayout(self.infoCard)
+        info_layout.setContentsMargins(18, 18, 18, 18)
+        info_layout.setSpacing(22)
+
+        self.coverLabel = CoverLabel(Path(), self.infoCard)
+        self.coverLabel.setFixedSize(220, 300)
+        self.originalTitleLabel = SubtitleLabel("", self.infoCard)
+        self.originalTitleLabel.setWordWrap(True)
+        self.englishTitleLabel = BodyLabel("", self.infoCard)
+        self.englishTitleLabel.setWordWrap(True)
+        self.metadataLabel = BodyLabel("", self.infoCard)
+        self.metadataLabel.setWordWrap(True)
+        self.metadataLabel.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.tagsLabel = CaptionLabel("", self.infoCard)
+        self.tagsLabel.setWordWrap(True)
+
+        text_layout = QVBoxLayout()
+        text_layout.setContentsMargins(0, 2, 0, 2)
+        text_layout.setSpacing(10)
+        text_layout.addWidget(self.originalTitleLabel)
+        text_layout.addWidget(self.englishTitleLabel)
+        text_layout.addSpacing(4)
+        text_layout.addWidget(self.metadataLabel)
+        text_layout.addWidget(self.tagsLabel)
+        text_layout.addStretch(1)
+        info_layout.addWidget(self.coverLabel, 0, Qt.AlignTop)
+        info_layout.addLayout(text_layout, 1)
+
+        self.operationCard = SimpleCardWidget(self)
+        operation_layout = QHBoxLayout(self.operationCard)
+        operation_layout.setContentsMargins(18, 14, 18, 14)
+        operation_layout.addWidget(SubtitleLabel(self.tr("操作"), self.operationCard))
+        operation_layout.addStretch(1)
+        self.readButton = PrimaryPushButton(
+            FIF.BOOK_SHELF,
+            self.tr("开始阅读"),
+            self.operationCard,
+        )
+        self.readButton.clicked.connect(self._requestRead)
+        operation_layout.addWidget(self.readButton)
+
+        self.previewCard = SimpleCardWidget(self)
+        preview_layout = QVBoxLayout(self.previewCard)
+        preview_layout.setContentsMargins(18, 16, 18, 18)
+        preview_layout.setSpacing(12)
+        self.previewTitle = SubtitleLabel(self.tr("页面预览"), self.previewCard)
+        preview_layout.addWidget(self.previewTitle)
+        self.previewWidget = QWidget(self.previewCard)
+        self.previewWidget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.previewGrid = QGridLayout(self.previewWidget)
+        self.previewGrid.setContentsMargins(0, 0, 0, 0)
+        self.previewGrid.setHorizontalSpacing(12)
+        self.previewGrid.setVerticalSpacing(12)
+        self.previewGrid.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        preview_layout.addWidget(self.previewWidget)
+
+        self.scrollWidget = QWidget()
+        self.scrollWidget.setObjectName("mangaDetailScrollWidget")
+        content_layout = QVBoxLayout(self.scrollWidget)
+        content_layout.setContentsMargins(36, 0, 36, 28)
+        content_layout.setSpacing(16)
+        content_layout.addWidget(self.infoCard)
+        content_layout.addWidget(self.operationCard)
+        content_layout.addWidget(self.previewCard)
+        content_layout.addStretch(1)
+
+        self.scrollArea = ScrollArea(self)
+        self.scrollArea.setWidget(self.scrollWidget)
+        self.scrollArea.setWidgetResizable(True)
+        self.scrollArea.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scrollArea.setStyleSheet(
+            "QScrollArea { border: none; background: transparent; }"
+            "QWidget#mangaDetailScrollWidget { background: transparent; }"
+        )
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 28, 0, 0)
+        main_layout.setSpacing(14)
+        header_container = QWidget(self)
+        header_container.setLayout(header_layout)
+        header_container.layout().setContentsMargins(36, 0, 36, 0)
+        main_layout.addWidget(header_container)
+        main_layout.addWidget(self.scrollArea, 1)
+
+    @property
+    def currentItem(self) -> Optional[MangaItem]:
+        return self._item
+
+    def setManga(self, item: MangaItem):
+        self._item = item
+        self.pageTitle.setText(self.tr("漫画详情"))
+        self.originalTitleLabel.setText(item.display_title)
+        self.englishTitleLabel.setText(item.secondary_title)
+        self.englishTitleLabel.setVisible(bool(item.secondary_title))
+        primary_label = item.primary_label or self.tr("未分类")
+        multiple_labels = "、".join(item.multiple_labels) or self.tr("无")
+        self.metadataLabel.setText(
+            self.tr(
+                "GID：{gid}\n标签：{primary}\n分类标签：{multiple}\n"
+                "来源类别：{category}\n页数：{pages}\n目录：{folder}"
+            ).format(
+                gid=item.gid,
+                primary=primary_label,
+                multiple=multiple_labels,
+                category=item.category_name,
+                pages=item.page_count,
+                folder=item.folder,
+            )
+        )
+        tags = visible_tags(item)
+        self.tagsLabel.setText(self.tr("标签信息：{}").format(tags or self.tr("无")))
+
+        cover_path = item.thumbnail_path or item.cover_path
+        pixmap = QPixmap(str(cover_path))
+        if pixmap.isNull() and cover_path != item.cover_path:
+            cover_path = item.cover_path
+        self.currentCoverPath = cover_path
+        old_cover = self.coverLabel
+        self.coverLabel = CoverLabel(cover_path, self.infoCard)
+        self.coverLabel.setFixedSize(220, 300)
+        self.infoCard.layout().replaceWidget(old_cover, self.coverLabel)
+        old_cover.deleteLater()
+
+        self._clearPreview()
+        self._preview_tiles = [
+            PreviewTile(index, self.previewWidget)
+            for index, _path in enumerate(item.page_paths, 1)
+        ]
+        self.previewTitle.setText(
+            self.tr("页面预览（{} 页）").format(len(self._preview_tiles))
+        )
+        QTimer.singleShot(0, self._relayoutPreview)
+        worker = PreviewLoadWorker(item.page_paths)
+        worker.signals.imageReady.connect(
+            lambda index, image: self._setPreviewImage(worker, index, image)
+        )
+        worker.signals.finished.connect(lambda: self._finishPreviewLoad(worker))
+        self._preview_worker = worker
+        QThreadPool.globalInstance().start(worker)
+        self.scrollArea.verticalScrollBar().setValue(0)
+
+    def _requestRead(self):
+        if self._item is None:
+            return
+        self.readRequested.emit(self._item)
+        InfoBar.info(
+            self.tr("阅读器尚未接入"),
+            self.tr("详情与页面数据已准备好，阅读器将在后续版本实现。"),
+            duration=2200,
+            parent=self,
+        )
+
+    def _clearPreview(self):
+        if self._preview_worker is not None:
+            self._preview_worker.cancelled = True
+            self._preview_worker = None
+        while self.previewGrid.count():
+            layout_item = self.previewGrid.takeAt(0)
+            widget = layout_item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        self._preview_tiles = []
+        self._preview_columns = 0
+
+    def _setPreviewImage(self, worker, index: int, image):
+        if self._preview_worker is worker and 0 <= index < len(self._preview_tiles):
+            self._preview_tiles[index].setImage(image)
+
+    def _finishPreviewLoad(self, worker):
+        if self._preview_worker is worker:
+            self._preview_worker = None
+
+    def _relayoutPreview(self):
+        if not self._preview_tiles:
+            return
+        available_width = max(126, self.previewWidget.width())
+        columns = max(1, available_width // 138)
+        if columns == self._preview_columns and self.previewGrid.count():
+            return
+        while self.previewGrid.count():
+            self.previewGrid.takeAt(0)
+        self._preview_columns = columns
+        for index, tile in enumerate(self._preview_tiles):
+            self.previewGrid.addWidget(tile, index // columns, index % columns)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._relayoutPreview)

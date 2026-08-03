@@ -1,8 +1,11 @@
+import math
+from dataclasses import replace
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Set
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import (
+    QAction,
     QBrush,
     QColor,
     QFontMetrics,
@@ -16,8 +19,10 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QSizePolicy,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -26,15 +31,24 @@ from qfluentwidgets import (
     CaptionLabel,
     CardWidget,
     ComboBox,
+    PushButton,
+    RoundMenu,
     ScrollArea,
     SearchLineEdit,
     SegmentedToolWidget,
+    SimpleCardWidget,
+    SpinBox,
+    ToolButton,
+    TreeWidget,
     TitleLabel,
+    TransparentPushButton,
     isDarkTheme,
 )
 from qfluentwidgets import FluentIcon as FIF
 
+from app.common.config import cfg
 from app.domain.manga import MangaItem
+from app.repositories.user_library_repository import UserLibraryRepository
 from app.sources.ehviewer_source import EhViewerDataSource
 
 
@@ -125,9 +139,18 @@ def visible_tags(item: MangaItem) -> str:
 class MangaGridCard(CardWidget):
     """大封面漫画卡片。"""
 
-    def __init__(self, item: MangaItem, parent=None):
+    def __init__(
+        self,
+        item: MangaItem,
+        open_callback=None,
+        label_menu_callback=None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.item = item
+        self.labelMenuCallback = label_menu_callback
+        if open_callback is not None:
+            self.clicked.connect(lambda: open_callback(self.item))
         self.coverLabel = CoverLabel(item.cover_path, self)
         self.titleLabel = FadeTextLabel(item.display_title, parent=self)
         self.englishTitleLabel = FadeTextLabel(
@@ -156,13 +179,29 @@ class MangaGridCard(CardWidget):
         self.coverLabel.setFixedSize(cover_width, cover_height)
         self.setFixedHeight(cover_height + 92)
 
+    def contextMenuEvent(self, event):
+        if self.labelMenuCallback is not None:
+            self.labelMenuCallback(self.item, event.globalPos())
+            event.accept()
+            return
+        super().contextMenuEvent(event)
+
 
 class MangaListCard(CardWidget):
     """一行一个条目的标题布局卡片。"""
 
-    def __init__(self, item: MangaItem, parent=None):
+    def __init__(
+        self,
+        item: MangaItem,
+        open_callback=None,
+        label_menu_callback=None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.item = item
+        self.labelMenuCallback = label_menu_callback
+        if open_callback is not None:
+            self.clicked.connect(lambda: open_callback(self.item))
         self.setFixedHeight(116)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
@@ -195,21 +234,47 @@ class MangaListCard(CardWidget):
         self.layout.addWidget(self.coverLabel)
         self.layout.addLayout(text_layout, 1)
 
+    def contextMenuEvent(self, event):
+        if self.labelMenuCallback is not None:
+            self.labelMenuCallback(self.item, event.globalPos())
+            event.accept()
+            return
+        super().contextMenuEvent(event)
+
 
 class MangaLoadSignals(QObject):
-    loaded = Signal(list)
+    loaded = Signal(object)
     failed = Signal(str)
 
 
 class MangaLoadWorker(QRunnable):
-    def __init__(self, source: EhViewerDataSource):
+    def __init__(
+        self,
+        source: EhViewerDataSource,
+        user_repository: UserLibraryRepository,
+    ):
         super().__init__()
         self.source = source
+        self.user_repository = user_repository
         self.signals = MangaLoadSignals()
 
     def run(self):
         try:
-            self.signals.loaded.emit(self.source.list_local_manga())
+            items = self.source.list_local_manga()
+            assignments = self.user_repository.labels_for_manga(
+                [item.gid for item in items]
+            )
+            items = [
+                replace(item, multiple_labels=assignments.get(item.gid, ()))
+                for item in items
+            ]
+            self.signals.loaded.emit(
+                (
+                    items,
+                    self.source.list_primary_labels(),
+                    self.user_repository.list_labels(),
+                )
+            )
         except Exception as error:
             self.signals.failed.emit(str(error))
 
@@ -219,27 +284,52 @@ class LocalMangaInterface(QWidget):
 
     GRID_MODE = "grid"
     LIST_MODE = "list"
+    mangaActivated = Signal(object)
 
-    def __init__(self, source: EhViewerDataSource, parent=None):
+    def __init__(
+        self,
+        source: EhViewerDataSource,
+        user_repository: UserLibraryRepository,
+        parent=None,
+    ):
         super().__init__(parent=parent)
         self.setObjectName("localMangaInterface")
         self.source = source
+        self.userRepository = user_repository
         self._all_items: List[MangaItem] = []
         self._filtered_items: List[MangaItem] = []
         self._cards: List[QWidget] = []
         self._empty_label: Optional[BodyLabel] = None
         self._layout_mode = self.GRID_MODE
+        self._primary_label_filter = "__all__"
+        self._multiple_label_filters: Set[str] = set()
+        self._page = 1
+        self._page_size = cfg.get(cfg.mangaPageSize)
         self._last_columns = 0
         self._load_worker = None
 
         self.titleLabel = TitleLabel(self.tr("本地资源"), self)
         self.searchEdit = SearchLineEdit(self)
         self.searchEdit.setPlaceholderText(self.tr("搜索英语标题、原标题或标签"))
-        self.searchEdit.setMinimumWidth(280)
+        self.searchEdit.setMinimumWidth(260)
+        self.searchPanel = QWidget(self)
+        search_layout = QHBoxLayout(self.searchPanel)
+        search_layout.setContentsMargins(0, 0, 0, 0)
+        search_layout.addWidget(self.searchEdit)
+        self.searchPanel.hide()
 
-        self.categoryCombo = ComboBox(self)
-        self.categoryCombo.setMinimumWidth(140)
-        self.categoryCombo.addItem(self.tr("全部分类"), userData=None)
+        self.searchButton = TransparentPushButton(
+            FIF.SEARCH,
+            self.tr("搜索"),
+            self,
+        )
+        self.searchButton.clicked.connect(self.toggleSearch)
+        self.tagButton = TransparentPushButton(
+            FIF.TAG,
+            self.tr("标签"),
+            self,
+        )
+        self.tagButton.clicked.connect(self.toggleClassification)
 
         self.layoutSwitch = SegmentedToolWidget(self)
         self.layoutSwitch.addItem(
@@ -257,12 +347,48 @@ class LocalMangaInterface(QWidget):
 
         self.resultLabel = BodyLabel(self.tr("正在读取本地漫画…"), self)
 
-        toolbar_layout = QHBoxLayout()
-        toolbar_layout.setContentsMargins(0, 0, 0, 0)
-        toolbar_layout.setSpacing(12)
-        toolbar_layout.addWidget(self.searchEdit, 1)
-        toolbar_layout.addWidget(self.categoryCombo)
-        toolbar_layout.addWidget(self.layoutSwitch)
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(10)
+        header_layout.addWidget(self.titleLabel)
+        header_layout.addStretch(1)
+        header_layout.addWidget(self.layoutSwitch)
+        header_layout.addWidget(self.tagButton)
+        header_layout.addWidget(self.searchButton)
+
+        self.classificationCard = SimpleCardWidget(self)
+        self.classificationCard.setFixedWidth(210)
+        classification_layout = QVBoxLayout(self.classificationCard)
+        classification_layout.setContentsMargins(12, 16, 12, 16)
+        classification_layout.setSpacing(10)
+
+        self.primaryLabelTree = TreeWidget(self.classificationCard)
+        self.primaryLabelTree.setHeaderHidden(True)
+        self.primaryLabelTree.setFixedHeight(230)
+        classification_layout.addWidget(self.primaryLabelTree)
+
+        classification_layout.addSpacing(8)
+        multi_hint = CaptionLabel(
+            self.tr("可多选筛选；右键漫画可分配标签"),
+            self.classificationCard,
+        )
+        multi_hint.setWordWrap(True)
+        classification_layout.addWidget(multi_hint)
+
+        self.multipleLabelTree = TreeWidget(self.classificationCard)
+        self.multipleLabelTree.setHeaderHidden(True)
+        self.multipleLabelTree.setFixedHeight(190)
+        classification_layout.addWidget(self.multipleLabelTree)
+
+        self.addMultipleLabelButton = PushButton(
+            FIF.ADD,
+            self.tr("新建复数标签"),
+            self.classificationCard,
+        )
+        classification_layout.addWidget(self.addMultipleLabelButton)
+        classification_layout.addStretch(1)
+        self._multiple_label_items: Dict[str, QTreeWidgetItem] = {}
+        self.classificationCard.hide()
 
         self.scrollWidget = QWidget()
         self.scrollWidget.setObjectName("localMangaScrollWidget")
@@ -281,36 +407,89 @@ class LocalMangaInterface(QWidget):
             "QWidget#localMangaScrollWidget { background: transparent; }"
         )
 
-        self.mainLayout = QVBoxLayout(self)
+        self.pageSizeCombo = ComboBox(self)
+        for size in (20, 40, 60, 100):
+            self.pageSizeCombo.addItem(str(size), userData=size)
+        page_size_index = next(
+            (
+                index
+                for index in range(self.pageSizeCombo.count())
+                if self.pageSizeCombo.itemData(index) == self._page_size
+            ),
+            1,
+        )
+        self.pageSizeCombo.setCurrentIndex(page_size_index)
+        self.pageSizeCombo.setFixedWidth(76)
+
+        self.firstPageButton = ToolButton(FIF.PAGE_LEFT, self)
+        self.previousPageButton = ToolButton(FIF.LEFT_ARROW, self)
+        self.nextPageButton = ToolButton(FIF.RIGHT_ARROW, self)
+        self.lastPageButton = ToolButton(FIF.PAGE_RIGHT, self)
+        self.pageSpinBox = SpinBox(self)
+        self.pageSpinBox.setRange(1, 1)
+        self.pageSpinBox.setFixedWidth(82)
+        self.pageCountLabel = BodyLabel(self.tr("/ 1 页"), self)
+
+        pagination_layout = QHBoxLayout()
+        pagination_layout.setContentsMargins(0, 0, 0, 0)
+        pagination_layout.setSpacing(8)
+        pagination_layout.addWidget(BodyLabel(self.tr("每页"), self))
+        pagination_layout.addWidget(self.pageSizeCombo)
+        pagination_layout.addWidget(BodyLabel(self.tr("部"), self))
+        pagination_layout.addStretch(1)
+        pagination_layout.addWidget(self.firstPageButton)
+        pagination_layout.addWidget(self.previousPageButton)
+        pagination_layout.addWidget(self.pageSpinBox)
+        pagination_layout.addWidget(self.pageCountLabel)
+        pagination_layout.addWidget(self.nextPageButton)
+        pagination_layout.addWidget(self.lastPageButton)
+
+        content_layout = QVBoxLayout()
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(12)
+        content_layout.addLayout(header_layout)
+        content_layout.addWidget(self.searchPanel)
+        content_layout.addWidget(self.resultLabel)
+        content_layout.addWidget(self.scrollArea, 1)
+        content_layout.addLayout(pagination_layout)
+
+        self.mainLayout = QHBoxLayout(self)
         self.mainLayout.setContentsMargins(36, 32, 36, 24)
         self.mainLayout.setSpacing(16)
-        self.mainLayout.addWidget(self.titleLabel)
-        self.mainLayout.addLayout(toolbar_layout)
-        self.mainLayout.addWidget(self.resultLabel)
-        self.mainLayout.addWidget(self.scrollArea, 1)
+        self.mainLayout.addWidget(self.classificationCard)
+        self.mainLayout.addLayout(content_layout, 1)
 
         self.searchTimer = QTimer(self)
         self.searchTimer.setSingleShot(True)
         self.searchTimer.setInterval(180)
         self.searchTimer.timeout.connect(self.applyFilters)
         self.searchEdit.textChanged.connect(self._scheduleSearch)
-        self.categoryCombo.currentIndexChanged.connect(self.applyFilters)
+        self.primaryLabelTree.currentItemChanged.connect(self._onPrimaryLabelChanged)
+        self.multipleLabelTree.itemChanged.connect(self._onMultipleLabelChanged)
+        self.addMultipleLabelButton.clicked.connect(lambda: self._createMultipleLabel())
+        self.pageSizeCombo.currentIndexChanged.connect(self._onPageSizeChanged)
+        self.pageSpinBox.valueChanged.connect(self._onPageChanged)
+        self.firstPageButton.clicked.connect(lambda: self.setPage(1))
+        self.previousPageButton.clicked.connect(lambda: self.setPage(self._page - 1))
+        self.nextPageButton.clicked.connect(lambda: self.setPage(self._page + 1))
+        self.lastPageButton.clicked.connect(lambda: self.setPage(self.pageCount()))
 
         self.reload()
 
     def reload(self):
         self.resultLabel.setText(self.tr("正在读取本地漫画…"))
-        worker = MangaLoadWorker(self.source)
+        worker = MangaLoadWorker(self.source, self.userRepository)
         worker.signals.loaded.connect(self._onLoaded)
         worker.signals.failed.connect(self._onLoadFailed)
         self._load_worker = worker
         QThreadPool.globalInstance().start(worker)
 
-    def _onLoaded(self, items: List[MangaItem]):
+    def _onLoaded(self, payload):
         self._load_worker = None
-        self._all_items = items
-        self._populateCategories()
-        self.applyFilters()
+        self._all_items, primary_labels, multiple_labels = payload
+        self._populatePrimaryLabels(primary_labels)
+        self._populateMultipleLabels(multiple_labels)
+        self.applyFilters(reset_page=True)
 
     def _onLoadFailed(self, message: str):
         self._load_worker = None
@@ -319,39 +498,236 @@ class LocalMangaInterface(QWidget):
         self.resultLabel.setText(self.tr("读取失败：{}").format(message))
         self._renderCards()
 
-    def _populateCategories(self):
-        selected = self.categoryCombo.currentData()
-        self.categoryCombo.clear()
-        self.categoryCombo.addItem(self.tr("全部分类"), userData=None)
-        categories = sorted(
-            {(item.category, item.category_name) for item in self._all_items},
-            key=lambda value: value[1],
+    def _populatePrimaryLabels(self, labels: List[str]):
+        self.primaryLabelTree.clear()
+        root = QTreeWidgetItem([self.tr("标签")])
+        root.setFlags(root.flags() & ~Qt.ItemIsSelectable)
+        self.primaryLabelTree.addTopLevelItem(root)
+        entries = [
+            (self.tr("全部漫画"), "__all__"),
+            (self.tr("未分类"), "__none__"),
+            *((label, label) for label in labels),
+        ]
+        selected_item = None
+        for text, value in entries:
+            item = QTreeWidgetItem([text])
+            item.setData(0, Qt.UserRole, value)
+            root.addChild(item)
+            if value == self._primary_label_filter:
+                selected_item = item
+        root.setExpanded(True)
+        self.primaryLabelTree.setCurrentItem(selected_item or root.child(0))
+
+    def _populateMultipleLabels(self, labels):
+        self.multipleLabelTree.blockSignals(True)
+        self.multipleLabelTree.clear()
+        root = QTreeWidgetItem([self.tr("分类标签（复数标签）")])
+        root.setFlags(root.flags() & ~Qt.ItemIsSelectable)
+        self.multipleLabelTree.addTopLevelItem(root)
+        self._multiple_label_items = {}
+        for _label_id, name, count in labels:
+            item = QTreeWidgetItem([f"{name} ({count})"])
+            item.setData(0, Qt.UserRole, name)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(
+                0,
+                Qt.Checked if name in self._multiple_label_filters else Qt.Unchecked,
+            )
+            root.addChild(item)
+            self._multiple_label_items[name] = item
+        if not labels:
+            empty_item = QTreeWidgetItem([self.tr("尚未创建分类标签")])
+            empty_item.setFlags(empty_item.flags() & ~Qt.ItemIsSelectable)
+            root.addChild(empty_item)
+        root.setExpanded(True)
+        self.multipleLabelTree.blockSignals(False)
+
+    def _onPrimaryLabelChanged(self, current, previous=None):
+        if current is None:
+            return
+        value = current.data(0, Qt.UserRole)
+        if value is None:
+            return
+        self._primary_label_filter = value
+        self.applyFilters(reset_page=True)
+
+    def _onMultipleLabelChanged(self, changed_item=None, column=0):
+        self._multiple_label_filters = {
+            name
+            for name, item in self._multiple_label_items.items()
+            if item.checkState(0) == Qt.Checked
+        }
+        self.applyFilters(reset_page=True)
+
+    def _createMultipleLabel(self, assign_to_gid=None):
+        name, accepted = QInputDialog.getText(
+            self,
+            self.tr("新建复数标签"),
+            self.tr("标签名称"),
         )
-        selected_index = 0
-        for category, name in categories:
-            self.categoryCombo.addItem(name, userData=category)
-            if category == selected:
-                selected_index = self.categoryCombo.count() - 1
-        self.categoryCombo.setCurrentIndex(selected_index)
+        if not accepted or not name.strip():
+            return
+        label_id = self.userRepository.create_label(name)
+        if assign_to_gid is not None:
+            self.userRepository.assign_label(assign_to_gid, label_id)
+        self._refreshUserLabels()
+
+    def _showMultipleLabelMenu(self, item: MangaItem, global_position):
+        menu = RoundMenu(self.tr("复数标签"), self)
+        labels = self.userRepository.list_labels()
+        if labels:
+            for label_id, name, _count in labels:
+                action = QAction(name, menu)
+                action.setCheckable(True)
+                action.setChecked(name in item.multiple_labels)
+                action.toggled.connect(
+                    lambda checked, current_id=label_id, current_name=name: (
+                        self._setMangaMultipleLabel(
+                            item.gid,
+                            current_id,
+                            current_name,
+                            checked,
+                        )
+                    )
+                )
+                menu.addAction(action)
+            menu.addSeparator()
+
+        create_action = QAction(self.tr("新建并分配标签…"), menu)
+        create_action.triggered.connect(lambda: self._createMultipleLabel(item.gid))
+        menu.addAction(create_action)
+        menu.exec(global_position)
+
+    def _setMangaMultipleLabel(
+        self,
+        gid: int,
+        label_id: int,
+        label_name: str,
+        checked: bool,
+    ):
+        if checked:
+            self.userRepository.assign_label(gid, label_id)
+        else:
+            self.userRepository.unassign_label(gid, label_id)
+
+        updated_items = []
+        for item in self._all_items:
+            if item.gid != gid:
+                updated_items.append(item)
+                continue
+            labels = set(item.multiple_labels)
+            if checked:
+                labels.add(label_name)
+            else:
+                labels.discard(label_name)
+            updated_items.append(
+                replace(item, multiple_labels=tuple(sorted(labels, key=str.casefold)))
+            )
+        self._all_items = updated_items
+        self._refreshUserLabels()
+
+    def _refreshUserLabels(self):
+        assignments = self.userRepository.labels_for_manga(
+            [item.gid for item in self._all_items]
+        )
+        self._all_items = [
+            replace(item, multiple_labels=assignments.get(item.gid, ()))
+            for item in self._all_items
+        ]
+        self._populateMultipleLabels(self.userRepository.list_labels())
+        self.applyFilters(reset_page=True)
 
     def _scheduleSearch(self):
         self.searchTimer.start()
 
-    def applyFilters(self):
+    def toggleSearch(self):
+        if self.searchPanel.isVisible():
+            self.searchPanel.hide()
+            self.searchButton.setIcon(FIF.SEARCH)
+        else:
+            self.openSearch()
+
+    def toggleClassification(self):
+        self.classificationCard.setVisible(self.classificationCard.isHidden())
+        self.tagButton.setIcon(
+            FIF.CARE_LEFT_SOLID if not self.classificationCard.isHidden() else FIF.TAG
+        )
+
+    def openSearch(self):
+        self.searchPanel.show()
+        self.searchButton.setIcon(FIF.UP)
+        self.searchEdit.setFocus(Qt.ShortcutFocusReason)
+        self.searchEdit.selectAll()
+
+    def applyFilters(self, reset_page=False):
         query = self.searchEdit.text().strip()
-        category = self.categoryCombo.currentData()
         self._filtered_items = [
             item
             for item in self._all_items
-            if (category is None or item.category == category) and item.matches(query)
+            if self._matchesPrimaryLabel(item)
+            and self._matchesMultipleLabels(item)
+            and item.matches(query)
         ]
+        if reset_page:
+            self._page = 1
+        self._page = min(max(1, self._page), self.pageCount())
         self.resultLabel.setText(
             self.tr("显示 {} / {} 部漫画").format(
                 len(self._filtered_items),
                 len(self._all_items),
             )
         )
+        self._updatePagination()
         self._renderCards()
+
+    def _matchesPrimaryLabel(self, item: MangaItem) -> bool:
+        if self._primary_label_filter == "__all__":
+            return True
+        if self._primary_label_filter == "__none__":
+            return not item.primary_label
+        return item.primary_label == self._primary_label_filter
+
+    def _matchesMultipleLabels(self, item: MangaItem) -> bool:
+        if not self._multiple_label_filters:
+            return True
+        return bool(self._multiple_label_filters.intersection(item.multiple_labels))
+
+    def pageCount(self) -> int:
+        return max(1, math.ceil(len(self._filtered_items) / self._page_size))
+
+    def setPage(self, page: int):
+        page = min(max(1, page), self.pageCount())
+        if page == self._page:
+            return
+        self._page = page
+        self._updatePagination()
+        self._renderCards()
+        self.scrollArea.verticalScrollBar().setValue(0)
+
+    def _onPageChanged(self, page: int):
+        self.setPage(page)
+
+    def _onPageSizeChanged(self):
+        page_size = self.pageSizeCombo.currentData()
+        if not page_size:
+            return
+        self._page_size = int(page_size)
+        cfg.set(cfg.mangaPageSize, self._page_size)
+        self._page = 1
+        self._updatePagination()
+        self._renderCards()
+
+    def _updatePagination(self):
+        page_count = self.pageCount()
+        self.pageSpinBox.blockSignals(True)
+        self.pageSpinBox.setRange(1, page_count)
+        self.pageSpinBox.setValue(self._page)
+        self.pageSpinBox.blockSignals(False)
+        self.pageCountLabel.setText(self.tr("/ {} 页").format(page_count))
+        self.firstPageButton.setEnabled(self._page > 1)
+        self.previousPageButton.setEnabled(self._page > 1)
+        self.nextPageButton.setEnabled(self._page < page_count)
+        self.lastPageButton.setEnabled(self._page < page_count)
 
     def setLayoutMode(self, mode: str):
         if mode not in (self.GRID_MODE, self.LIST_MODE) or mode == self._layout_mode:
@@ -373,8 +749,18 @@ class LocalMangaInterface(QWidget):
             self.contentLayout.addWidget(self._empty_label, 0, 0)
             return
 
+        start = (self._page - 1) * self._page_size
+        page_items = self._filtered_items[start:start + self._page_size]
         card_class = MangaGridCard if self._layout_mode == self.GRID_MODE else MangaListCard
-        self._cards = [card_class(item, self.scrollWidget) for item in self._filtered_items]
+        self._cards = [
+            card_class(
+                item,
+                self.mangaActivated.emit,
+                self._showMultipleLabelMenu,
+                self.scrollWidget,
+            )
+            for item in page_items
+        ]
         self._relayoutCards()
 
     def _clearContentLayout(self):
