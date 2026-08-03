@@ -1,3 +1,0 @@
-pip uninstall qfluentwidgets PyQt5 PyQt5-Qt5 PyQt5-sip
-pip install PySide6
-pip install git+https://github.com/zhiyiYo/PyQt-Fluent-Widgets.git@PySide6

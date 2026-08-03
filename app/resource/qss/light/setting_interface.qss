@@ -1,0 +1,15 @@
+SettingInterface,
+SettingInterface > QWidget > QWidget#qt_scrollarea_viewport,
+QWidget#scrollWidget {
+    background-color: transparent;
+}
+
+SettingInterface {
+    border: none;
+}
+
+QLabel#settingLabel {
+    color: black;
+    font: 600 28px "Microsoft YaHei UI";
+    background-color: transparent;
+}

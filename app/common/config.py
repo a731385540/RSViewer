@@ -3,9 +3,16 @@ import sys
 from enum import Enum
 
 from PySide6.QtCore import QLocale
-from qfluentwidgets import (qconfig, QConfig, ConfigItem, OptionsConfigItem, BoolValidator,
-                            OptionsValidator, RangeConfigItem, RangeValidator,
-                            FolderListValidator, Theme, FolderValidator, ConfigSerializer, __version__)
+from qfluentwidgets import (
+    BoolValidator,
+    ConfigItem,
+    ConfigSerializer,
+    FolderListValidator,
+    OptionsConfigItem,
+    OptionsValidator,
+    QConfig,
+    qconfig,
+)
 
 
 class Language(Enum):
@@ -34,11 +41,8 @@ def isWin11():
 class Config(QConfig):
     """ Config of application """
 
-    # folders
-    musicFolders = ConfigItem(
-        "Folders", "LocalMusic", [], FolderListValidator())
-    downloadFolder = ConfigItem(
-        "Folders", "Download", "app/download", FolderValidator())
+    libraryFolders = ConfigItem(
+        "Library", "Folders", [], FolderListValidator())
 
     # main window
     micaEnabled = ConfigItem("MainWindow", "MicaEnabled", isWin11(), BoolValidator())
@@ -47,26 +51,5 @@ class Config(QConfig):
     language = OptionsConfigItem(
         "MainWindow", "Language", Language.AUTO, OptionsValidator(Language), LanguageSerializer(), restart=True)
 
-    # Material
-    blurRadius = RangeConfigItem("Material", "AcrylicBlurRadius", 15, RangeValidator(0, 40))
-
-    # software update
-    checkUpdateAtStartUp = ConfigItem("Update", "CheckUpdateAtStartUp", True, BoolValidator())
-
-
-YEAR = 2023
-AUTHOR = "zhiyiYo"
-VERSION = __version__
-HELP_URL = "https://qfluentwidgets.com"
-REPO_URL = "https://github.com/zhiyiYo/PyQt-Fluent-Widgets"
-EXAMPLE_URL = "https://github.com/zhiyiYo/PyQt-Fluent-Widgets/tree/master/examples"
-FEEDBACK_URL = "https://github.com/zhiyiYo/PyQt-Fluent-Widgets/issues"
-RELEASE_URL = "https://github.com/zhiyiYo/PyQt-Fluent-Widgets/releases/latest"
-ZH_SUPPORT_URL = "https://qfluentwidgets.com/zh/price/"
-EN_SUPPORT_URL = "https://qfluentwidgets.com/price/"
-
-
 cfg = Config()
-cfg.themeMode.value = Theme.AUTO
-
 qconfig.load('app/config/config.json', cfg)
