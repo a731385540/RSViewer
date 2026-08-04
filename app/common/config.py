@@ -6,6 +6,7 @@ from pathlib import Path
 from PySide6.QtCore import QLocale
 from qfluentwidgets import (
     BoolValidator,
+    ColorConfigItem,
     ConfigItem,
     ConfigSerializer,
     FolderListValidator,
@@ -48,8 +49,40 @@ class Config(QConfig):
     ehViewerMangaRoot = ConfigItem("ExternalData", "EhViewerMangaRoot", "")
     mangaPageSize = OptionsConfigItem(
         "Library", "MangaPageSize", 40, OptionsValidator([20, 40, 60, 100]))
+    mangaSortOrder = OptionsConfigItem(
+        "Library", "MangaSortOrder", "desc", OptionsValidator(["desc", "asc"])
+    )
     searchShortcut = ConfigItem("Shortcuts", "OpenSearch", "Ctrl+K")
     backShortcut = ConfigItem("Shortcuts", "NavigateBack", "Z")
+
+    # manga reader
+    readerBackgroundColor = ColorConfigItem(
+        "MangaReader", "BackgroundColor", "#202020"
+    )
+    readerPageDirection = OptionsConfigItem(
+        "MangaReader",
+        "PageDirection",
+        "right_to_left",
+        OptionsValidator(
+            ["left_to_right", "right_to_left", "top_to_bottom", "bottom_to_top"]
+        ),
+    )
+    readerImageLoadSize = OptionsConfigItem(
+        "MangaReader",
+        "ImageLoadSize",
+        "fit_window",
+        OptionsValidator(["fit_window", "fit_width", "original"]),
+    )
+    readerScrollShortcut = ConfigItem("MangaReader", "ScrollShortcut", "Space")
+    readerAutoPageEnabled = ConfigItem(
+        "MangaReader", "AutoPageEnabled", False, BoolValidator()
+    )
+    readerAutoPageInterval = OptionsConfigItem(
+        "MangaReader",
+        "AutoPageInterval",
+        5,
+        OptionsValidator([2, 3, 5, 8, 10, 15, 30]),
+    )
 
     # main window
     micaEnabled = ConfigItem("MainWindow", "MicaEnabled", isWin11(), BoolValidator())

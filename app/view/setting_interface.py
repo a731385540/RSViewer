@@ -1,4 +1,5 @@
 from qfluentwidgets import (
+    ColorSettingCard,
     CustomColorSettingCard,
     ExpandLayout,
     FolderListSettingCard,
@@ -6,6 +7,7 @@ from qfluentwidgets import (
     ScrollArea,
     SettingCard,
     SettingCardGroup,
+    SwitchSettingCard,
     setTheme,
     setThemeColor,
     PushButton,
@@ -80,6 +82,11 @@ class ShortcutCaptureButton(PushButton):
     def sequence(self) -> str:
         return self._sequence
 
+    def setSequence(self, sequence: str):
+        self._sequence = sequence
+        if not self._capturing:
+            self._updateText()
+
     def beginCapture(self):
         self._capturing = True
         self.setText(self.tr("请按下快捷键…"))
@@ -147,6 +154,7 @@ class ShortcutSettingCard(SettingCard):
         self.hBoxLayout.addWidget(self.captureButton)
         self.hBoxLayout.addSpacing(16)
         self.captureButton.sequenceCaptured.connect(self._saveShortcut)
+        config_item.valueChanged.connect(self.captureButton.setSequence)
 
     def _saveShortcut(self, shortcut: str):
         cfg.set(self.configItem, shortcut)
@@ -170,6 +178,8 @@ class SettingInterface(ScrollArea):
             self.tr("界面设置"), self.scrollWidget)
         self.shortcutGroup = SettingCardGroup(
             self.tr("快捷键"), self.scrollWidget)
+        self.readerGroup = SettingCardGroup(
+            self.tr("漫画阅读器"), self.scrollWidget)
         self.themeCard = OptionsSettingCard(
             cfg.themeMode,
             FIF.BRUSH,
@@ -224,6 +234,68 @@ class SettingInterface(ScrollArea):
             self.tr("详情页等下一级页面的通用返回快捷键"),
             self.shortcutGroup,
         )
+        self.readerBackgroundCard = ColorSettingCard(
+            cfg.readerBackgroundColor,
+            FIF.PALETTE,
+            self.tr("阅读背景颜色"),
+            self.tr("设置漫画图片周围的画布颜色"),
+            self.readerGroup,
+        )
+        self.readerDirectionCard = OptionsSettingCard(
+            cfg.readerPageDirection,
+            FIF.MOVE,
+            self.tr("翻页方向"),
+            self.tr("括号中的方向键用于翻到下一页"),
+            texts=[
+                self.tr("从左向右（←）"),
+                self.tr("从右向左（→）"),
+                self.tr("从上向下（↑）"),
+                self.tr("从下向上（↓）"),
+            ],
+            parent=self.readerGroup,
+        )
+        self.readerImageLoadSizeCard = OptionsSettingCard(
+            cfg.readerImageLoadSize,
+            FIF.FIT_PAGE,
+            self.tr("图片载入大小"),
+            self.tr("控制图片首次显示时的缩放方式"),
+            texts=[
+                self.tr("适应窗口"),
+                self.tr("适应宽度（长图）"),
+                self.tr("原始大小"),
+            ],
+            parent=self.readerGroup,
+        )
+        self.readerScrollShortcutCard = ShortcutSettingCard(
+            cfg.readerScrollShortcut,
+            FIF.SCROLL,
+            self.tr("向前滚动"),
+            self.tr("长图模式下滚动一屏，到底后进入下一页"),
+            self.readerGroup,
+        )
+        self.readerAutoPageCard = SwitchSettingCard(
+            FIF.PLAY,
+            self.tr("自动翻页"),
+            self.tr("按设定间隔自动进入下一页"),
+            cfg.readerAutoPageEnabled,
+            self.readerGroup,
+        )
+        self.readerAutoPageIntervalCard = OptionsSettingCard(
+            cfg.readerAutoPageInterval,
+            FIF.SPEED_HIGH,
+            self.tr("自动翻页间隔"),
+            self.tr("每次自动翻页等待的时间"),
+            texts=[
+                self.tr("2 秒"),
+                self.tr("3 秒"),
+                self.tr("5 秒"),
+                self.tr("8 秒"),
+                self.tr("10 秒"),
+                self.tr("15 秒"),
+                self.tr("30 秒"),
+            ],
+            parent=self.readerGroup,
+        )
 
         self.__initWidget()
 
@@ -250,12 +322,19 @@ class SettingInterface(ScrollArea):
         self.personalGroup.addSettingCard(self.themeCard)
         self.personalGroup.addSettingCard(self.themeColorCard)
         self.personalGroup.addSettingCard(self.libraryFoldersCard)
+        self.readerGroup.addSettingCard(self.readerBackgroundCard)
+        self.readerGroup.addSettingCard(self.readerDirectionCard)
+        self.readerGroup.addSettingCard(self.readerImageLoadSizeCard)
+        self.readerGroup.addSettingCard(self.readerScrollShortcutCard)
+        self.readerGroup.addSettingCard(self.readerAutoPageCard)
+        self.readerGroup.addSettingCard(self.readerAutoPageIntervalCard)
         self.shortcutGroup.addSettingCard(self.searchShortcutCard)
         self.shortcutGroup.addSettingCard(self.backShortcutCard)
         self.expandLayout.setSpacing(28)
         self.expandLayout.setContentsMargins(36, 10, 36, 0)
         self.expandLayout.addWidget(self.dataSourceGroup)
         self.expandLayout.addWidget(self.personalGroup)
+        self.expandLayout.addWidget(self.readerGroup)
         self.expandLayout.addWidget(self.shortcutGroup)
 
     def __showRestartTooltip(self):

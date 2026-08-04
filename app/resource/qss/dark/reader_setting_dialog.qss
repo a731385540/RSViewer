@@ -1,0 +1,10 @@
+QDialog#readerSettingDialog,
+QScrollArea#readerSettingScrollArea,
+QScrollArea#readerSettingScrollArea > QWidget > QWidget#qt_scrollarea_viewport,
+QWidget#readerSettingScrollWidget {
+    background-color: rgb(32, 32, 32);
+}
+
+QScrollArea#readerSettingScrollArea {
+    border: none;
+}

@@ -20,6 +20,8 @@ class MangaItem:
     thumbnail_path: Optional[Path]
     page_paths: Tuple[Path, ...]
     page_count: int
+    added_time: int = 0
+    progress_page_index: Optional[int] = None
 
     @property
     def cover_image_path(self) -> Path:
@@ -35,6 +37,13 @@ class MangaItem:
         if self.english_title and self.english_title != self.display_title:
             return self.english_title
         return ""
+
+    @property
+    def progress_page_number(self) -> Optional[int]:
+        """Return the user-facing one-based reading page number."""
+        if self.progress_page_index is None:
+            return None
+        return self.progress_page_index + 1
 
     @property
     def searchable_text(self) -> str:

@@ -1,4 +1,4 @@
-from PySide6.QtCore import QEvent, QSize, QTimer, Qt
+from PySide6.QtCore import QEvent, QSize, QThreadPool, QTimer, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -26,6 +26,7 @@ from app.view.manga_reader_interface import MangaReaderInterface
 from app.view.media_interface import MediaInterface
 from app.view.navigation_resize_handle import NavigationResizeHandle
 from app.view.setting_interface import SettingInterface
+from app.workers.reading_progress_worker import ReadingProgressSaveWorker
 
 
 class MainWindow(FluentWindow):
@@ -35,20 +36,40 @@ class MainWindow(FluentWindow):
         self.themeListener = SystemThemeListener(self)
 
         self.mangaSource = self._createMangaSource()
+        self.userLibraryRepository = UserLibraryRepository(
+            PROJECT_ROOT / "app" / "data" / "rsviewer.db"
+        )
         self.localMangaInterface = LocalMangaInterface(
             self.mangaSource,
-            UserLibraryRepository(PROJECT_ROOT / "app" / "data" / "rsviewer.db"),
+            self.userLibraryRepository,
             self,
         )
-        self.mangaDetailInterface = MangaDetailInterface(self.mangaSource, self)
+        self.mangaDetailInterface = MangaDetailInterface(
+            self.mangaSource,
+            self.userLibraryRepository,
+            self,
+        )
         self.mangaReaderInterface = MangaReaderInterface(self)
+        self.progressThreadPool = QThreadPool(self)
+        self.progressThreadPool.setMaxThreadCount(1)
+        self._pendingProgress = {}
+        self.progressSaveTimer = QTimer(self)
+        self.progressSaveTimer.setSingleShot(True)
+        self.progressSaveTimer.setInterval(180)
+        self.progressSaveTimer.timeout.connect(self._flushReadingProgress)
         self._readerWasMaximized = False
         self.localMangaInterface.mangaActivated.connect(self.openMangaDetail)
         self.mangaDetailInterface.backRequested.connect(self.navigateBack)
         self.mangaDetailInterface.readRequested.connect(self.openMangaReader)
+        self.mangaDetailInterface.progressResolved.connect(
+            self.localMangaInterface.updateReadingProgress
+        )
         self.mangaReaderInterface.backRequested.connect(self.navigateBack)
         self.mangaReaderInterface.fullscreenRequested.connect(
             self.setReaderFullscreen
+        )
+        self.mangaReaderInterface.progressChanged.connect(
+            self.updateReadingProgress
         )
         self.favoriteMangaInterface = MediaInterface(
             self.tr("收藏"),
@@ -190,13 +211,35 @@ class MainWindow(FluentWindow):
         self.mangaDetailInterface.setManga(item)
         self.switchTo(self.mangaDetailInterface)
 
-    def openMangaReader(self, item):
+    def openMangaReader(self, item, page_index=-1):
         if not item.page_paths:
             return
         self.mangaDetailInterface.cancelLoads()
-        self.mangaReaderInterface.setManga(item)
+        if page_index < 0:
+            page_index = item.progress_page_index or 0
+        self.mangaReaderInterface.setManga(item, page_index)
         self.switchTo(self.mangaReaderInterface)
         self.mangaReaderInterface.setFocus()
+
+    def updateReadingProgress(self, gid: int, page_index: int, page_count: int):
+        self.localMangaInterface.updateReadingProgress(gid, page_index, page_count)
+        self.mangaDetailInterface.updateReadingProgress(gid, page_index, page_count)
+        self._pendingProgress[int(gid)] = int(page_index)
+        self.progressSaveTimer.start()
+
+    def _flushReadingProgress(self):
+        if not self._pendingProgress:
+            return
+        pending_progress = self._pendingProgress
+        self._pendingProgress = {}
+        for gid, page_index in pending_progress.items():
+            self.progressThreadPool.start(
+                ReadingProgressSaveWorker(
+                    self.userLibraryRepository,
+                    gid,
+                    page_index,
+                )
+            )
 
     def setReaderFullscreen(self, fullscreen: bool):
         fullscreen = bool(fullscreen)
@@ -228,6 +271,7 @@ class MainWindow(FluentWindow):
             if self.mangaReaderInterface.isFullscreen:
                 self.setReaderFullscreen(False)
             else:
+                self.mangaReaderInterface.deactivate()
                 self.switchTo(self.mangaDetailInterface)
             return True
         if current is self.mangaDetailInterface:
@@ -284,7 +328,10 @@ class MainWindow(FluentWindow):
     def closeEvent(self, e):
         self.localMangaInterface.cancelLoad()
         self.mangaDetailInterface.cancelLoads()
-        self.mangaReaderInterface.cancelLoads()
+        self.mangaReaderInterface.deactivate()
+        self.progressSaveTimer.stop()
+        self._flushReadingProgress()
+        self.progressThreadPool.waitForDone(3000)
         QApplication.instance().removeEventFilter(self)
         self.themeListener.terminate()
         self.themeListener.deleteLater()

@@ -1,4 +1,5 @@
 import math
+import sqlite3
 from collections import OrderedDict
 from dataclasses import replace
 from pathlib import Path
@@ -158,9 +159,20 @@ def visible_tags(item: MangaItem) -> str:
 
 
 def manga_metadata_text(item: MangaItem, translate) -> str:
+    parts = [item.category_name]
     if item.page_count:
-        return translate("{} · {} 页").format(item.category_name, item.page_count)
-    return item.category_name
+        parts.append(translate("{} 页").format(item.page_count))
+    if item.progress_page_number is not None:
+        if item.page_count:
+            parts.append(
+                translate("进度 {}/{}").format(
+                    min(item.progress_page_number, item.page_count),
+                    item.page_count,
+                )
+            )
+        else:
+            parts.append(translate("进度第 {} 页").format(item.progress_page_number))
+    return " · ".join(parts)
 
 
 class MangaGridCard(CardWidget):
@@ -203,6 +215,10 @@ class MangaGridCard(CardWidget):
         self.layout.addWidget(self.titleLabel)
         self.layout.addWidget(self.englishTitleLabel)
         self.layout.addWidget(self.metaLabel)
+
+    def setItem(self, item: MangaItem):
+        self.item = item
+        self.metaLabel.setText(manga_metadata_text(item, self.tr))
 
     def setCardWidth(self, width: int):
         width = max(150, width)
@@ -273,6 +289,10 @@ class MangaListCard(CardWidget):
         self.layout.addWidget(self.coverLabel)
         self.layout.addLayout(text_layout, 1)
 
+    def setItem(self, item: MangaItem):
+        self.item = item
+        self.metaLabel.setText(manga_metadata_text(item, self.tr))
+
     def contextMenuEvent(self, event):
         if self.labelMenuCallback is not None:
             self.labelMenuCallback(self.item, event.globalPos())
@@ -283,15 +303,22 @@ class MangaListCard(CardWidget):
 
 class CoverPreloadSignals(QObject):
     imageReady = Signal(int, object)
+    progressReady = Signal(int, int)
     finished = Signal()
 
 
 class CoverPreloadWorker(QRunnable):
     """后台预读当前页和后续页封面，并为缺失缩略图的漫画寻找第一页。"""
 
-    def __init__(self, source: EhViewerDataSource, items):
+    def __init__(
+        self,
+        source: EhViewerDataSource,
+        user_repository: UserLibraryRepository,
+        items,
+    ):
         super().__init__()
         self.source = source
+        self.user_repository = user_repository
         self.items = tuple(items)
         self.cancelled = False
         self.signals = CoverPreloadSignals()
@@ -300,6 +327,16 @@ class CoverPreloadWorker(QRunnable):
         for item in self.items:
             if self.cancelled:
                 return
+            if item.progress_page_index is None:
+                try:
+                    progress = self.user_repository.resolve_progress(
+                        item.gid,
+                        self.source.read_ehviewer_progress(item),
+                    )
+                    if progress is not None:
+                        self.signals.progressReady.emit(item.gid, progress)
+                except (OSError, RuntimeError, sqlite3.Error):
+                    pass
             image = QImage()
             try:
                 cover_path = self.source.find_cover_path(item)
@@ -357,8 +394,21 @@ class MangaLoadWorker(QRunnable):
             assignments = self.user_repository.labels_for_manga(
                 [item.gid for item in items]
             )
+            primary_assignments = self.user_repository.primary_labels_for_mangas(
+                [item.gid for item in items]
+            )
+            progress = self.user_repository.progress_for_mangas(
+                [item.gid for item in items]
+            )
             items = [
-                replace(item, multiple_labels=assignments.get(item.gid, ()))
+                replace(
+                    item,
+                    primary_label=primary_assignments.get(
+                        item.gid, item.primary_label
+                    ),
+                    multiple_labels=assignments.get(item.gid, ()),
+                    progress_page_index=progress.get(item.gid),
+                )
                 for item in items
             ]
             if not self.cancelled:
@@ -404,6 +454,8 @@ class LocalMangaInterface(QWidget):
         self._layout_mode = self.GRID_MODE
         self._primary_label_filter = "__all__"
         self._multiple_label_filters: Set[str] = set()
+        self._primary_labels: List[str] = []
+        self._sort_order = cfg.get(cfg.mangaSortOrder)
         self._page = 1
         self._page_size = cfg.get(cfg.mangaPageSize)
         self._last_columns = 0
@@ -434,6 +486,12 @@ class LocalMangaInterface(QWidget):
         )
         self.tagButton.clicked.connect(self.toggleClassification)
 
+        self.sortCombo = ComboBox(self)
+        self.sortCombo.addItem(self.tr("添加时间：最新优先"), userData="desc")
+        self.sortCombo.addItem(self.tr("添加时间：最早优先"), userData="asc")
+        self.sortCombo.setCurrentIndex(0 if self._sort_order == "desc" else 1)
+        self.sortCombo.setFixedWidth(176)
+
         self.layoutSwitch = SegmentedToolWidget(self)
         self.layoutSwitch.addItem(
             self.GRID_MODE,
@@ -455,6 +513,7 @@ class LocalMangaInterface(QWidget):
         header_layout.setSpacing(10)
         header_layout.addWidget(self.titleLabel)
         header_layout.addStretch(1)
+        header_layout.addWidget(self.sortCombo)
         header_layout.addWidget(self.layoutSwitch)
         header_layout.addWidget(self.tagButton)
         header_layout.addWidget(self.searchButton)
@@ -570,6 +629,7 @@ class LocalMangaInterface(QWidget):
         self.primaryLabelTree.currentItemChanged.connect(self._onPrimaryLabelChanged)
         self.multipleLabelTree.itemChanged.connect(self._onMultipleLabelChanged)
         self.addMultipleLabelButton.clicked.connect(lambda: self._createMultipleLabel())
+        self.sortCombo.currentIndexChanged.connect(self._onSortOrderChanged)
         self.pageSizeCombo.currentIndexChanged.connect(self._onPageSizeChanged)
         self.pageSpinBox.valueChanged.connect(self._onPageChanged)
         self.firstPageButton.clicked.connect(lambda: self.setPage(1))
@@ -607,7 +667,15 @@ class LocalMangaInterface(QWidget):
     def _onLoaded(self, payload):
         self._load_worker = None
         self._all_items, primary_labels, multiple_labels = payload
-        self._populatePrimaryLabels(primary_labels)
+        self._primary_labels = list(
+            dict.fromkeys(
+                [
+                    *primary_labels,
+                    *(item.primary_label for item in self._all_items if item.primary_label),
+                ]
+            )
+        )
+        self._populatePrimaryLabels(self._primary_labels)
         self._populateMultipleLabels(multiple_labels)
         self.applyFilters(reset_page=True)
 
@@ -692,12 +760,35 @@ class LocalMangaInterface(QWidget):
             self.userRepository.assign_label(assign_to_gid, label_id)
         self._refreshUserLabels()
 
-    def _showMultipleLabelMenu(self, item: MangaItem, global_position):
-        menu = RoundMenu(self.tr("复数标签"), self)
+    def _showLabelMenu(self, item: MangaItem, global_position):
+        menu = self._buildLabelMenu(item)
+        menu.exec(global_position)
+
+    def _buildLabelMenu(self, item: MangaItem):
+        menu = RoundMenu(self.tr("漫画标签"), self)
+        primary_menu = RoundMenu(self.tr("添加到分类标签"), menu)
+        if self._primary_labels:
+            for name in self._primary_labels:
+                action = QAction(name, primary_menu)
+                action.setCheckable(True)
+                action.setChecked(name == item.primary_label)
+                action.triggered.connect(
+                    lambda _checked=False, current_name=name: (
+                        self._setMangaPrimaryLabel(item.gid, current_name)
+                    )
+                )
+                primary_menu.addAction(action)
+        else:
+            empty_action = QAction(self.tr("暂无分类标签"), primary_menu)
+            empty_action.setEnabled(False)
+            primary_menu.addAction(empty_action)
+        menu.addMenu(primary_menu)
+
+        multiple_menu = RoundMenu(self.tr("添加到复数标签"), menu)
         labels = self.userRepository.list_labels()
         if labels:
             for label_id, name, _count in labels:
-                action = QAction(name, menu)
+                action = QAction(name, multiple_menu)
                 action.setCheckable(True)
                 action.setChecked(name in item.multiple_labels)
                 action.toggled.connect(
@@ -710,13 +801,22 @@ class LocalMangaInterface(QWidget):
                         )
                     )
                 )
-                menu.addAction(action)
-            menu.addSeparator()
+                multiple_menu.addAction(action)
+            multiple_menu.addSeparator()
 
-        create_action = QAction(self.tr("新建并分配标签…"), menu)
+        create_action = QAction(self.tr("新建并分配标签…"), multiple_menu)
         create_action.triggered.connect(lambda: self._createMultipleLabel(item.gid))
-        menu.addAction(create_action)
-        menu.exec(global_position)
+        multiple_menu.addAction(create_action)
+        menu.addMenu(multiple_menu)
+        return menu
+
+    def _setMangaPrimaryLabel(self, gid: int, label_name: str):
+        self.userRepository.set_primary_label(gid, label_name)
+        self._all_items = [
+            replace(item, primary_label=label_name) if item.gid == gid else item
+            for item in self._all_items
+        ]
+        self.applyFilters(reset_page=False)
 
     def _setMangaMultipleLabel(
         self,
@@ -760,6 +860,14 @@ class LocalMangaInterface(QWidget):
     def _scheduleSearch(self):
         self.searchTimer.start()
 
+    def _onSortOrderChanged(self):
+        order = self.sortCombo.currentData()
+        if order not in ("desc", "asc"):
+            return
+        self._sort_order = order
+        cfg.set(cfg.mangaSortOrder, order)
+        self.applyFilters(reset_page=True)
+
     def toggleSearch(self):
         if self.searchPanel.isVisible():
             self.searchPanel.hide()
@@ -788,6 +896,10 @@ class LocalMangaInterface(QWidget):
             and self._matchesMultipleLabels(item)
             and item.matches(query)
         ]
+        self._filtered_items.sort(
+            key=lambda item: (item.added_time, item.gid),
+            reverse=self._sort_order == "desc",
+        )
         if reset_page:
             self._page = 1
         self._page = min(max(1, self._page), self.pageCount())
@@ -877,7 +989,7 @@ class LocalMangaInterface(QWidget):
             card_class(
                 item,
                 self.mangaActivated.emit,
-                self._showMultipleLabelMenu,
+                self._showLabelMenu,
                 self._cover_cache.get(item.gid),
                 self.scrollWidget,
             )
@@ -897,9 +1009,14 @@ class LocalMangaInterface(QWidget):
         ]
         if not items:
             return
-        worker = CoverPreloadWorker(self.source, items)
+        worker = CoverPreloadWorker(self.source, self.userRepository, items)
         worker.signals.imageReady.connect(
             lambda gid, image: self._onCoverReady(worker, gid, image)
+        )
+        worker.signals.progressReady.connect(
+            lambda gid, page_index: self._onProgressReady(
+                worker, gid, page_index
+            )
         )
         worker.signals.finished.connect(lambda: self._finishCoverPreload(worker))
         self._cover_worker = worker
@@ -921,6 +1038,28 @@ class LocalMangaInterface(QWidget):
     def _finishCoverPreload(self, worker):
         if self._cover_worker is worker:
             self._cover_worker = None
+
+    def _onProgressReady(self, worker, gid: int, page_index: int):
+        if self._cover_worker is not worker:
+            return
+        self.updateReadingProgress(gid, page_index)
+
+    def updateReadingProgress(self, gid: int, page_index: int, page_count=0):
+        def update(item):
+            if item.gid != gid:
+                return item
+            return replace(
+                item,
+                progress_page_index=max(0, int(page_index)),
+                page_count=max(item.page_count, int(page_count or 0)),
+            )
+
+        self._all_items = [update(item) for item in self._all_items]
+        self._filtered_items = [update(item) for item in self._filtered_items]
+        for card in self._cards:
+            if card.item.gid == gid:
+                card.setItem(update(card.item))
+                break
 
     def _clearContentLayout(self):
         while self.contentLayout.count():

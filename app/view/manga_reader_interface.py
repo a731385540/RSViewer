@@ -1,10 +1,12 @@
 from collections import OrderedDict
+from dataclasses import replace
 from typing import Optional
 
-from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal
-from PySide6.QtGui import QImageReader, QKeyEvent, QPixmap
+from PySide6.QtCore import QEvent, QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
+from PySide6.QtGui import QImageReader, QKeyEvent, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
+    QGraphicsOpacityEffect,
     QGraphicsPixmapItem,
     QGraphicsScene,
     QGraphicsView,
@@ -13,10 +15,20 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import BodyLabel, SpinBox, ToolButton, TransparentToolButton
+from qfluentwidgets import (
+    BodyLabel,
+    CaptionLabel,
+    SimpleCardWidget,
+    SpinBox,
+    SubtitleLabel,
+    ToolButton,
+    TransparentToolButton,
+)
 from qfluentwidgets import FluentIcon as FIF
 
+from app.common.config import cfg
 from app.domain.manga import MangaItem
+from app.view.reader_setting_dialog import ReaderSettingDialog
 
 
 class ReaderLoadSignals(QObject):
@@ -58,6 +70,7 @@ class MangaReaderInterface(QWidget):
 
     backRequested = Signal()
     fullscreenRequested = Signal(bool)
+    progressChanged = Signal(int, int, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -68,9 +81,13 @@ class MangaReaderInterface(QWidget):
         self._image_cache = OrderedDict()
         self._load_worker: Optional[ReaderLoadWorker] = None
         self._pixmap_item: Optional[QGraphicsPixmapItem] = None
-        self._fit_mode = True
+        self._display_mode = cfg.get(cfg.readerImageLoadSize)
         self._zoom_factor = 1.0
         self._fullscreen = False
+        self._reader_active = False
+        self._settings_dialog: Optional[ReaderSettingDialog] = None
+        self._auto_page_timer = QTimer(self)
+        self._auto_page_timer.timeout.connect(self._autoAdvance)
 
         self.backButton = TransparentToolButton(FIF.LEFT_ARROW, self)
         self.backButton.setToolTip(self.tr("返回详情"))
@@ -93,8 +110,14 @@ class MangaReaderInterface(QWidget):
         self.fullscreenButton = ToolButton(FIF.FULL_SCREEN, self)
         self.fullscreenButton.setToolTip(self.tr("全屏 (F11)"))
         self.fullscreenButton.clicked.connect(self.toggleFullscreen)
+        self.autoPageButton = ToolButton(FIF.PLAY, self)
+        self.autoPageButton.clicked.connect(self.toggleAutoPage)
+        self.settingsButton = ToolButton(FIF.SETTING, self)
+        self.settingsButton.setToolTip(self.tr("阅读设置"))
+        self.settingsButton.clicked.connect(self.showReaderSettings)
 
-        toolbar = QHBoxLayout()
+        self.toolbarWidget = QWidget(self)
+        toolbar = QHBoxLayout(self.toolbarWidget)
         toolbar.setContentsMargins(18, 10, 18, 10)
         toolbar.setSpacing(8)
         toolbar.addWidget(self.backButton)
@@ -103,7 +126,25 @@ class MangaReaderInterface(QWidget):
         toolbar.addWidget(self.actualSizeButton)
         toolbar.addWidget(self.fitButton)
         toolbar.addWidget(self.zoomInButton)
+        toolbar.addWidget(self.autoPageButton)
+        toolbar.addWidget(self.settingsButton)
         toolbar.addWidget(self.fullscreenButton)
+
+        self.pageIndicatorCard = SimpleCardWidget(self)
+        self.pageIndicatorLabel = SubtitleLabel(
+            self.tr("尚未打开漫画"), self.pageIndicatorCard
+        )
+        self.pageIndicatorLabel.setAlignment(Qt.AlignCenter)
+        self.pageIndicatorLabel.setMinimumWidth(220)
+        page_indicator_card_layout = QHBoxLayout(self.pageIndicatorCard)
+        page_indicator_card_layout.setContentsMargins(18, 5, 18, 5)
+        page_indicator_card_layout.addWidget(self.pageIndicatorLabel)
+        self.pageIndicatorWidget = QWidget(self)
+        page_indicator_layout = QHBoxLayout(self.pageIndicatorWidget)
+        page_indicator_layout.setContentsMargins(18, 2, 18, 8)
+        page_indicator_layout.addStretch(1)
+        page_indicator_layout.addWidget(self.pageIndicatorCard)
+        page_indicator_layout.addStretch(1)
 
         self.scene = QGraphicsScene(self)
         self.graphicsView = QGraphicsView(self.scene, self)
@@ -112,6 +153,22 @@ class MangaReaderInterface(QWidget):
         self.graphicsView.setDragMode(QGraphicsView.ScrollHandDrag)
         self.graphicsView.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.graphicsView.setResizeAnchor(QGraphicsView.AnchorViewCenter)
+        self.graphicsView.installEventFilter(self)
+        self.graphicsView.viewport().installEventFilter(self)
+
+        self.fullscreenPageIndicatorLabel = CaptionLabel(
+            self.tr("尚未打开漫画"), self.graphicsView.viewport()
+        )
+        self.fullscreenPageIndicatorLabel.setAlignment(Qt.AlignCenter)
+        self.fullscreenPageIndicatorLabel.setAttribute(
+            Qt.WA_TransparentForMouseEvents
+        )
+        indicator_opacity = QGraphicsOpacityEffect(
+            self.fullscreenPageIndicatorLabel
+        )
+        indicator_opacity.setOpacity(0.58)
+        self.fullscreenPageIndicatorLabel.setGraphicsEffect(indicator_opacity)
+        self.fullscreenPageIndicatorLabel.hide()
 
         self.previousButton = ToolButton(FIF.LEFT_ARROW, self)
         self.previousButton.setToolTip(self.tr("上一页 (←)"))
@@ -123,16 +180,17 @@ class MangaReaderInterface(QWidget):
         self.pageSpinBox.setRange(1, 1)
         self.pageSpinBox.setFixedWidth(88)
         self.pageSpinBox.valueChanged.connect(self._jumpToPage)
-        self.pageCountLabel = QLabel(self.tr("/ 0 页"), self)
         self.zoomLabel = QLabel("100%", self)
 
-        navigation = QHBoxLayout()
+        self.navigationWidget = QWidget(self)
+        navigation = QHBoxLayout(self.navigationWidget)
         navigation.setContentsMargins(18, 8, 18, 12)
         navigation.setSpacing(8)
         navigation.addStretch(1)
         navigation.addWidget(self.previousButton)
+        navigation.addWidget(CaptionLabel(self.tr("跳转到"), self))
         navigation.addWidget(self.pageSpinBox)
-        navigation.addWidget(self.pageCountLabel)
+        navigation.addWidget(CaptionLabel(self.tr("页"), self))
         navigation.addWidget(self.nextButton)
         navigation.addSpacing(12)
         navigation.addWidget(self.zoomLabel)
@@ -141,9 +199,27 @@ class MangaReaderInterface(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addLayout(toolbar)
+        layout.addWidget(self.toolbarWidget)
+        layout.addWidget(self.pageIndicatorWidget)
         layout.addWidget(self.graphicsView, 1)
-        layout.addLayout(navigation)
+        layout.addWidget(self.navigationWidget)
+
+        self.setMouseTracking(True)
+        for widget in self.findChildren(QWidget):
+            widget.setMouseTracking(True)
+            widget.installEventFilter(self)
+
+        cfg.readerBackgroundColor.valueChanged.connect(self._applyBackgroundColor)
+        cfg.readerPageDirection.valueChanged.connect(self._updateDirectionControls)
+        cfg.readerImageLoadSize.valueChanged.connect(self._setImageLoadSize)
+        cfg.readerScrollShortcut.valueChanged.connect(
+            lambda _value: self._updateDirectionControls()
+        )
+        cfg.readerAutoPageEnabled.valueChanged.connect(self._updateAutoPageTimer)
+        cfg.readerAutoPageInterval.valueChanged.connect(self._updateAutoPageTimer)
+        self._applyBackgroundColor(cfg.get(cfg.readerBackgroundColor))
+        self._updateDirectionControls()
+        self._updateAutoPageTimer()
 
     @property
     def currentItem(self) -> Optional[MangaItem]:
@@ -159,6 +235,7 @@ class MangaReaderInterface(QWidget):
 
     def setManga(self, item: MangaItem, page_index=0):
         self.cancelLoads()
+        self._reader_active = True
         self._item = item
         self._image_cache.clear()
         self.titleLabel.setText(item.display_title)
@@ -167,13 +244,14 @@ class MangaReaderInterface(QWidget):
         self.pageSpinBox.setRange(1, max(1, page_count))
         self.pageSpinBox.setValue(1 if not page_count else page_index + 1)
         self.pageSpinBox.blockSignals(False)
-        self.pageCountLabel.setText(self.tr("/ {} 页").format(page_count))
         if not page_count:
             self._page_index = 0
+            self._updatePageIndicator(0)
             self.scene.clear()
             self.scene.addText(self.tr("没有可读取的图片页面"))
             self._pixmap_item = None
             self._updateControls()
+            self._updateAutoPageTimer()
             return
         self.showPage(min(max(0, page_index), page_count - 1))
 
@@ -182,10 +260,18 @@ class MangaReaderInterface(QWidget):
             return
         index = min(max(0, index), len(self._item.page_paths) - 1)
         self._page_index = index
+        self._item = replace(self._item, progress_page_index=index)
+        self.progressChanged.emit(
+            self._item.gid,
+            index,
+            len(self._item.page_paths),
+        )
         self.pageSpinBox.blockSignals(True)
         self.pageSpinBox.setValue(index + 1)
         self.pageSpinBox.blockSignals(False)
+        self._updatePageIndicator(len(self._item.page_paths))
         self._updateControls()
+        self._auto_page_timer.stop()
         if index in self._image_cache:
             self._displayImage(self._image_cache[index])
             self._image_cache.move_to_end(index)
@@ -203,20 +289,44 @@ class MangaReaderInterface(QWidget):
         self.showPage(self._page_index - 1)
 
     def fitToWindow(self):
-        self._fit_mode = True
-        self._applyViewTransform()
+        cfg.set(cfg.readerImageLoadSize, "fit_window")
 
     def actualSize(self):
-        self._fit_mode = False
-        self._zoom_factor = 1.0
-        self._applyViewTransform()
+        cfg.set(cfg.readerImageLoadSize, "original")
 
     def zoomBy(self, factor: float):
         if self._pixmap_item is None:
             return
-        self._fit_mode = False
+        self._display_mode = "custom"
         self._zoom_factor = min(8.0, max(0.1, self._zoom_factor * factor))
         self._applyViewTransform()
+
+    def showReaderSettings(self):
+        if self._settings_dialog is None:
+            self._settings_dialog = ReaderSettingDialog(self.window())
+        self._settings_dialog.show()
+        self._settings_dialog.raise_()
+        self._settings_dialog.activateWindow()
+
+    def toggleAutoPage(self):
+        cfg.set(
+            cfg.readerAutoPageEnabled,
+            not cfg.get(cfg.readerAutoPageEnabled),
+        )
+
+    def scrollForward(self):
+        """Scroll a long image by one viewport, then advance at the bottom."""
+        bar = self.graphicsView.verticalScrollBar()
+        if bar.maximum() > bar.minimum() and bar.value() < bar.maximum():
+            step = max(1, round(self.graphicsView.viewport().height() * 0.85))
+            bar.setValue(min(bar.maximum(), bar.value() + step))
+            return
+        self.nextPage()
+
+    def deactivate(self):
+        self._reader_active = False
+        self._auto_page_timer.stop()
+        self.cancelLoads()
 
     def toggleFullscreen(self):
         self.setFullscreenState(not self._fullscreen, emit_request=True)
@@ -231,8 +341,51 @@ class MangaReaderInterface(QWidget):
             if self._fullscreen
             else self.tr("全屏 (F11)")
         )
+        if self._fullscreen:
+            self.pageIndicatorWidget.hide()
+            self.fullscreenPageIndicatorLabel.show()
+            self.fullscreenPageIndicatorLabel.raise_()
+            self._positionFullscreenPageIndicator()
+            self.toolbarWidget.hide()
+            self.navigationWidget.hide()
+        else:
+            self.toolbarWidget.show()
+            self.pageIndicatorWidget.show()
+            self.navigationWidget.show()
+            self.fullscreenPageIndicatorLabel.hide()
         if emit_request:
             self.fullscreenRequested.emit(self._fullscreen)
+
+    def _updateFullscreenControlsForPointer(self, event):
+        if not self._fullscreen:
+            return
+        pointer = self.mapFromGlobal(event.globalPosition().toPoint())
+        y = pointer.y()
+        edge_size = 12
+        keep_top_visible = (
+            self.toolbarWidget.isVisible() and y <= self.toolbarWidget.height()
+        )
+        keep_bottom_visible = (
+            self.navigationWidget.isVisible()
+            and y >= self.height() - self.navigationWidget.height()
+        )
+        show_top = y <= edge_size or keep_top_visible
+        show_bottom = y >= self.height() - edge_size or keep_bottom_visible
+        if self.toolbarWidget.isVisible() != show_top:
+            self.toolbarWidget.setVisible(show_top)
+        if self.navigationWidget.isVisible() != show_bottom:
+            self.navigationWidget.setVisible(show_bottom)
+        self.fullscreenPageIndicatorLabel.raise_()
+
+    def _positionFullscreenPageIndicator(self):
+        viewport = self.graphicsView.viewport()
+        label = self.fullscreenPageIndicatorLabel
+        hint = label.sizeHint()
+        width = max(120, hint.width() + 20)
+        height = max(22, hint.height())
+        x = max(0, (viewport.width() - width) // 2)
+        y = max(0, viewport.height() - height - 14)
+        label.setGeometry(x, y, width, height)
 
     def cancelLoads(self):
         if self._load_worker is not None:
@@ -284,25 +437,103 @@ class MangaReaderInterface(QWidget):
         self._pixmap_item = None
         if image.isNull():
             self.scene.addText(self.tr("当前页面无法解码"))
+            self._updateAutoPageTimer()
             return
         self._pixmap_item = self.scene.addPixmap(QPixmap.fromImage(image))
         self.scene.setSceneRect(self._pixmap_item.boundingRect())
         self._applyViewTransform()
+        self._updateAutoPageTimer()
+        QTimer.singleShot(
+            0,
+            lambda: self.graphicsView.verticalScrollBar().setValue(
+                self.graphicsView.verticalScrollBar().minimum()
+            ),
+        )
 
     def _applyViewTransform(self):
         if self._pixmap_item is None:
             return
         self.graphicsView.resetTransform()
-        if self._fit_mode:
+        if self._display_mode == "fit_window":
             self.graphicsView.fitInView(self._pixmap_item, Qt.KeepAspectRatio)
             scale = self.graphicsView.transform().m11()
+        elif self._display_mode == "fit_width":
+            image_width = max(1.0, self._pixmap_item.boundingRect().width())
+            viewport_width = max(1, self.graphicsView.viewport().width() - 4)
+            scale = viewport_width / image_width
+            self.graphicsView.scale(scale, scale)
+        elif self._display_mode == "original":
+            scale = 1.0
         else:
             self.graphicsView.scale(self._zoom_factor, self._zoom_factor)
             scale = self._zoom_factor
         self.zoomLabel.setText(f"{round(scale * 100)}%")
 
+    def _applyBackgroundColor(self, color):
+        self.scene.setBackgroundBrush(color)
+
+    def _setImageLoadSize(self, mode: str):
+        self._display_mode = mode
+        self._zoom_factor = 1.0
+        self._applyViewTransform()
+
+    def _directionKeys(self):
+        return {
+            "left_to_right": (Qt.Key_Left, Qt.Key_Right, FIF.LEFT_ARROW, FIF.RIGHT_ARROW),
+            "right_to_left": (Qt.Key_Right, Qt.Key_Left, FIF.RIGHT_ARROW, FIF.LEFT_ARROW),
+            "top_to_bottom": (Qt.Key_Up, Qt.Key_Down, FIF.UP, FIF.DOWN),
+            "bottom_to_top": (Qt.Key_Down, Qt.Key_Up, FIF.DOWN, FIF.UP),
+        }[cfg.get(cfg.readerPageDirection)]
+
+    def _updateDirectionControls(self, _value=None):
+        next_key, previous_key, next_icon, previous_icon = self._directionKeys()
+        self.nextButton.setIcon(next_icon)
+        self.previousButton.setIcon(previous_icon)
+        self.nextButton.setToolTip(
+            self.tr("下一页 ({})").format(QKeySequence(next_key).toString())
+        )
+        self.previousButton.setToolTip(
+            self.tr("上一页 ({})").format(QKeySequence(previous_key).toString())
+        )
+
+    def _updateAutoPageTimer(self, _value=None):
+        enabled = cfg.get(cfg.readerAutoPageEnabled)
+        self.autoPageButton.setIcon(FIF.PAUSE if enabled else FIF.PLAY)
+        self.autoPageButton.setToolTip(
+            self.tr("关闭自动翻页") if enabled else self.tr("开启自动翻页")
+        )
+        has_next_page = bool(
+            self._item
+            and self._item.page_paths
+            and self._page_index + 1 < len(self._item.page_paths)
+        )
+        if enabled and self._reader_active and has_next_page:
+            self._auto_page_timer.start(
+                int(cfg.get(cfg.readerAutoPageInterval)) * 1000
+            )
+        else:
+            self._auto_page_timer.stop()
+
+    def _autoAdvance(self):
+        if self._item and self._page_index + 1 < len(self._item.page_paths):
+            self.nextPage()
+        else:
+            self._auto_page_timer.stop()
+
     def _jumpToPage(self, page: int):
         self.showPage(page - 1)
+
+    def _updatePageIndicator(self, page_count: int):
+        if page_count <= 0:
+            text = self.tr("没有可阅读页面")
+            self.pageIndicatorLabel.setText(text)
+            self.fullscreenPageIndicatorLabel.setText(text)
+            self._positionFullscreenPageIndicator()
+            return
+        text = self.tr("第 {} / {} 页").format(self._page_index + 1, page_count)
+        self.pageIndicatorLabel.setText(text)
+        self.fullscreenPageIndicatorLabel.setText(text)
+        self._positionFullscreenPageIndicator()
 
     def _updateControls(self):
         page_count = len(self._item.page_paths) if self._item else 0
@@ -310,48 +541,101 @@ class MangaReaderInterface(QWidget):
         self.nextButton.setEnabled(self._page_index + 1 < page_count)
         self.pageSpinBox.setEnabled(page_count > 0)
 
-    def keyPressEvent(self, event: QKeyEvent):
+    def _matchesScrollShortcut(self, event: QKeyEvent) -> bool:
+        pressed = QKeySequence(event.keyCombination()).toString(
+            QKeySequence.PortableText
+        )
+        return bool(pressed and pressed == cfg.get(cfg.readerScrollShortcut))
+
+    def _isReaderKey(self, event: QKeyEvent) -> bool:
+        next_key, previous_key, _next_icon, _previous_icon = self._directionKeys()
+        if self._matchesScrollShortcut(event):
+            return True
+        if event.modifiers() & Qt.ControlModifier:
+            return event.key() in (Qt.Key_Plus, Qt.Key_Equal, Qt.Key_Minus)
+        return event.key() in {
+            Qt.Key_F11,
+            Qt.Key_Escape,
+            next_key,
+            previous_key,
+            Qt.Key_PageDown,
+            Qt.Key_PageUp,
+            Qt.Key_Backspace,
+            Qt.Key_Home,
+            Qt.Key_End,
+        }
+
+    def _handleReaderKey(self, event: QKeyEvent) -> bool:
         if event.key() == Qt.Key_F11:
             self.toggleFullscreen()
-            event.accept()
-            return
+            return True
         if event.key() == Qt.Key_Escape:
             if self._fullscreen:
                 self.setFullscreenState(False, emit_request=True)
             else:
                 self.backRequested.emit()
-            event.accept()
-            return
-        if event.key() in (Qt.Key_Right, Qt.Key_Down, Qt.Key_PageDown, Qt.Key_Space):
+            return True
+
+        if self._matchesScrollShortcut(event):
+            self.scrollForward()
+            return True
+
+        next_key, previous_key, _next_icon, _previous_icon = self._directionKeys()
+        if event.key() in (next_key, Qt.Key_PageDown):
             self.nextPage()
-            event.accept()
-            return
-        if event.key() in (Qt.Key_Left, Qt.Key_Up, Qt.Key_PageUp, Qt.Key_Backspace):
+            return True
+        if event.key() in (previous_key, Qt.Key_PageUp, Qt.Key_Backspace):
             self.previousPage()
-            event.accept()
-            return
+            return True
         if event.key() == Qt.Key_Home:
             self.showPage(0)
-            event.accept()
-            return
+            return True
         if event.key() == Qt.Key_End and self._item is not None:
             self.showPage(len(self._item.page_paths) - 1)
-            event.accept()
-            return
+            return True
         if event.modifiers() & Qt.ControlModifier and event.key() in (
             Qt.Key_Plus,
             Qt.Key_Equal,
         ):
             self.zoomBy(1.25)
-            event.accept()
-            return
+            return True
         if event.modifiers() & Qt.ControlModifier and event.key() == Qt.Key_Minus:
             self.zoomBy(0.8)
+            return True
+        return False
+
+    def eventFilter(self, watched, event):
+        if self._fullscreen and event.type() == QEvent.MouseMove:
+            self._updateFullscreenControlsForPointer(event)
+        if watched is self.graphicsView.viewport() and event.type() == QEvent.Resize:
+            self._positionFullscreenPageIndicator()
+        if watched in (self.graphicsView, self.graphicsView.viewport()):
+            if event.type() == QEvent.ShortcutOverride and self._isReaderKey(event):
+                event.accept()
+                return True
+            if event.type() == QEvent.KeyPress and self._handleReaderKey(event):
+                event.accept()
+                return True
+        return super().eventFilter(watched, event)
+
+    def keyPressEvent(self, event: QKeyEvent):
+        if self._handleReaderKey(event):
             event.accept()
             return
         super().keyPressEvent(event)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if self._fit_mode:
+        self._positionFullscreenPageIndicator()
+        if self._display_mode in ("fit_window", "fit_width"):
             self._applyViewTransform()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._reader_active = True
+        self._updateAutoPageTimer()
+
+    def hideEvent(self, event):
+        self._reader_active = False
+        self._auto_page_timer.stop()
+        super().hideEvent(event)

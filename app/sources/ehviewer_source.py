@@ -1,4 +1,5 @@
 import os
+import re
 import sqlite3
 from contextlib import closing
 from dataclasses import replace
@@ -91,10 +92,11 @@ class EhViewerDataSource:
                         thumbnail_path=thumbnail,
                         page_paths=(),
                         page_count=0,
+                        added_time=int(row["TIME"] or 0),
                     )
                 )
 
-        return sorted(items, key=lambda item: item.display_title.casefold())
+        return items
 
     def load_pages(self, item: MangaItem) -> MangaItem:
         """按需读取单本漫画页面；只在用户打开详情时调用。"""
@@ -116,6 +118,20 @@ class EhViewerDataSource:
             page_paths=pages,
             page_count=len(pages),
         )
+
+    @staticmethod
+    def read_ehviewer_progress(item: MangaItem) -> Optional[int]:
+        """Read the zero-based hexadecimal page index from line 2 of .ehviewer."""
+        sidecar = item.folder / ".ehviewer"
+        try:
+            with sidecar.open("r", encoding="ascii") as stream:
+                stream.readline()
+                value = stream.readline().strip()
+        except (OSError, UnicodeError):
+            return None
+        if not re.fullmatch(r"[0-9a-fA-F]{1,16}", value):
+            return None
+        return int(value, 16)
 
     def find_cover_path(self, item: MangaItem) -> Optional[Path]:
         """按需寻找封面，缩略图缺失时回退到自然排序后的第一页。"""
@@ -231,6 +247,7 @@ class EhViewerDataSource:
             downloads.TITLE_JPN,
             downloads.CATEGORY,
             downloads.LABEL,
+            downloads.TIME,
             dirname.DIRNAME,
             tags.ARTIST,
             tags.COSPLAYER,

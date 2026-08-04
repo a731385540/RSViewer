@@ -8,6 +8,7 @@ class StyleSheet(StyleSheetBase, Enum):
     """RSViewer 自定义样式表。"""
 
     SETTING_INTERFACE = "setting_interface"
+    READER_SETTING_DIALOG = "reader_setting_dialog"
 
     def path(self, theme=Theme.AUTO):
         theme = qconfig.theme if theme == Theme.AUTO else theme

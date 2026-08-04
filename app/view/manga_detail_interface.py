@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 from typing import List, Optional
 
@@ -17,13 +18,16 @@ from qfluentwidgets import (
     PrimaryPushButton,
     ScrollArea,
     SimpleCardWidget,
+    SpinBox,
     SubtitleLabel,
     TitleLabel,
+    ToolButton,
     TransparentToolButton,
 )
 from qfluentwidgets import FluentIcon as FIF
 
 from app.domain.manga import MangaItem
+from app.repositories.user_library_repository import UserLibraryRepository
 from app.sources.ehviewer_source import EhViewerDataSource
 from app.view.local_manga_interface import CoverLabel, visible_tags
 
@@ -31,14 +35,20 @@ from app.view.local_manga_interface import CoverLabel, visible_tags
 class PreviewTile(QWidget):
     """详情页中的单页缩略预览。"""
 
-    def __init__(self, page_number: int, parent=None):
+    clicked = Signal(int)
+
+    def __init__(self, page_index: int, parent=None):
         super().__init__(parent)
+        self.pageIndex = page_index
+        self.setCursor(Qt.PointingHandCursor)
         self.setFixedSize(126, 184)
         self.imageLabel = QLabel(self)
+        self.imageLabel.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.imageLabel.setAlignment(Qt.AlignCenter)
         self.imageLabel.setFixedSize(116, 154)
         self.imageLabel.setText(self.tr("加载中…"))
-        number = CaptionLabel(str(page_number), self)
+        number = CaptionLabel(str(page_index + 1), self)
+        number.setAttribute(Qt.WA_TransparentForMouseEvents)
         number.setAlignment(Qt.AlignCenter)
 
         layout = QVBoxLayout(self)
@@ -54,6 +64,13 @@ class PreviewTile(QWidget):
         self.imageLabel.setText("")
         self.imageLabel.setPixmap(QPixmap.fromImage(image))
 
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self.rect().contains(event.position().toPoint()):
+            self.clicked.emit(self.pageIndex)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
 
 class PreviewLoadSignals(QObject):
     imageReady = Signal(int, object)
@@ -63,14 +80,15 @@ class PreviewLoadSignals(QObject):
 class PreviewLoadWorker(QRunnable):
     """在后台解码页面缩略图，避免打开详情时阻塞界面。"""
 
-    def __init__(self, page_paths):
+    def __init__(self, page_paths, start_index=0):
         super().__init__()
         self.pagePaths = tuple(page_paths)
+        self.startIndex = int(start_index)
         self.signals = PreviewLoadSignals()
         self.cancelled = False
 
     def run(self):
-        for index, path in enumerate(self.pagePaths):
+        for index, path in enumerate(self.pagePaths, self.startIndex):
             if self.cancelled:
                 break
             reader = QImageReader(str(path))
@@ -104,9 +122,15 @@ class PageDiscoverySignals(QObject):
 class PageDiscoveryWorker(QRunnable):
     """仅在打开详情时枚举单本漫画，避免资源列表扫描整个图库。"""
 
-    def __init__(self, source: EhViewerDataSource, item: MangaItem):
+    def __init__(
+        self,
+        source: EhViewerDataSource,
+        user_repository: UserLibraryRepository,
+        item: MangaItem,
+    ):
         super().__init__()
         self.source = source
+        self.user_repository = user_repository
         self.item = item
         self.cancelled = False
         self.signals = PageDiscoverySignals()
@@ -114,6 +138,13 @@ class PageDiscoveryWorker(QRunnable):
     def run(self):
         try:
             item = self.source.load_pages(self.item)
+            progress = self.user_repository.resolve_progress(
+                item.gid,
+                self.source.read_ehviewer_progress(item),
+            )
+            if progress is not None and item.page_paths:
+                clamped_progress = min(progress, len(item.page_paths) - 1)
+                item = replace(item, progress_page_index=clamped_progress)
             if not self.cancelled:
                 try:
                     self.signals.loaded.emit(item)
@@ -130,16 +161,26 @@ class PageDiscoveryWorker(QRunnable):
 class MangaDetailInterface(QWidget):
     """本地漫画的信息、操作和页面预览。"""
 
-    backRequested = Signal()
-    readRequested = Signal(object)
+    PREVIEW_PAGE_SIZE = 40
 
-    def __init__(self, source: EhViewerDataSource, parent=None):
+    backRequested = Signal()
+    readRequested = Signal(object, int)
+    progressResolved = Signal(int, int, int)
+
+    def __init__(
+        self,
+        source: EhViewerDataSource,
+        user_repository: UserLibraryRepository,
+        parent=None,
+    ):
         super().__init__(parent)
         self.source = source
+        self.userRepository = user_repository
         self.setObjectName("mangaDetailInterface")
         self._item: Optional[MangaItem] = None
         self._preview_tiles: List[PreviewTile] = []
         self._preview_columns = 0
+        self._preview_page = 1
         self._preview_worker: Optional[PreviewLoadWorker] = None
         self._page_worker: Optional[PageDiscoveryWorker] = None
         self.currentCoverPath: Optional[Path] = None
@@ -213,6 +254,43 @@ class MangaDetailInterface(QWidget):
         self.previewGrid.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         preview_layout.addWidget(self.previewWidget)
 
+        self.previewPaginationWidget = QWidget(self.previewCard)
+        preview_pagination_layout = QHBoxLayout(self.previewPaginationWidget)
+        preview_pagination_layout.setContentsMargins(0, 4, 0, 0)
+        preview_pagination_layout.setSpacing(8)
+        preview_pagination_layout.addStretch(1)
+        self.previewFirstPageButton = ToolButton(FIF.PAGE_LEFT, self.previewCard)
+        self.previewPreviousPageButton = ToolButton(FIF.LEFT_ARROW, self.previewCard)
+        self.previewPageSpinBox = SpinBox(self.previewCard)
+        self.previewPageSpinBox.setRange(1, 1)
+        self.previewPageSpinBox.setFixedWidth(82)
+        self.previewPageCountLabel = BodyLabel(self.tr("/ 1 页"), self.previewCard)
+        self.previewNextPageButton = ToolButton(FIF.RIGHT_ARROW, self.previewCard)
+        self.previewLastPageButton = ToolButton(FIF.PAGE_RIGHT, self.previewCard)
+        preview_pagination_layout.addWidget(self.previewFirstPageButton)
+        preview_pagination_layout.addWidget(self.previewPreviousPageButton)
+        preview_pagination_layout.addWidget(self.previewPageSpinBox)
+        preview_pagination_layout.addWidget(self.previewPageCountLabel)
+        preview_pagination_layout.addWidget(self.previewNextPageButton)
+        preview_pagination_layout.addWidget(self.previewLastPageButton)
+        preview_pagination_layout.addStretch(1)
+        preview_layout.addWidget(self.previewPaginationWidget)
+        self.previewPaginationWidget.hide()
+
+        self.previewFirstPageButton.clicked.connect(
+            lambda: self._setPreviewPage(1)
+        )
+        self.previewPreviousPageButton.clicked.connect(
+            lambda: self._setPreviewPage(self._preview_page - 1)
+        )
+        self.previewPageSpinBox.valueChanged.connect(self._setPreviewPage)
+        self.previewNextPageButton.clicked.connect(
+            lambda: self._setPreviewPage(self._preview_page + 1)
+        )
+        self.previewLastPageButton.clicked.connect(
+            lambda: self._setPreviewPage(self._previewPageCount())
+        )
+
         self.scrollWidget = QWidget()
         self.scrollWidget.setObjectName("mangaDetailScrollWidget")
         content_layout = QVBoxLayout(self.scrollWidget)
@@ -257,28 +335,21 @@ class MangaDetailInterface(QWidget):
             self._page_worker = None
         self._item = item
         self.readButton.setEnabled(bool(item.page_paths))
-        self.readButton.setText(
-            self.tr("开始阅读") if item.page_paths else self.tr("正在准备…")
-        )
+        if not item.page_paths:
+            self.readButton.setText(self.tr("正在准备…"))
+        elif item.progress_page_number is not None:
+            self.readButton.setText(
+                self.tr("继续阅读（第 {} 页）").format(
+                    min(item.progress_page_number, item.page_count)
+                )
+            )
+        else:
+            self.readButton.setText(self.tr("开始阅读"))
         self.pageTitle.setText(self.tr("漫画详情"))
         self.originalTitleLabel.setText(item.display_title)
         self.englishTitleLabel.setText(item.secondary_title)
         self.englishTitleLabel.setVisible(bool(item.secondary_title))
-        primary_label = item.primary_label or self.tr("未分类")
-        multiple_labels = "、".join(item.multiple_labels) or self.tr("无")
-        self.metadataLabel.setText(
-            self.tr(
-                "GID：{gid}\n标签：{primary}\n分类标签：{multiple}\n"
-                "来源类别：{category}\n页数：{pages}\n目录：{folder}"
-            ).format(
-                gid=item.gid,
-                primary=primary_label,
-                multiple=multiple_labels,
-                category=item.category_name,
-                pages=item.page_count or self.tr("读取中…"),
-                folder=item.folder,
-            )
-        )
+        self.metadataLabel.setText(self._metadataText(item))
         tags = visible_tags(item)
         self.tagsLabel.setText(self.tr("标签信息：{}").format(tags or self.tr("无")))
 
@@ -298,7 +369,7 @@ class MangaDetailInterface(QWidget):
             self._showPages(item)
         else:
             self.previewTitle.setText(self.tr("正在读取页面…"))
-            worker = PageDiscoveryWorker(self.source, item)
+            worker = PageDiscoveryWorker(self.source, self.userRepository, item)
             worker.signals.loaded.connect(
                 lambda loaded_item: self._finishPageDiscovery(worker, loaded_item)
             )
@@ -310,21 +381,65 @@ class MangaDetailInterface(QWidget):
         self.scrollArea.verticalScrollBar().setValue(0)
 
     def _showPages(self, item: MangaItem):
+        self._preview_page = 1
+        self._renderPreviewPage(item)
+
+    def _renderPreviewPage(self, item: MangaItem):
+        self._clearPreviewTiles()
+        page_count = self._previewPageCount(item)
+        self._preview_page = min(max(1, self._preview_page), page_count)
+        start = (self._preview_page - 1) * self.PREVIEW_PAGE_SIZE
+        end = min(len(item.page_paths), start + self.PREVIEW_PAGE_SIZE)
         self._preview_tiles = [
             PreviewTile(index, self.previewWidget)
-            for index, _path in enumerate(item.page_paths, 1)
+            for index in range(start, end)
         ]
+        for tile in self._preview_tiles:
+            tile.clicked.connect(
+                lambda page_index, current_item=item: self.readRequested.emit(
+                    current_item, page_index
+                )
+            )
         self.previewTitle.setText(
-            self.tr("页面预览（{} 页）").format(len(self._preview_tiles))
+            self.tr("页面预览（共 {} 页，第 {} / {} 页）").format(
+                len(item.page_paths), self._preview_page, page_count
+            )
         )
+        self._updatePreviewPagination(page_count)
         QTimer.singleShot(0, self._relayoutPreview)
-        worker = PreviewLoadWorker(item.page_paths)
+        worker = PreviewLoadWorker(item.page_paths[start:end], start)
         worker.signals.imageReady.connect(
             lambda index, image: self._setPreviewImage(worker, index, image)
         )
         worker.signals.finished.connect(lambda: self._finishPreviewLoad(worker))
         self._preview_worker = worker
         QThreadPool.globalInstance().start(worker)
+
+    def _previewPageCount(self, item=None) -> int:
+        current_item = item or self._item
+        total = len(current_item.page_paths) if current_item else 0
+        return max(1, (total + self.PREVIEW_PAGE_SIZE - 1) // self.PREVIEW_PAGE_SIZE)
+
+    def _setPreviewPage(self, page: int):
+        if self._item is None or not self._item.page_paths:
+            return
+        page = min(max(1, int(page)), self._previewPageCount())
+        if page == self._preview_page and self._preview_tiles:
+            return
+        self._preview_page = page
+        self._renderPreviewPage(self._item)
+
+    def _updatePreviewPagination(self, page_count: int):
+        self.previewPaginationWidget.setVisible(page_count > 1)
+        self.previewPageSpinBox.blockSignals(True)
+        self.previewPageSpinBox.setRange(1, page_count)
+        self.previewPageSpinBox.setValue(self._preview_page)
+        self.previewPageSpinBox.blockSignals(False)
+        self.previewPageCountLabel.setText(self.tr("/ {} 页").format(page_count))
+        self.previewFirstPageButton.setEnabled(self._preview_page > 1)
+        self.previewPreviousPageButton.setEnabled(self._preview_page > 1)
+        self.previewNextPageButton.setEnabled(self._preview_page < page_count)
+        self.previewLastPageButton.setEnabled(self._preview_page < page_count)
 
     def _finishPageDiscovery(self, worker, item: MangaItem):
         if self._page_worker is not worker:
@@ -336,6 +451,12 @@ class MangaDetailInterface(QWidget):
             self.readButton.setText(self.tr("无法阅读"))
             self.previewTitle.setText(self.tr("未找到可读取的图片页面"))
             return
+        if item.progress_page_index is not None:
+            self.progressResolved.emit(
+                item.gid,
+                item.progress_page_index,
+                item.page_count,
+            )
         self.setManga(item)
 
     def _failPageDiscovery(self, worker, message: str):
@@ -356,9 +477,58 @@ class MangaDetailInterface(QWidget):
     def _requestRead(self):
         if self._item is None or not self._item.page_paths:
             return
-        self.readRequested.emit(self._item)
+        self.readRequested.emit(self._item, -1)
+
+    def updateReadingProgress(self, gid: int, page_index: int, page_count=0):
+        if self._item is None or self._item.gid != gid:
+            return
+        self._item = replace(
+            self._item,
+            progress_page_index=max(0, int(page_index)),
+            page_count=max(self._item.page_count, int(page_count or 0)),
+        )
+        self.metadataLabel.setText(self._metadataText(self._item))
+        current_page = self._item.progress_page_number
+        if self._item.page_count:
+            current_page = min(current_page, self._item.page_count)
+        self.readButton.setText(
+            self.tr("继续阅读（第 {} 页）").format(
+                current_page
+            )
+        )
+
+    def _progressText(self, item: MangaItem) -> str:
+        if item.progress_page_number is None:
+            return self.tr("未开始")
+        if item.page_count:
+            return self.tr("第 {} / {} 页").format(
+                min(item.progress_page_number, item.page_count),
+                item.page_count,
+            )
+        return self.tr("第 {} 页").format(item.progress_page_number)
+
+    def _metadataText(self, item: MangaItem) -> str:
+        primary_label = item.primary_label or self.tr("未分类")
+        multiple_labels = "、".join(item.multiple_labels) or self.tr("无")
+        return self.tr(
+            "GID：{gid}\n标签：{primary}\n分类标签：{multiple}\n"
+            "来源类别：{category}\n页数：{pages}\n阅读进度：{progress}\n目录：{folder}"
+        ).format(
+            gid=item.gid,
+            primary=primary_label,
+            multiple=multiple_labels,
+            category=item.category_name,
+            pages=item.page_count or self.tr("读取中…"),
+            progress=self._progressText(item),
+            folder=item.folder,
+        )
 
     def _clearPreview(self):
+        self._clearPreviewTiles()
+        self._preview_page = 1
+        self.previewPaginationWidget.hide()
+
+    def _clearPreviewTiles(self):
         if self._preview_worker is not None:
             self._preview_worker.cancelled = True
             self._preview_worker = None
@@ -372,8 +542,12 @@ class MangaDetailInterface(QWidget):
         self._preview_columns = 0
 
     def _setPreviewImage(self, worker, index: int, image):
-        if self._preview_worker is worker and 0 <= index < len(self._preview_tiles):
-            self._preview_tiles[index].setImage(image)
+        if self._preview_worker is not worker:
+            return
+        start = (self._preview_page - 1) * self.PREVIEW_PAGE_SIZE
+        local_index = index - start
+        if 0 <= local_index < len(self._preview_tiles):
+            self._preview_tiles[local_index].setImage(image)
 
     def _finishPreviewLoad(self, worker):
         if self._preview_worker is worker:
