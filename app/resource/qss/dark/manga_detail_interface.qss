@@ -1,0 +1,61 @@
+QWidget#mangaTagGroups,
+QWidget#mangaTagGroup,
+QWidget#mangaTagChipContainer {
+    background: transparent;
+}
+
+QLabel#mangaTagGroupTitle {
+    color: rgba(255, 255, 255, 165);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+QLabel#mangaTagEmptyLabel {
+    color: rgba(255, 255, 255, 125);
+}
+
+QLabel#mangaTagChip {
+    min-height: 24px;
+    padding: 1px 9px;
+    border: 1px solid #5f6268;
+    border-radius: 5px;
+    background: rgba(255, 255, 255, 18);
+    color: #d7d9de;
+    font-size: 12px;
+}
+
+QLabel#mangaTagChip[tagTone="creator"] {
+    border-color: #315f89;
+    background: rgba(51, 126, 204, 35);
+    color: #79bbff;
+}
+
+QLabel#mangaTagChip[tagTone="work"] {
+    border-color: #634d91;
+    background: rgba(118, 83, 184, 38);
+    color: #bda6eb;
+}
+
+QLabel#mangaTagChip[tagTone="language"] {
+    border-color: #466b38;
+    background: rgba(82, 155, 46, 35);
+    color: #95d475;
+}
+
+QLabel#mangaTagChip[tagTone="female"] {
+    border-color: #814563;
+    background: rgba(185, 74, 125, 38);
+    color: #e79aba;
+}
+
+QLabel#mangaTagChip[tagTone="male"] {
+    border-color: #346b78;
+    background: rgba(23, 130, 155, 38);
+    color: #70c7d8;
+}
+
+QLabel#mangaTagChip[tagTone="mixed"] {
+    border-color: #7d6238;
+    background: rgba(184, 130, 48, 38);
+    color: #e6b980;
+}

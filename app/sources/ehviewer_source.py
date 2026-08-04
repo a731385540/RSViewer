@@ -1,6 +1,7 @@
 import os
 import re
 import sqlite3
+import time
 from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
@@ -49,7 +50,7 @@ def natural_page_key(path: Path) -> Tuple[int, object]:
 
 
 class EhViewerDataSource:
-    """以只读方式读取 EhViewer 数据库及其下载目录。"""
+    """默认只读访问 EhViewer；仅显式分类操作可更新 LABEL。"""
 
     def __init__(self, database_path: Path, manga_root: Path):
         self.database_path = self._configured_path(database_path)
@@ -166,8 +167,85 @@ class EhViewerDataSource:
                 if row[0] and str(row[0]).strip()
             ]
 
+    def set_primary_label(self, gids, label: str):
+        """响应用户分类操作，批量更新目标库中的 DOWNLOADS.LABEL。"""
+        normalized = label.strip()
+        target_gids = tuple(dict.fromkeys(int(gid) for gid in gids))
+        if not normalized or not target_gids:
+            return
+        if not self.database_path.is_file():
+            raise FileNotFoundError(f"找不到漫画数据库：{self.database_path}")
+
+        with closing(sqlite3.connect(str(self.database_path), timeout=15)) as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM DOWNLOAD_LABELS WHERE LABEL = ? LIMIT 1",
+                (normalized,),
+            ).fetchone()
+            if exists is None:
+                raise ValueError(f"目标数据库中不存在分类标签：{normalized}")
+            connection.executemany(
+                "UPDATE DOWNLOADS SET LABEL = ? WHERE GID = ?",
+                ((normalized, gid) for gid in target_gids),
+            )
+            connection.commit()
+
+    def create_primary_label(self, label: str):
+        """在目标库既有 DOWNLOAD_LABELS 表中新增分类，不执行 DDL。"""
+        normalized = label.strip()
+        if not normalized:
+            raise ValueError("分类名称不能为空")
+        if not self.database_path.is_file():
+            raise FileNotFoundError(f"找不到漫画数据库：{self.database_path}")
+        with closing(sqlite3.connect(str(self.database_path), timeout=15)) as connection:
+            existing = connection.execute(
+                """
+                SELECT LABEL FROM DOWNLOAD_LABELS
+                WHERE LABEL = ? COLLATE NOCASE LIMIT 1
+                """,
+                (normalized,),
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    "INSERT INTO DOWNLOAD_LABELS(LABEL, TIME) VALUES (?, ?)",
+                    (normalized, int(time.time() * 1000)),
+                )
+            connection.commit()
+
+    def delete_primary_label(self, label: str):
+        """Delete one existing classification without changing external schema."""
+        normalized = label.strip()
+        if not normalized:
+            raise ValueError("分类名称不能为空")
+        if not self.database_path.is_file():
+            raise FileNotFoundError(f"找不到漫画数据库：{self.database_path}")
+        with closing(sqlite3.connect(str(self.database_path), timeout=15)) as connection:
+            exists = connection.execute(
+                """
+                SELECT 1 FROM DOWNLOAD_LABELS
+                WHERE LABEL = ? COLLATE NOCASE LIMIT 1
+                """,
+                (normalized,),
+            ).fetchone()
+            if exists is None:
+                raise ValueError(f"目标数据库中不存在分类标签：{normalized}")
+            connection.execute(
+                """
+                UPDATE DOWNLOADS SET LABEL = ''
+                WHERE LABEL = ? COLLATE NOCASE
+                """,
+                (normalized,),
+            )
+            connection.execute(
+                """
+                DELETE FROM DOWNLOAD_LABELS
+                WHERE LABEL = ? COLLATE NOCASE
+                """,
+                (normalized,),
+            )
+            connection.commit()
+
     def _connect_read_only(self) -> sqlite3.Connection:
-        uri = f"file:{self.database_path.as_posix()}?mode=ro&immutable=1"
+        uri = f"file:{self.database_path.as_posix()}?mode=ro"
         return sqlite3.connect(uri, uri=True)
 
     def _index_download_folders(self) -> Tuple[Dict[int, Path], Dict[str, Path]]:

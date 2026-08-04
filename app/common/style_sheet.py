@@ -9,6 +9,7 @@ class StyleSheet(StyleSheetBase, Enum):
 
     SETTING_INTERFACE = "setting_interface"
     READER_SETTING_DIALOG = "reader_setting_dialog"
+    MANGA_DETAIL_INTERFACE = "manga_detail_interface"
 
     def path(self, theme=Theme.AUTO):
         theme = qconfig.theme if theme == Theme.AUTO else theme

@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
+    FlowLayout,
     PrimaryPushButton,
     ScrollArea,
     SimpleCardWidget,
@@ -26,10 +27,112 @@ from qfluentwidgets import (
 )
 from qfluentwidgets import FluentIcon as FIF
 
+from app.common.style_sheet import StyleSheet
 from app.domain.manga import MangaItem
 from app.repositories.user_library_repository import UserLibraryRepository
 from app.sources.ehviewer_source import EhViewerDataSource
-from app.view.local_manga_interface import CoverLabel, visible_tags
+from app.view.local_manga_interface import CoverLabel
+
+
+TAG_GROUPS = (
+    ("artist", "作者", "creator"),
+    ("group", "社团", "creator"),
+    ("cosplayer", "Cosplayer", "creator"),
+    ("parody", "原作", "work"),
+    ("character", "角色", "work"),
+    ("language", "语言", "language"),
+    ("female", "女性", "female"),
+    ("male", "男性", "male"),
+    ("mixed", "混合", "mixed"),
+    ("reclass", "重新分类", "neutral"),
+    ("misc", "杂项", "neutral"),
+    ("other", "其他", "neutral"),
+)
+TAG_GROUP_INFO = {
+    namespace: (title, tone) for namespace, title, tone in TAG_GROUPS
+}
+
+
+def group_manga_tags(tags):
+    """Return ordered namespace groups without duplicated search-only tags."""
+    grouped = {}
+    grouped_keys = {}
+    namespaced_values = set()
+    plain_values = []
+    for raw_tag in tags:
+        tag = str(raw_tag).strip()
+        if not tag:
+            continue
+        if ":" not in tag:
+            plain_values.append(tag)
+            continue
+        namespace, value = tag.split(":", 1)
+        namespace = namespace.strip().casefold()
+        value = value.strip()
+        if not namespace or not value:
+            continue
+        namespaced_values.add(value.casefold())
+        key = value.casefold()
+        if key in grouped_keys.setdefault(namespace, set()):
+            continue
+        grouped_keys[namespace].add(key)
+        grouped.setdefault(namespace, []).append(value)
+
+    seen_plain = set()
+    for value in plain_values:
+        key = value.casefold()
+        if key in namespaced_values or key in seen_plain:
+            continue
+        seen_plain.add(key)
+        grouped.setdefault("other", []).append(value)
+
+    known_order = [namespace for namespace, _title, _tone in TAG_GROUPS]
+    ordered_namespaces = [name for name in known_order if grouped.get(name)]
+    ordered_namespaces.extend(
+        sorted(name for name in grouped if name not in TAG_GROUP_INFO)
+    )
+    return tuple(
+        (
+            namespace,
+            TAG_GROUP_INFO.get(namespace, (namespace.upper(), "neutral"))[0],
+            TAG_GROUP_INFO.get(namespace, (namespace.upper(), "neutral"))[1],
+            tuple(grouped[namespace]),
+        )
+        for namespace in ordered_namespaces
+    )
+
+
+class TagChip(QLabel):
+    """Theme-aware, non-interactive tag chip similar to Element's el-tag."""
+
+    def __init__(self, text: str, namespace: str, tone: str, parent=None):
+        super().__init__(text, parent)
+        self.setObjectName("mangaTagChip")
+        self.setProperty("tagTone", tone)
+        self.setToolTip(f"{namespace}:{text}")
+        self.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+
+class TagGroupWidget(QWidget):
+    def __init__(self, title: str, namespace: str, tone: str, values, parent=None):
+        super().__init__(parent)
+        self.setObjectName("mangaTagGroup")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        heading = CaptionLabel(title, self)
+        heading.setObjectName("mangaTagGroupTitle")
+        layout.addWidget(heading)
+        chip_container = QWidget(self)
+        chip_container.setObjectName("mangaTagChipContainer")
+        chip_layout = FlowLayout(chip_container, isTight=True)
+        chip_layout.setContentsMargins(0, 0, 0, 0)
+        chip_layout.setHorizontalSpacing(8)
+        chip_layout.setVerticalSpacing(7)
+        for value in values:
+            chip_layout.addWidget(TagChip(value, namespace, tone, chip_container))
+        layout.addWidget(chip_container)
 
 
 class PreviewTile(QWidget):
@@ -211,8 +314,6 @@ class MangaDetailInterface(QWidget):
         self.metadataLabel = BodyLabel("", self.infoCard)
         self.metadataLabel.setWordWrap(True)
         self.metadataLabel.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.tagsLabel = CaptionLabel("", self.infoCard)
-        self.tagsLabel.setWordWrap(True)
 
         text_layout = QVBoxLayout()
         text_layout.setContentsMargins(0, 2, 0, 2)
@@ -221,10 +322,25 @@ class MangaDetailInterface(QWidget):
         text_layout.addWidget(self.englishTitleLabel)
         text_layout.addSpacing(4)
         text_layout.addWidget(self.metadataLabel)
-        text_layout.addWidget(self.tagsLabel)
         text_layout.addStretch(1)
         info_layout.addWidget(self.coverLabel, 0, Qt.AlignTop)
         info_layout.addLayout(text_layout, 1)
+
+        self.tagCard = SimpleCardWidget(self)
+        self.tagCard.setObjectName("mangaTagCard")
+        self.tagCardLayout = QVBoxLayout(self.tagCard)
+        self.tagCardLayout.setContentsMargins(18, 16, 18, 18)
+        self.tagCardLayout.setSpacing(12)
+        self.tagCardLayout.addWidget(SubtitleLabel(self.tr("标签"), self.tagCard))
+        self.tagGroupsWidget = QWidget(self.tagCard)
+        self.tagGroupsWidget.setObjectName("mangaTagGroups")
+        self.tagGroupsLayout = QGridLayout(self.tagGroupsWidget)
+        self.tagGroupsLayout.setContentsMargins(0, 0, 0, 0)
+        self.tagGroupsLayout.setHorizontalSpacing(24)
+        self.tagGroupsLayout.setVerticalSpacing(14)
+        self.tagGroupsLayout.setColumnStretch(0, 1)
+        self.tagGroupsLayout.setColumnStretch(1, 1)
+        self.tagCardLayout.addWidget(self.tagGroupsWidget)
 
         self.operationCard = SimpleCardWidget(self)
         operation_layout = QHBoxLayout(self.operationCard)
@@ -297,6 +413,7 @@ class MangaDetailInterface(QWidget):
         content_layout.setContentsMargins(36, 0, 36, 28)
         content_layout.setSpacing(16)
         content_layout.addWidget(self.infoCard)
+        content_layout.addWidget(self.tagCard)
         content_layout.addWidget(self.operationCard)
         content_layout.addWidget(self.previewCard)
         content_layout.addStretch(1)
@@ -318,6 +435,7 @@ class MangaDetailInterface(QWidget):
         header_container.layout().setContentsMargins(36, 0, 36, 0)
         main_layout.addWidget(header_container)
         main_layout.addWidget(self.scrollArea, 1)
+        StyleSheet.MANGA_DETAIL_INTERFACE.apply(self)
 
     @property
     def currentItem(self) -> Optional[MangaItem]:
@@ -350,8 +468,7 @@ class MangaDetailInterface(QWidget):
         self.englishTitleLabel.setText(item.secondary_title)
         self.englishTitleLabel.setVisible(bool(item.secondary_title))
         self.metadataLabel.setText(self._metadataText(item))
-        tags = visible_tags(item)
-        self.tagsLabel.setText(self.tr("标签信息：{}").format(tags or self.tr("无")))
+        self._setTags(item.tags)
 
         cover_path = item.thumbnail_path or item.cover_path
         pixmap = QPixmap(str(cover_path))
@@ -509,19 +626,47 @@ class MangaDetailInterface(QWidget):
 
     def _metadataText(self, item: MangaItem) -> str:
         primary_label = item.primary_label or self.tr("未分类")
-        multiple_labels = "、".join(item.multiple_labels) or self.tr("无")
+        playlists = "、".join(item.multiple_labels) or self.tr("无")
+        taxonomy = "、".join(item.taxonomy_labels) or self.tr("无")
         return self.tr(
-            "GID：{gid}\n标签：{primary}\n分类标签：{multiple}\n"
+            "GID：{gid}\n分类：{primary}\n播放列表：{playlists}\n归类：{taxonomy}\n"
             "来源类别：{category}\n页数：{pages}\n阅读进度：{progress}\n目录：{folder}"
         ).format(
             gid=item.gid,
             primary=primary_label,
-            multiple=multiple_labels,
+            playlists=playlists,
+            taxonomy=taxonomy,
             category=item.category_name,
             pages=item.page_count or self.tr("读取中…"),
             progress=self._progressText(item),
             folder=item.folder,
         )
+
+    def _setTags(self, tags):
+        while self.tagGroupsLayout.count():
+            layout_item = self.tagGroupsLayout.takeAt(0)
+            widget = layout_item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        self._tagGroupWidgets = []
+        groups = group_manga_tags(tags)
+        if not groups:
+            empty_label = CaptionLabel(self.tr("暂无标签"), self.tagGroupsWidget)
+            empty_label.setObjectName("mangaTagEmptyLabel")
+            self.tagGroupsLayout.addWidget(empty_label, 0, 0, 1, 2)
+            return
+        for index, (namespace, title, tone, values) in enumerate(groups):
+            group = TagGroupWidget(
+                self.tr(title),
+                namespace,
+                tone,
+                values,
+                self.tagGroupsWidget,
+            )
+            group.setProperty("tagNamespace", namespace)
+            self._tagGroupWidgets.append(group)
+            self.tagGroupsLayout.addWidget(group, index // 2, index % 2)
 
     def _clearPreview(self):
         self._clearPreviewTiles()

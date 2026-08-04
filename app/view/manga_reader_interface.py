@@ -71,6 +71,8 @@ class MangaReaderInterface(QWidget):
     backRequested = Signal()
     fullscreenRequested = Signal(bool)
     progressChanged = Signal(int, int, int)
+    nextMangaRequested = Signal()
+    previousMangaRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -85,6 +87,8 @@ class MangaReaderInterface(QWidget):
         self._zoom_factor = 1.0
         self._fullscreen = False
         self._reader_active = False
+        self._has_following_manga = False
+        self._has_previous_manga = False
         self._settings_dialog: Optional[ReaderSettingDialog] = None
         self._auto_page_timer = QTimer(self)
         self._auto_page_timer.timeout.connect(self._autoAdvance)
@@ -283,9 +287,22 @@ class MangaReaderInterface(QWidget):
         self._preloadAround(index, include_current=True)
 
     def nextPage(self):
+        if (
+            self._item
+            and self._item.page_paths
+            and self._page_index + 1 >= len(self._item.page_paths)
+            and self._has_following_manga
+        ):
+            self._auto_page_timer.stop()
+            self.nextMangaRequested.emit()
+            return
         self.showPage(self._page_index + 1)
 
     def previousPage(self):
+        if self._page_index <= 0 and self._has_previous_manga:
+            self._auto_page_timer.stop()
+            self.previousMangaRequested.emit()
+            return
         self.showPage(self._page_index - 1)
 
     def fitToWindow(self):
@@ -327,6 +344,14 @@ class MangaReaderInterface(QWidget):
         self._reader_active = False
         self._auto_page_timer.stop()
         self.cancelLoads()
+
+    def setPlaylistContinuation(
+        self, has_following_manga: bool, has_previous_manga: bool = False
+    ):
+        self._has_following_manga = bool(has_following_manga)
+        self._has_previous_manga = bool(has_previous_manga)
+        self._updateControls()
+        self._updateAutoPageTimer()
 
     def toggleFullscreen(self):
         self.setFullscreenState(not self._fullscreen, emit_request=True)
@@ -505,7 +530,10 @@ class MangaReaderInterface(QWidget):
         has_next_page = bool(
             self._item
             and self._item.page_paths
-            and self._page_index + 1 < len(self._item.page_paths)
+            and (
+                self._page_index + 1 < len(self._item.page_paths)
+                or self._has_following_manga
+            )
         )
         if enabled and self._reader_active and has_next_page:
             self._auto_page_timer.start(
@@ -515,7 +543,10 @@ class MangaReaderInterface(QWidget):
             self._auto_page_timer.stop()
 
     def _autoAdvance(self):
-        if self._item and self._page_index + 1 < len(self._item.page_paths):
+        if self._item and (
+            self._page_index + 1 < len(self._item.page_paths)
+            or self._has_following_manga
+        ):
             self.nextPage()
         else:
             self._auto_page_timer.stop()
@@ -537,8 +568,12 @@ class MangaReaderInterface(QWidget):
 
     def _updateControls(self):
         page_count = len(self._item.page_paths) if self._item else 0
-        self.previousButton.setEnabled(self._page_index > 0)
-        self.nextButton.setEnabled(self._page_index + 1 < page_count)
+        self.previousButton.setEnabled(
+            self._page_index > 0 or self._has_previous_manga
+        )
+        self.nextButton.setEnabled(
+            self._page_index + 1 < page_count or self._has_following_manga
+        )
         self.pageSpinBox.setEnabled(page_count > 0)
 
     def _matchesScrollShortcut(self, event: QKeyEvent) -> bool:

@@ -22,6 +22,8 @@ class MangaItem:
     page_count: int
     added_time: int = 0
     progress_page_index: Optional[int] = None
+    taxonomy_label_ids: Tuple[int, ...] = ()
+    taxonomy_labels: Tuple[str, ...] = ()
 
     @property
     def cover_image_path(self) -> Path:
@@ -52,6 +54,7 @@ class MangaItem:
             self.original_title,
             self.primary_label,
             *self.multiple_labels,
+            *self.taxonomy_labels,
             *self.tags,
         )
         return "\n".join(value.casefold() for value in values if value)

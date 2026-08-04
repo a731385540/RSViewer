@@ -52,6 +52,9 @@ class Config(QConfig):
     mangaSortOrder = OptionsConfigItem(
         "Library", "MangaSortOrder", "desc", OptionsValidator(["desc", "asc"])
     )
+    mangaPrimaryLabelFilter = ConfigItem(
+        "Library", "MangaPrimaryLabelFilter", "__none__"
+    )
     searchShortcut = ConfigItem("Shortcuts", "OpenSearch", "Ctrl+K")
     backShortcut = ConfigItem("Shortcuts", "NavigateBack", "Z")
 

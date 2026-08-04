@@ -20,7 +20,7 @@ RSViewer 是一个仅供个人、非商业使用的 Windows 桌面媒体管理�
 - GUI：PySide6，依赖范围见 `requirements.txt`。
 - Fluent UI：PySide6-Fluent-Widgets。
 - 主要平台：Windows 10/11；Mica 效果仅在符合条件的 Windows 11 环境启用。
-- 当前持久化：QFluentWidgets 的 JSON 配置，以及独立 SQLite 中的 RSViewer 分类标签覆盖、用户复数标签和漫画阅读进度。
+- 当前持久化：QFluentWidgets 的 JSON 配置、目标 EhViewer `DOWNLOADS.LABEL` 中的分类，以及独立 SQLite 中的 RSViewer 播放列表、树状归类和漫画阅读进度。
 - 规划持久化：SQLite 媒体索引与文件系统缩略图缓存。
 - 规划媒体能力：Qt Multimedia；在确认格式覆盖不足前不要过早引入 VLC/mpv 等额外运行时。
 
@@ -50,7 +50,7 @@ RSViewer/
    │  └─ style_sheet.py              # 自定义 QSS 路径与主题注册
    ├─ domain/manga.py                # 漫画领域模型
    ├─ repositories/user_library_repository.py # RSViewer 用户标签与阅读进度库
-   ├─ sources/ehviewer_source.py     # EhViewer DB/sidecar 只读适配与惰性页面加载
+   ├─ sources/ehviewer_source.py     # EhViewer 只读查询、分类写入与惰性页面加载
    ├─ workers/reading_progress_worker.py # 后台保存阅读进度
    ├─ resource/qss/
    │  ├─ dark/                        # 设置页与阅读设置弹窗深色样式
@@ -79,10 +79,11 @@ RSViewer/
 
 定义全局 `cfg`。当前配置项：
 
-- `ehViewerDatabase`：只读外部 EhViewer SQLite 文件。
+- `ehViewerDatabase`：目标 EhViewer SQLite 文件；常规浏览只读，显式分类操作需要写权限。
 - `ehViewerMangaRoot`：与外部库对应的漫画下载根目录，支持本地、映射盘或 UNC 路径。
 - `libraryFolders`：其他图片/视频使用的本地、映射盘或 NAS/UNC 媒体目录。
 - `mangaPageSize` / `mangaSortOrder`：本地资源每页数量及按 EhViewer 添加时间升序/降序；默认降序（最新优先）。
+- `mangaPrimaryLabelFilter`：上次选择的分类；默认 `__none__`，即未分类。
 - `readerBackgroundColor`：阅读画布背景色。
 - `readerPageDirection`：从左向右、从右向左、从上向下或从下向上的下一页按键方向。
 - `readerImageLoadSize`：适应窗口、适应宽度或原始大小的初始显示模式。
@@ -97,11 +98,11 @@ RSViewer/
 
 ### `app/repositories/user_library_repository.py`
 
-RSViewer 独立 SQLite 使用 `PRAGMA user_version` 执行可重复迁移。版本 1 是复数标签表，版本 2 新增 `manga_reading_progress(gid, page_index, updated_at)`，版本 3 新增只存于 RSViewer 的 `manga_primary_labels` 分类覆盖表；`page_index` 始终是零基索引。`resolve_progress()` 只在自有记录不存在时导入 `.ehviewer` 进度，两边都有时必须返回 RSViewer 自有记录。分类覆盖和复数标签都不能写回外部 `eh.db`。
+RSViewer 独立 SQLite 使用 `PRAGMA user_version` 执行可重复迁移。版本 1 的复数标签表在界面上已演进为播放列表，版本 2 新增阅读进度，版本 3 保留历史分类覆盖兼容，版本 4 为播放列表增加顺序和上次播放 GID，并新增 `taxonomy_labels` / `manga_taxonomy_labels` 树状多对多归类。当前资源页的分类直接更新目标 EhViewer `DOWNLOADS.LABEL`，但绝不修改外部库 schema。删除播放列表依靠外键清理成员；删除归类节点会级联删除子树和关联。`page_index` 始终是零基索引；播放列表、归类和进度只写 RSViewer 自有数据库。
 
 ### `app/common/style_sheet.py`
 
-把 RSViewer 自定义样式注册到 QFluentWidgets 的样式管理器。`StyleSheet.SETTING_INTERFACE` 和 `StyleSheet.READER_SETTING_DIALOG` 注册后，`setTheme()` 会自动重新加载对应的 light/dark QSS。阅读设置弹窗是独立窗口，不能依赖主窗口背景透传，必须分别定义浅色与深色实体背景。
+把 RSViewer 自定义样式注册到 QFluentWidgets 的样式管理器。设置页、阅读设置弹窗和漫画详情标签分别注册 `StyleSheet.SETTING_INTERFACE`、`StyleSheet.READER_SETTING_DIALOG`、`StyleSheet.MANGA_DETAIL_INTERFACE`，`setTheme()` 会自动重新加载对应的 light/dark QSS。阅读设置弹窗是独立窗口，不能依赖主窗口背景透传，必须分别定义浅色与深色实体背景。
 
 新增页面样式时，应：
 
@@ -120,15 +121,19 @@ RSViewer 独立 SQLite 使用 `PRAGMA user_version` 执行可重复迁移。版�
 
 仅为收藏、历史、在线资源和视频等尚未实现路由提供轻量占位页。本地漫画已经由 `LocalMangaInterface` 实现，应用默认进入该页，不再保留无内容的漫画展示首页。各页面通过稳定且唯一的 `objectName` 作为 Fluent 导航 route key。
 
+### `app/view/local_manga_interface.py`
+
+本地资源页标签栏默认隐藏，通过工具栏“标签”按钮展开；其中“分类”“播放列表”“归类”三个面板互斥，各自带新增加号，顶部另有“显示全部漫画”。分隔条可拖动但标签栏最多占页面宽度 30%。分类为单选并记忆选择，默认未分类；播放列表和树状归类为多对多。三个树都提供右键删除并必须二次确认；未分类不可删除，分类删除时关联漫画先回到未分类，归类父节点删除会级联整个子树。播放列表按持久顺序展示，提供播放、继续上一次，以及拖拽、上下移动、置顶/置底编排；编排保存必须绑定打开窗口时的播放列表 ID。网格和列表卡片始终提供三类右键菜单，不需要先开启复选；右键不得触发详情。分类更新目标 `DOWNLOADS.LABEL`，播放列表和归类写 RSViewer 自有库；复选模式下右键可批量操作。数据库变更应在 Worker 中执行。
+
 ### `app/view/manga_reader_interface.py`
 
-漫画阅读器作为主窗口堆叠页运行，普通状态为窗口内阅读，按 `F11` 或工具栏按钮后由主窗口隐藏标题栏与导航并切换全屏，`Esc` 恢复窗口。当前实现单页模式、四向下一页按键、页码跳转、适应窗口/宽度、原始大小、缩放、拖动、长图按屏滚动和自动翻页；窗口模式的“第 N / 总页数 页”在顶部工具栏下方居中突出显示，底部仅保留翻页与跳转控件。全屏模式使用独立的低透明度页码浮层并默认隐藏所有控制区；鼠标进入屏幕最上方 12 像素区域时只显示标题/操作栏，进入最下方 12 像素区域时只显示翻页栏，离开对应控件区域即隐藏。普通鼠标活动、点击、滚轮和键盘翻页都不得唤出控制栏。图片在 `QThreadPool` 后台解码，优先当前页并预读后两页和前一页，缓存最多五页。图片视图自身通过事件过滤器接管阅读按键，点击图片取得焦点后仍必须正常翻页。页码改变后由主窗口即时更新列表/详情状态，并通过单线程后台队列防抖保存到 RSViewer SQLite。离开或关闭时必须停止自动翻页、落盘待保存进度并取消仍在运行的解码任务。
+漫画阅读器作为主窗口堆叠页运行，普通状态为窗口内阅读，按 `F11` 或工具栏按钮后由主窗口隐藏标题栏与导航并切换全屏，`Esc` 恢复窗口。当前实现单页模式、四向下一页按键、页码跳转、长图滚动和自动翻页；从播放列表进入时，末页“下一页”打开下一本首页，首页“上一页”打开上一本末页，列表两端则正常停止。窗口页码在顶部居中，全屏使用独立低透明度页码并默认隐藏控制区，仅上下 12 像素边缘触发对应栏。图片在 `QThreadPool` 后台解码并预读相邻页；点击图片取得焦点后仍须正常翻页。页码变化即时更新列表/详情并防抖保存。
 
 `ReaderSettingDialog` 是阅读页工具栏打开的非模态设置面板。它和全局 `SettingInterface` 绑定同一组 `cfg.reader*` 配置项，任一侧修改背景色、方向、图片载入大小、滚动快捷键或自动翻页设置后，另一侧与当前阅读器必须即时更新。弹窗通过 `StyleSheet.READER_SETTING_DIALOG` 注册 light/dark QSS，主题切换时背景必须与 Fluent 控件的文字和卡片风格同步刷新。
 
 ### `app/view/manga_detail_interface.py`
 
-详情页仍在首次打开时后台枚举单本的全部页面路径，以供阅读器随机跳页；缩略预览不得据此一次创建全部控件或解码全部图片。预览固定每页 40 张，只创建并解码当前预览页，切页时取消上一批任务。每个预览块保留全局零基页索引，点击后必须进入对应的真实阅读页。
+详情页仍在首次打开时后台枚举单本的全部页面路径，以供阅读器随机跳页；缩略预览不得据此一次创建全部控件或解码全部图片。预览固定每页 40 张，只创建并解码当前预览页，切页时取消上一批任务。每个预览块保留全局零基页索引，点击后必须进入对应的真实阅读页。详情标签使用独立卡片，按 EhViewer 命名空间分组并以主题化胶囊控件双栏自动换行；数据源为搜索同时生成的裸标签不得与 `namespace:value` 重复显示。样式由 `StyleSheet.MANGA_DETAIL_INTERFACE` 的 light/dark QSS 管理。
 
 ### `app/view/setting_interface.py`
 
@@ -142,7 +147,7 @@ OptionsSettingCard
   -> QFluentWidgets 样式管理器刷新所有已注册 QSS
 ```
 
-设置页还提供 EhViewer 数据库文件与漫画根目录选择器，变更后立即重建只读数据源并后台刷新本地漫画；快捷键使用点击后捕获一次按键的交互，组合键或单键按下即保存，`Esc` 取消。全局设置新增漫画阅读器分组，与阅读页内设置面板共用配置并即时同步。通用 `libraryFolders` 仍未被扫描器消费。
+设置页还提供 EhViewer 数据库文件与漫画根目录选择器，变更后立即重建数据源并后台刷新本地漫画；常规读取使用只读连接，分类操作按用户指令另开写事务。快捷键使用点击后捕获一次按键的交互，组合键或单键按下即保存，`Esc` 取消。全局设置新增漫画阅读器分组，与阅读页内设置面板共用配置并即时同步。通用 `libraryFolders` 仍未被扫描器消费。
 
 ### 外部 EhViewer 数据源约束
 
@@ -151,8 +156,9 @@ OptionsSettingCard
 - SQLite `user_version=7`。
 - 已有表包括 `BOOKMARKS`、`DOWNLOADS`、`DOWNLOAD_DIRNAME`、`DOWNLOAD_LABELS`、`Gallery_Tags`、`HISTORY`、`LOCAL_FAVORITES`、`FILTER`、`QUICK_SEARCH`、`Black_List` 和 `android_metadata`。
 - `GID` 是下载信息、目录名、标签、收藏和历史之间的重要关联键。
-- 既有表、索引、触发器及数据必须保持原样；访问适配器默认以 SQLite 只读模式打开该库。
+- 浏览、搜索、封面和元数据读取默认以 SQLite 只读模式打开。功能需要且用户明确触发时可以事务修改既有表中的业务内容；当前已实现的是更新所选 GID 的 `DOWNLOADS.LABEL`。
 - 不允许在 `eh.db` 中新增 RSViewer 表，也不允许对它执行 RSViewer migration。
+- 外部数据库的表、索引、触发器、列和 `user_version` 结构属于不可变边界；允许修改内容不等于允许执行 DDL。
 - RSViewer 自有的媒体索引、路径映射、阅读进度、视频数据和设置扩展必须写入另一份独立 SQLite 文件。
 
 `ehViewerMangaRoot` 指向对应下载根目录。典型结构是一个下载目录包含 `.ehviewer` sidecar、`.thumb` 缩略图和按页码命名的图片。列表只枚举一次根目录；当前页和后续三页在后台优先读取 `.thumb`，缩略图缺失或损坏时只对相应漫画枚举并使用自然排序后的第一页；详情页才枚举单本的全部页面。扫描和阅读逻辑必须自然排序现有页面并容忍缺页，不能假设编号连续。
@@ -192,14 +198,15 @@ OptionsSettingCard
 配置中的 eh.db + 本地/映射盘/UNC 漫画根目录
   -> Worker 后台执行 EhViewerDataSource
   -> SQLite 只读元数据查询 + 根目录单次枚举
-  -> LocalMangaInterface 分页、搜索、筛选和封面展示
+  -> LocalMangaInterface 分页、搜索、分类/播放列表/树状归类筛选和封面展示
+  -> 显式分类操作更新目标 DOWNLOADS.LABEL；播放列表与归类写自有 SQLite
   -> 后台预读当前页及后续三页封面；无有效缩略图时回退第一页
   -> 打开详情时才枚举该漫画全部页面路径；缩略预览按每页 40 张后台生成
   -> 按需读取 .ehviewer 第二行；仅在无自有进度时导入 RSViewer SQLite
   -> 开始阅读后后台解码当前页并预读相邻页，可在窗口和全屏之间切换
   -> 翻页即时刷新列表/详情，防抖后由单线程 Worker 保存自有进度
   -> cfg.reader* 即时控制画布、方向、载入大小、滚动快捷键与自动翻页
-  -> UserLibraryRepository 在独立 SQLite 保存复数标签
+  -> UserLibraryRepository 保存播放列表顺序/位置、树状归类和阅读进度
 ```
 
 列表阶段禁止递归或逐本枚举页面；21,389 部漫画的真实库验证为 0 个页面路径常驻。通用媒体流仍按 `Source -> Worker -> Repository -> Service -> View` 目标继续实现。
@@ -237,15 +244,16 @@ NAS 第一阶段按普通文件系统路径处理，包括已挂载盘符和可�
 - 浅色、深色、跟随系统和自定义主题色配置。
 - 全局设置页和阅读设置弹窗的 light/dark QSS 已接入 Fluent 样式管理器；主题切换时背景、文字和卡片外观同步刷新。
 - 应用默认直接进入本地漫画库；保留虚拟“漫画”父路由和独立“本地资源”子项，不再创建空展示首页。
-- EhViewer 外部 DB 与漫画根目录可在设置中选择，变更后自动刷新；外部 DB 全程只读。
-- 本地漫画支持封面/标题布局、分页、搜索、主标签/复数标签筛选、按添加时间升降序、两级右键标签分配、详情与每页 40 张的预览分页；当前列表页会预读后续三页封面，缩略图不可用时回退漫画第一页。
+- EhViewer 外部 DB 与漫画根目录可在设置中选择，变更后自动刷新；外部 DB 除用户显式新增分类或分配分类时更新既有表内容外均只读，schema 始终不可变。
+- 本地漫画支持封面/标题布局、分页、搜索，以及互斥的分类、播放列表、树状归类视图；标签栏可拖动至最多 30%，分类记忆上次选择，播放列表可编排/续播/跨漫画翻页，三类标签均支持单项或复选批量右键分配。
 - 漫画阅读器支持窗口内与沉浸式全屏模式、全屏上下边缘触发控制栏、独立透明页码、键盘/按钮翻页、页码跳转、适应窗口、原始尺寸、缩放、拖动和相邻页后台预读。
 - 阅读页内与全局阅读设置即时同步，支持画布背景、四向翻页、适应宽度长图滚动、滚动快捷键及自动翻页间隔。
 - 阅读进度在 RSViewer 独立 SQLite 保存并恢复；兼容首次导入 `.ehviewer` 十六进制页索引，自有记录优先，列表卡片与详情页显示当前进度。
 - 详情页只创建并解码当前预览页的至多 40 张缩略图，任意预览缩略图可点击并直接从对应页码进入阅读。
+- 详情页按命名空间分组展示去重后的胶囊标签，支持浅色/深色主题配色和大量标签自动换行。
 - 快捷键设置采用点击捕获交互，支持单键和 `Ctrl+S` 等组合键即时确认，`Esc` 取消。
 - 大型库采用列表元数据与详情页面两级惰性加载；21,389 部真实漫画列表读取约 0.42 秒，加入自有进度批量读取约 0.483 秒，完整首屏约 1.33 秒。
-- RSViewer 独立 SQLite 保存分类标签覆盖、用户复数标签和阅读进度，连接均显式提交、回滚和关闭。
+- RSViewer 独立 SQLite v4 保存播放列表、顺序、上次播放位置、树状归类和阅读进度；目标 EhViewer 数据库只在显式分类操作或新增分类时更新既有业务表，schema 永不变更。
 - 本地/映射盘/NAS 路径的其他媒体目录配置入口。
 - DPI、语言和 Mica 配置模型。
 - 模板 Gallery、演示资源、音乐配置和无用生成资源已清理。
@@ -262,7 +270,7 @@ EhViewer 本地漫画浏览和基础阅读链路已经可用，下一阶段应�
 
 - 开发配置路径已不依赖当前工作目录，但打包前仍应迁移到 `QStandardPaths.AppConfigLocation`；RSViewer 自有数据库和缓存也应迁移到应用数据目录。
 - `libraryFolders` 只保存其他媒体目录列表，尚无通用扫描、可达性检测、断线状态或重连机制；UNC/NAS 的大规模真实场景仍需专项验证。
-- 当前 RSViewer SQLite 已有版本化的分类覆盖、复数标签与漫画进度表，尚无完整媒体 schema、缩略图缓存及缓存失效策略。
+- 当前 RSViewer SQLite 已有版本化的播放列表、树状归类、漫画进度和历史兼容分类覆盖表，尚无完整媒体 schema、缩略图缓存及缓存失效策略。
 - 为保证大型库首屏速度，漫画卡片在列表阶段不显示精确页数；页数在打开单本详情并完成按需枚举后可用。
 - 阅读器当前只有单页模式；单张长图可按屏滚动，但尚未把多张图片拼接为连续长图，也未建立磁盘级解码缓存。
 - 数据源已有小型自动化测试，但空库、数据库损坏、UNC 断线、取消中的慢速 NAS 和超长路径仍需覆盖。
@@ -292,7 +300,7 @@ EhViewer 本地漫画浏览和基础阅读链路已经可用，下一阶段应�
 - 文件路径使用 `pathlib.Path`；对 UNC、长路径、无权限、断线和文件消失做显式错误处理。
 - 媒体扫描应幂等：重复扫描不能制造重复条目；文件删除、移动和修改需要可追踪。
 - 数据库 schema 每次变化必须有迁移，不允许靠删除用户数据库解决升级。
-- 外部 EhViewer 数据库始终视为只读数据源；不得修改既有 schema，不得向其中添加 RSViewer 自有表。所有新增表只能存在于 RSViewer 独立数据库。
+- 外部 EhViewer 数据库的 schema 永远不可修改：不得新增/删除/重命名表、列、索引或触发器，不得执行 RSViewer migration。功能需要且用户明确触发时，可在事务中更新既有表的业务内容；RSViewer 自有表和不属于 EhViewer 原结构的数据仍只能进入独立数据库。
 - 所有 QSS 必须同时维护 light/dark 版本，并验证主题即时切换。不要用内联 QSS 固定主题相关颜色。
 - 配置只放轻量用户偏好；媒体元数据和进度进入 SQLite；缩略图进入缓存目录。
 - 新依赖加入 `requirements.txt` 前说明用途和运行时成本，优先使用 Python 标准库与 PySide6 已包含模块。
