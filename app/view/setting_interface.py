@@ -11,6 +11,8 @@ from qfluentwidgets import (
     setTheme,
     setThemeColor,
     PushButton,
+    LineEdit,
+    PasswordLineEdit,
 )
 from qfluentwidgets import FluentIcon as FIF
 from qfluentwidgets import InfoBar
@@ -60,6 +62,41 @@ class DataPathSettingCard(SettingCard):
 
     def _updateContent(self, path: str):
         self.setContent(path or self.tr("尚未配置"))
+
+
+class TextConfigSettingCard(SettingCard):
+    """A compact text editor bound to a QFluentWidgets config item."""
+
+    def __init__(
+        self,
+        config_item,
+        icon,
+        title,
+        content,
+        parent=None,
+        password=False,
+        placeholder="",
+    ):
+        super().__init__(icon, title, content, parent)
+        self.configItem = config_item
+        editor_class = PasswordLineEdit if password else LineEdit
+        self.lineEdit = editor_class(self)
+        self.lineEdit.setMinimumWidth(280)
+        self.lineEdit.setMaximumWidth(380)
+        self.lineEdit.setPlaceholderText(placeholder)
+        self.lineEdit.setText(str(cfg.get(config_item) or ""))
+        self.hBoxLayout.addWidget(self.lineEdit)
+        self.hBoxLayout.addSpacing(16)
+        self.lineEdit.editingFinished.connect(self._saveValue)
+        config_item.valueChanged.connect(self._syncValue)
+
+    def _saveValue(self):
+        cfg.set(self.configItem, self.lineEdit.text().strip())
+
+    def _syncValue(self, value):
+        value = str(value or "")
+        if self.lineEdit.text() != value:
+            self.lineEdit.setText(value)
 
 
 class ShortcutCaptureButton(PushButton):
@@ -180,6 +217,8 @@ class SettingInterface(ScrollArea):
             self.tr("快捷键"), self.scrollWidget)
         self.readerGroup = SettingCardGroup(
             self.tr("漫画阅读器"), self.scrollWidget)
+        self.onlineGroup = SettingCardGroup(
+            self.tr("在线资源"), self.scrollWidget)
         self.themeCard = OptionsSettingCard(
             cfg.themeMode,
             FIF.BRUSH,
@@ -220,6 +259,40 @@ class SettingInterface(ScrollArea):
             self.tr("添加图片或视频使用的本地、映射盘或 NAS 路径"),
             parent=self.personalGroup,
         )
+        self.onlineSiteCard = OptionsSettingCard(
+            cfg.onlineEhSite,
+            FIF.GLOBE,
+            self.tr("默认站点"),
+            self.tr("在线资源页可随时在 E-Hentai 与 ExHentai 之间切换"),
+            texts=["E-Hentai", "ExHentai"],
+            parent=self.onlineGroup,
+        )
+        self.onlineCookieCard = TextConfigSettingCard(
+            cfg.onlineEhCookie,
+            FIF.FINGERPRINT,
+            self.tr("EH Token / Cookie"),
+            self.tr("建议粘贴完整 Cookie；内容仅保存在本机配置，不会写入外部 eh.db"),
+            self.onlineGroup,
+            password=True,
+            placeholder="ipb_member_id=...; ipb_pass_hash=...; igneous=...",
+        )
+        self.onlineProxyModeCard = OptionsSettingCard(
+            cfg.onlineEhProxyMode,
+            FIF.GLOBE,
+            self.tr("网络代理"),
+            self.tr("跟随 Windows/环境代理、完全直连或使用手动 HTTP(S) 代理"),
+            texts=[self.tr("跟随系统"), self.tr("直连"), self.tr("手动设置")],
+            parent=self.onlineGroup,
+        )
+        self.onlineManualProxyCard = TextConfigSettingCard(
+            cfg.onlineEhManualProxy,
+            FIF.WIFI,
+            self.tr("手动代理地址"),
+            self.tr("例如 http://127.0.0.1:7890；仅在手动设置模式下使用"),
+            self.onlineGroup,
+            placeholder="http://127.0.0.1:7890",
+        )
+        self._updateManualProxyEnabled(cfg.get(cfg.onlineEhProxyMode))
         self.searchShortcutCard = ShortcutSettingCard(
             cfg.searchShortcut,
             FIF.SEARCH,
@@ -319,6 +392,10 @@ class SettingInterface(ScrollArea):
 
         self.dataSourceGroup.addSettingCard(self.ehViewerDatabaseCard)
         self.dataSourceGroup.addSettingCard(self.ehViewerMangaRootCard)
+        self.onlineGroup.addSettingCard(self.onlineSiteCard)
+        self.onlineGroup.addSettingCard(self.onlineCookieCard)
+        self.onlineGroup.addSettingCard(self.onlineProxyModeCard)
+        self.onlineGroup.addSettingCard(self.onlineManualProxyCard)
         self.personalGroup.addSettingCard(self.themeCard)
         self.personalGroup.addSettingCard(self.themeColorCard)
         self.personalGroup.addSettingCard(self.libraryFoldersCard)
@@ -333,6 +410,7 @@ class SettingInterface(ScrollArea):
         self.expandLayout.setSpacing(28)
         self.expandLayout.setContentsMargins(36, 10, 36, 0)
         self.expandLayout.addWidget(self.dataSourceGroup)
+        self.expandLayout.addWidget(self.onlineGroup)
         self.expandLayout.addWidget(self.personalGroup)
         self.expandLayout.addWidget(self.readerGroup)
         self.expandLayout.addWidget(self.shortcutGroup)
@@ -354,3 +432,7 @@ class SettingInterface(ScrollArea):
         self.themeColorCard.colorChanged.connect(lambda c: setThemeColor(c))
         self.ehViewerDatabaseCard.pathChanged.connect(self.dataSourceChanged)
         self.ehViewerMangaRootCard.pathChanged.connect(self.dataSourceChanged)
+        cfg.onlineEhProxyMode.valueChanged.connect(self._updateManualProxyEnabled)
+
+    def _updateManualProxyEnabled(self, mode):
+        self.onlineManualProxyCard.setEnabled(mode == "manual")

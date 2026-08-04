@@ -58,6 +58,19 @@ class Config(QConfig):
     searchShortcut = ConfigItem("Shortcuts", "OpenSearch", "Ctrl+K")
     backShortcut = ConfigItem("Shortcuts", "NavigateBack", "Z")
 
+    # online E-Hentai / ExHentai source
+    onlineEhSite = OptionsConfigItem(
+        "OnlineEH", "Site", "ehentai", OptionsValidator(["ehentai", "exhentai"])
+    )
+    onlineEhCookie = ConfigItem("OnlineEH", "Cookie", "")
+    onlineEhProxyMode = OptionsConfigItem(
+        "OnlineEH",
+        "ProxyMode",
+        "system",
+        OptionsValidator(["system", "direct", "manual"]),
+    )
+    onlineEhManualProxy = ConfigItem("OnlineEH", "ManualProxy", "")
+
     # manga reader
     readerBackgroundColor = ColorConfigItem(
         "MangaReader", "BackgroundColor", "#202020"

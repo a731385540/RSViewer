@@ -26,6 +26,7 @@ from app.view.manga_history_interface import MangaHistoryInterface
 from app.view.manga_reader_interface import MangaReaderInterface
 from app.view.media_interface import MediaInterface
 from app.view.navigation_resize_handle import NavigationResizeHandle
+from app.view.online_manga_interface import OnlineMangaInterface
 from app.view.setting_interface import SettingInterface
 from app.workers.reading_progress_worker import (
     BrowsingHistorySaveWorker,
@@ -115,12 +116,7 @@ class MainWindow(FluentWindow):
         self.mangaReaderInterface.previousMangaRequested.connect(
             self._openPreviousPlaylistManga
         )
-        self.onlineMangaInterface = MediaInterface(
-            self.tr("在线资源"),
-            self.tr("在线漫画数据源接口已预留，当前版本暂不提供此功能。"),
-            "onlineMangaInterface",
-            self,
-        )
+        self.onlineMangaInterface = OnlineMangaInterface(self)
         self.videoInterface = MediaInterface(
             self.tr("视频"),
             self.tr("本地目录、映射盘与 NAS 视频将在这里显示。"),
@@ -540,6 +536,7 @@ class MainWindow(FluentWindow):
         self.localMangaInterface.cancelLoad()
         self.favoriteMangaInterface.cancelLoad()
         self.mangaHistoryInterface.cancelLoad()
+        self.onlineMangaInterface.cancelLoad()
         self.mangaDetailInterface.cancelLoads()
         self.mangaReaderInterface.deactivate()
         self.progressSaveTimer.stop()
