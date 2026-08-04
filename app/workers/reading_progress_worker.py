@@ -25,3 +25,15 @@ class PlaylistPositionSaveWorker(QRunnable):
 
     def run(self):
         self.repository.save_playlist_position(self.playlist_id, self.gid)
+
+
+class BrowsingHistorySaveWorker(QRunnable):
+    """Persist one local gallery visit without blocking navigation."""
+
+    def __init__(self, repository, gid: int):
+        super().__init__()
+        self.repository = repository
+        self.gid = int(gid)
+
+    def run(self):
+        self.repository.record_browsing_history(self.gid)

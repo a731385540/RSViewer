@@ -24,6 +24,7 @@ class MangaItem:
     progress_page_index: Optional[int] = None
     taxonomy_label_ids: Tuple[int, ...] = ()
     taxonomy_labels: Tuple[str, ...] = ()
+    is_favorite: bool = False
 
     @property
     def cover_image_path(self) -> Path:

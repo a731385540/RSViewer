@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QSizePolicy,
     QSplitter,
+    QSplitterHandle,
     QStackedWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -58,6 +59,7 @@ from qfluentwidgets import (
     TitleLabel,
     TransparentPushButton,
     isDarkTheme,
+    themeColor,
 )
 from qfluentwidgets import FluentIcon as FIF
 
@@ -65,6 +67,56 @@ from app.common.config import cfg
 from app.domain.manga import MangaItem
 from app.repositories.user_library_repository import UserLibraryRepository
 from app.sources.ehviewer_source import EhViewerDataSource
+
+
+class FluentSplitterHandle(QSplitterHandle):
+    """Wide hit target with the same subtle line used by navigation resize."""
+
+    def __init__(self, orientation, parent):
+        super().__init__(orientation, parent)
+        self._hovered = False
+        self._dragging = False
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAutoFillBackground(False)
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._dragging = True
+            self.update()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._dragging = False
+            self.update()
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event):
+        color = themeColor()
+        color.setAlpha(190 if self._hovered or self._dragging else 45)
+        painter = QPainter(self)
+        painter.setPen(QPen(color, 1))
+        if self.orientation() == Qt.Horizontal:
+            x = self.width() // 2
+            painter.drawLine(x, 0, x, self.height())
+        else:
+            y = self.height() // 2
+            painter.drawLine(0, y, self.width(), y)
+
+
+class FluentSplitter(QSplitter):
+    def createHandle(self):
+        return FluentSplitterHandle(self.orientation(), self)
 
 
 class FadeTextLabel(QLabel):
@@ -487,11 +539,15 @@ class MangaLoadWorker(QRunnable):
             progress = self.user_repository.progress_for_mangas(
                 [item.gid for item in items]
             )
+            favorite_gids = set(
+                self.user_repository.favorite_gids([item.gid for item in items])
+            )
             items = [
                 replace(
                     item,
                     multiple_labels=assignments.get(item.gid, ()),
                     progress_page_index=progress.get(item.gid),
+                    is_favorite=item.gid in favorite_gids,
                     taxonomy_label_ids=tuple(
                         label_id
                         for label_id, _name in taxonomy_assignments.get(
@@ -657,15 +713,21 @@ class LocalMangaInterface(QWidget):
     mangaActivated = Signal(object)
     playlistMangaActivated = Signal(object, int, object, int)
     playlistPlayRequested = Signal(int, object, int, bool)
+    libraryLoaded = Signal(object)
+    favoriteChanged = Signal(object, bool)
 
     def __init__(
         self,
         source: EhViewerDataSource,
         user_repository: UserLibraryRepository,
         parent=None,
+        collection_kind=None,
+        object_name=None,
     ):
         super().__init__(parent=parent)
-        self.setObjectName("localMangaInterface")
+        self._collection_kind = collection_kind
+        self._collection_order = ()
+        self.setObjectName(object_name or "localMangaInterface")
         self.source = source
         self.userRepository = user_repository
         self._all_items: List[MangaItem] = []
@@ -681,6 +743,7 @@ class LocalMangaInterface(QWidget):
         self._playlist_filter_id: Optional[int] = None
         self._playlist_filter_name = ""
         self._playlist_order = ()
+        self._tag_sidebar_width = 230
         self._taxonomy_filter_id: Optional[int] = None
         self._primary_labels: List[str] = []
         self._playlists = []
@@ -696,7 +759,11 @@ class LocalMangaInterface(QWidget):
         self._cover_worker = None
         self._cover_cache = OrderedDict()
 
-        self.titleLabel = TitleLabel(self.tr("本地资源"), self)
+        title = {
+            "favorites": self.tr("收藏"),
+            "history": self.tr("本地历史"),
+        }.get(collection_kind, self.tr("本地资源"))
+        self.titleLabel = TitleLabel(title, self)
         self.searchEdit = SearchLineEdit(self)
         self.searchEdit.setPlaceholderText(self.tr("搜索英语标题、原标题或标签"))
         self.searchEdit.setMinimumWidth(260)
@@ -921,14 +988,17 @@ class LocalMangaInterface(QWidget):
         content_layout.addWidget(self.scrollArea, 1)
         content_layout.addLayout(pagination_layout)
 
-        self.tagSplitter = QSplitter(Qt.Horizontal, self)
+        self.tagSplitter = FluentSplitter(Qt.Horizontal, self)
         self.tagSplitter.setChildrenCollapsible(False)
-        self.tagSplitter.setHandleWidth(6)
+        self.tagSplitter.setHandleWidth(7)
         self.tagSplitter.addWidget(self.classificationCard)
         self.tagSplitter.addWidget(self.contentPanel)
         self.tagSplitter.setStretchFactor(0, 0)
         self.tagSplitter.setStretchFactor(1, 1)
-        self.tagSplitter.setSizes([230, 730])
+        self.tagSplitter.setSizes([self._tag_sidebar_width, 730])
+        self.tagSplitter.splitterMoved.connect(
+            lambda _position, _index: self._scheduleCardRelayout()
+        )
 
         self.mainLayout = QHBoxLayout(self)
         self.mainLayout.setContentsMargins(36, 32, 36, 24)
@@ -978,12 +1048,48 @@ class LocalMangaInterface(QWidget):
         self.previousPageButton.clicked.connect(lambda: self.setPage(self._page - 1))
         self.nextPageButton.clicked.connect(lambda: self.setPage(self._page + 1))
         self.lastPageButton.clicked.connect(lambda: self.setPage(self.pageCount()))
-
-        self.reload()
+        if self._collection_kind:
+            self._show_all_manga = True
+            self.tagButton.hide()
+            self.sortCombo.hide()
+            self.resultLabel.setText(self.tr("暂无内容"))
+            self._renderCards()
+        else:
+            self.reload()
 
     def setSource(self, source: EhViewerDataSource):
         self.source = source
-        self.reload()
+        if not self._collection_kind:
+            self.reload()
+
+    def setCollectionItems(self, items, ordered_gids):
+        self.cancelLoad()
+        by_gid = {item.gid: item for item in items}
+        self._collection_order = tuple(
+            gid for gid in ordered_gids if gid in by_gid
+        )
+        self._all_items = [by_gid[gid] for gid in self._collection_order]
+        self._selected_gids.intersection_update(self._collection_order)
+        self._updateSelectionState()
+        self.applyFilters(reset_page=True)
+
+    def allItems(self):
+        return tuple(self._all_items)
+
+    def tagMetadata(self):
+        return (
+            tuple(self._primary_labels),
+            tuple(self._playlists),
+            tuple(self._taxonomy_labels),
+        )
+
+    def setTagMetadata(self, primary_labels, playlists, taxonomy_labels):
+        self._primary_labels = list(primary_labels)
+        self._playlists = list(playlists)
+        self._taxonomy_labels = list(taxonomy_labels)
+        self._populatePrimaryLabels(self._primary_labels)
+        self._populatePlaylists(self._playlists)
+        self._populateTaxonomy(self._taxonomy_labels)
 
     def cancelLoad(self):
         if self._load_worker is not None:
@@ -1030,6 +1136,7 @@ class LocalMangaInterface(QWidget):
         self._populateTaxonomy(self._taxonomy_labels)
         self._setTagMode(self.TAG_CATEGORY, reset_page=False)
         self.applyFilters(reset_page=True)
+        self.libraryLoaded.emit(tuple(self._all_items))
 
     def _onLoadFailed(self, message: str):
         self._load_worker = None
@@ -1413,7 +1520,30 @@ class LocalMangaInterface(QWidget):
         if len(target_gids) > 1:
             title = self.tr("批量操作（{} 项）").format(len(target_gids))
         menu = RoundMenu(title, self)
+        favorite = not (
+            bool(target_items) and all(item.is_favorite for item in target_items)
+        )
+        favorite_action = QAction(
+            self.tr("添加到收藏") if favorite else self.tr("取消收藏"),
+            menu,
+        )
+        favorite_action.triggered.connect(
+            lambda: self._setMangaFavorite(target_gids, favorite)
+        )
+        menu.addAction(favorite_action)
+        menu.addSeparator()
         primary_menu = RoundMenu(self.tr("添加到分类"), menu)
+        uncategorized_action = QAction(self.tr("移至未分类"), primary_menu)
+        uncategorized_action.setCheckable(True)
+        uncategorized_action.setChecked(
+            bool(target_items)
+            and all(not current.primary_label for current in target_items)
+        )
+        uncategorized_action.triggered.connect(
+            lambda: self._setMangaPrimaryLabel(target_gids, "")
+        )
+        primary_menu.addAction(uncategorized_action)
+        primary_menu.addSeparator()
         if self._primary_labels:
             for name in self._primary_labels:
                 action = QAction(name, primary_menu)
@@ -1523,18 +1653,25 @@ class LocalMangaInterface(QWidget):
 
     def _setMangaPrimaryLabel(self, gids, label_name: str):
         target_gids = tuple(dict.fromkeys(int(gid) for gid in gids))
+        normalized_label = label_name.strip()
 
         def update_items():
             target_gid_set = set(target_gids)
             self._all_items = [
-                replace(item, primary_label=label_name)
+                replace(item, primary_label=normalized_label)
                 if item.gid in target_gid_set else item
                 for item in self._all_items
             ]
             self.applyFilters(reset_page=False)
 
+        if normalized_label:
+            operation = lambda: self.source.set_primary_label(
+                target_gids, normalized_label
+            )
+        else:
+            operation = lambda: self.source.clear_primary_label(target_gids)
         self._startLabelMutation(
-            lambda: self.source.set_primary_label(target_gids, label_name),
+            operation,
             update_items,
         )
 
@@ -1570,6 +1707,32 @@ class LocalMangaInterface(QWidget):
                 target_gids, label_id
             )
         self._startLabelMutation(operation, self._refreshTagData)
+
+    def _setMangaFavorite(self, gids, favorite: bool):
+        target_gids = tuple(dict.fromkeys(int(gid) for gid in gids))
+
+        def finish():
+            self.setFavoriteState(target_gids, favorite)
+            self.favoriteChanged.emit(target_gids, favorite)
+
+        self._startLabelMutation(
+            lambda: self.userRepository.set_favorite(target_gids, favorite),
+            finish,
+        )
+
+    def setFavoriteState(self, gids, favorite: bool):
+        target_gids = set(int(gid) for gid in gids)
+
+        def update(item):
+            if item.gid not in target_gids:
+                return item
+            return replace(item, is_favorite=bool(favorite))
+
+        self._all_items = [update(item) for item in self._all_items]
+        self._filtered_items = [update(item) for item in self._filtered_items]
+        for card in self._cards:
+            if card.item.gid in target_gids:
+                card.setItem(update(card.item))
 
     def _startLabelMutation(self, operation, on_success):
         worker = LabelMutationWorker(operation)
@@ -1641,10 +1804,36 @@ class LocalMangaInterface(QWidget):
             self.openSearch()
 
     def toggleClassification(self):
-        self.classificationCard.setVisible(self.classificationCard.isHidden())
+        show_sidebar = self.classificationCard.isHidden()
+        total_width = max(self.tagSplitter.width(), sum(self.tagSplitter.sizes()), 1)
+        if show_sidebar:
+            self.classificationCard.show()
+            maximum_width = max(190, int(self.width() * 0.3))
+            sidebar_width = min(
+                maximum_width,
+                max(190, self._tag_sidebar_width),
+            )
+            self.tagSplitter.setSizes(
+                [sidebar_width, max(1, total_width - sidebar_width)]
+            )
+        else:
+            sizes = self.tagSplitter.sizes()
+            if sizes and sizes[0] > 0:
+                self._tag_sidebar_width = sizes[0]
+            self.classificationCard.hide()
+            self.tagSplitter.setSizes([0, total_width])
         self.tagButton.setIcon(
-            FIF.CARE_LEFT_SOLID if not self.classificationCard.isHidden() else FIF.TAG
+            FIF.CARE_LEFT_SOLID if show_sidebar else FIF.TAG
         )
+        self._scheduleCardRelayout()
+        QTimer.singleShot(40, self._scheduleCardRelayout)
+
+    def _scheduleCardRelayout(self):
+        if self._layout_mode != self.GRID_MODE:
+            return
+        self.contentPanel.updateGeometry()
+        self.scrollArea.updateGeometry()
+        QTimer.singleShot(0, self._relayoutCards)
 
     def openSearch(self):
         self.searchPanel.show()
@@ -1654,6 +1843,25 @@ class LocalMangaInterface(QWidget):
 
     def applyFilters(self, reset_page=False):
         query = self.searchEdit.text().strip()
+        if self._collection_kind:
+            self._filtered_items = [
+                item for item in self._all_items if item.matches(query)
+            ]
+            order = {
+                gid: position for position, gid in enumerate(self._collection_order)
+            }
+            self._filtered_items.sort(
+                key=lambda item: order.get(item.gid, len(order))
+            )
+            if reset_page:
+                self._page = 1
+            self._page = min(max(1, self._page), self.pageCount())
+            self.resultLabel.setText(
+                self.tr("显示 {} 部漫画").format(len(self._filtered_items))
+            )
+            self._updatePagination()
+            self._renderCards()
+            return
         taxonomy_label_ids = (
             self._activeTaxonomyLabelIds()
             if self._tag_mode == self.TAG_TAXONOMY and not self._show_all_manga
@@ -1774,8 +1982,13 @@ class LocalMangaInterface(QWidget):
         if not self._filtered_items:
             self._cancelCoverPreload()
             message = self.tr("没有找到符合条件的本地漫画")
+            if self._collection_kind == "favorites":
+                message = self.tr("还没有收藏漫画")
+            elif self._collection_kind == "history":
+                message = self.tr("还没有本地浏览历史")
             if not self._all_items and self._load_worker is None:
-                message = self.tr("当前数据源中没有可用的本地漫画")
+                if not self._collection_kind:
+                    message = self.tr("当前数据源中没有可用的本地漫画")
             self._empty_label = BodyLabel(message, self.scrollWidget)
             self.contentLayout.addWidget(self._empty_label, 0, 0)
             return
@@ -2008,4 +2221,4 @@ class LocalMangaInterface(QWidget):
                 [maximum_sidebar_width, max(1, sum(sizes) - maximum_sidebar_width)]
             )
         if self._layout_mode == self.GRID_MODE:
-            QTimer.singleShot(0, self._relayoutCards)
+            self._scheduleCardRelayout()

@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 class UserLibraryRepository:
     """RSViewer 自有数据库；绝不在外部 EhViewer 库中建表。"""
 
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
 
     def __init__(self, database_path: Path):
         self.database_path = Path(database_path).resolve()
@@ -158,6 +158,27 @@ class UserLibraryRepository:
                         ),
                     )
                 connection.execute("PRAGMA user_version = 4")
+            if version < 5:
+                connection.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS manga_favorites (
+                        gid INTEGER PRIMARY KEY,
+                        created_at INTEGER NOT NULL
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_manga_favorites_created
+                        ON manga_favorites(created_at DESC);
+
+                    CREATE TABLE IF NOT EXISTS manga_browsing_history (
+                        gid INTEGER PRIMARY KEY,
+                        viewed_at INTEGER NOT NULL
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_manga_history_viewed
+                        ON manga_browsing_history(viewed_at DESC);
+                    """
+                )
+                connection.execute("PRAGMA user_version = 5")
 
     def list_labels(self) -> List[Tuple[int, str, int]]:
         self.initialize()
@@ -466,6 +487,65 @@ class UserLibraryRepository:
                 for gid, label in rows
                 if gid in requested_gids
             }
+
+    def favorite_gids(self, gids: Sequence[int] = ()) -> Tuple[int, ...]:
+        self.initialize()
+        requested = set(int(gid) for gid in gids)
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT gid FROM manga_favorites ORDER BY created_at DESC, gid DESC"
+            )
+            return tuple(
+                int(row[0]) for row in rows
+                if not requested or int(row[0]) in requested
+            )
+
+    def set_favorite(self, gids: Sequence[int], favorite: bool):
+        self.initialize()
+        target_gids = tuple(dict.fromkeys(int(gid) for gid in gids))
+        if not target_gids:
+            return
+        with self._connect() as connection:
+            if favorite:
+                now = time.time_ns()
+                connection.executemany(
+                    """
+                    INSERT INTO manga_favorites(gid, created_at)
+                    VALUES (?, ?)
+                    ON CONFLICT(gid) DO UPDATE SET created_at = excluded.created_at
+                    """,
+                    ((gid, now + offset) for offset, gid in enumerate(target_gids)),
+                )
+            else:
+                connection.executemany(
+                    "DELETE FROM manga_favorites WHERE gid = ?",
+                    ((gid,) for gid in target_gids),
+                )
+
+    def record_browsing_history(self, gid: int):
+        self.initialize()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO manga_browsing_history(gid, viewed_at)
+                VALUES (?, ?)
+                ON CONFLICT(gid) DO UPDATE SET viewed_at = excluded.viewed_at
+                """,
+                (int(gid), time.time_ns()),
+            )
+
+    def browsing_history_gids(self) -> Tuple[int, ...]:
+        self.initialize()
+        with self._connect() as connection:
+            return tuple(
+                int(row[0])
+                for row in connection.execute(
+                    """
+                    SELECT gid FROM manga_browsing_history
+                    ORDER BY viewed_at DESC, gid DESC
+                    """
+                )
+            )
 
     def set_primary_label(self, gid: int, label: str):
         self.initialize()

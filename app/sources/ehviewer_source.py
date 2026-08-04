@@ -189,6 +189,20 @@ class EhViewerDataSource:
             )
             connection.commit()
 
+    def clear_primary_label(self, gids):
+        """Move selected downloads to the unclassified state."""
+        target_gids = tuple(dict.fromkeys(int(gid) for gid in gids))
+        if not target_gids:
+            return
+        if not self.database_path.is_file():
+            raise FileNotFoundError(f"找不到漫画数据库：{self.database_path}")
+        with closing(sqlite3.connect(str(self.database_path), timeout=15)) as connection:
+            connection.executemany(
+                "UPDATE DOWNLOADS SET LABEL = '' WHERE GID = ?",
+                ((gid,) for gid in target_gids),
+            )
+            connection.commit()
+
     def create_primary_label(self, label: str):
         """在目标库既有 DOWNLOAD_LABELS 表中新增分类，不执行 DDL。"""
         normalized = label.strip()

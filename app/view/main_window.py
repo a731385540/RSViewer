@@ -22,11 +22,13 @@ from app.repositories.user_library_repository import UserLibraryRepository
 from app.sources.ehviewer_source import EhViewerDataSource
 from app.view.local_manga_interface import LocalMangaInterface
 from app.view.manga_detail_interface import MangaDetailInterface, PageDiscoveryWorker
+from app.view.manga_history_interface import MangaHistoryInterface
 from app.view.manga_reader_interface import MangaReaderInterface
 from app.view.media_interface import MediaInterface
 from app.view.navigation_resize_handle import NavigationResizeHandle
 from app.view.setting_interface import SettingInterface
 from app.workers.reading_progress_worker import (
+    BrowsingHistorySaveWorker,
     PlaylistPositionSaveWorker,
     ReadingProgressSaveWorker,
 )
@@ -47,6 +49,18 @@ class MainWindow(FluentWindow):
             self.userLibraryRepository,
             self,
         )
+        self.favoriteMangaInterface = LocalMangaInterface(
+            self.mangaSource,
+            self.userLibraryRepository,
+            self,
+            collection_kind="favorites",
+            object_name="favoriteMangaInterface",
+        )
+        self.mangaHistoryInterface = MangaHistoryInterface(
+            self.mangaSource,
+            self.userLibraryRepository,
+            self,
+        )
         self.mangaDetailInterface = MangaDetailInterface(
             self.mangaSource,
             self.userLibraryRepository,
@@ -63,12 +77,25 @@ class MainWindow(FluentWindow):
         self._readerWasMaximized = False
         self._playlistContext = None
         self._playlistPageWorker = None
+        self._libraryItems = []
+        self._historyOrder = []
+        self.localMangaInterface.libraryLoaded.connect(self._onLibraryLoaded)
         self.localMangaInterface.mangaActivated.connect(self.openMangaDetail)
         self.localMangaInterface.playlistMangaActivated.connect(
             self.openPlaylistMangaDetail
         )
         self.localMangaInterface.playlistPlayRequested.connect(
             self.startPlaylistPlayback
+        )
+        for interface in (
+            self.localMangaInterface,
+            self.favoriteMangaInterface,
+            self.mangaHistoryInterface.localHistoryInterface,
+        ):
+            interface.favoriteChanged.connect(self._onFavoriteChanged)
+        self.favoriteMangaInterface.mangaActivated.connect(self.openMangaDetail)
+        self.mangaHistoryInterface.localHistoryInterface.mangaActivated.connect(
+            self.openMangaDetail
         )
         self.mangaDetailInterface.backRequested.connect(self.navigateBack)
         self.mangaDetailInterface.readRequested.connect(self.openMangaReader)
@@ -88,22 +115,10 @@ class MainWindow(FluentWindow):
         self.mangaReaderInterface.previousMangaRequested.connect(
             self._openPreviousPlaylistManga
         )
-        self.favoriteMangaInterface = MediaInterface(
-            self.tr("收藏"),
-            self.tr("已收藏的漫画将在这里显示。"),
-            "favoriteMangaInterface",
-            self,
-        )
         self.onlineMangaInterface = MediaInterface(
             self.tr("在线资源"),
             self.tr("在线漫画数据源接口已预留，当前版本暂不提供此功能。"),
             "onlineMangaInterface",
-            self,
-        )
-        self.mangaHistoryInterface = MediaInterface(
-            self.tr("历史记录"),
-            self.tr("漫画阅读历史和阅读进度将在这里显示。"),
-            "mangaHistoryInterface",
             self,
         )
         self.videoInterface = MediaInterface(
@@ -215,9 +230,64 @@ class MainWindow(FluentWindow):
     def reloadMangaSource(self):
         self._clearPlaylistContext()
         self.mangaSource = self._createMangaSource()
+        self._libraryItems = []
+        self._historyOrder = []
+        self.favoriteMangaInterface.setCollectionItems((), ())
+        self.mangaHistoryInterface.setCollectionItems((), ())
         self.localMangaInterface.setSource(self.mangaSource)
+        self.favoriteMangaInterface.setSource(self.mangaSource)
+        self.mangaHistoryInterface.setSource(self.mangaSource)
         self.mangaDetailInterface.setSource(self.mangaSource)
         self.switchTo(self.localMangaInterface)
+
+    def _onLibraryLoaded(self, items):
+        self._libraryItems = list(items)
+        tag_metadata = self.localMangaInterface.tagMetadata()
+        self.favoriteMangaInterface.setTagMetadata(*tag_metadata)
+        self.mangaHistoryInterface.localHistoryInterface.setTagMetadata(
+            *tag_metadata
+        )
+        favorite_order = self.userLibraryRepository.favorite_gids()
+        self._historyOrder = list(
+            self.userLibraryRepository.browsing_history_gids()
+        )
+        self.favoriteMangaInterface.setCollectionItems(
+            self._libraryItems, favorite_order
+        )
+        self.mangaHistoryInterface.setCollectionItems(
+            self._libraryItems, self._historyOrder
+        )
+
+    def _onFavoriteChanged(self, gids, favorite):
+        for interface in (
+            self.localMangaInterface,
+            self.favoriteMangaInterface,
+            self.mangaHistoryInterface.localHistoryInterface,
+        ):
+            interface.setFavoriteState(gids, favorite)
+        self._libraryItems = list(self.localMangaInterface.allItems())
+        self.favoriteMangaInterface.setCollectionItems(
+            self._libraryItems,
+            self.userLibraryRepository.favorite_gids(),
+        )
+        self.mangaHistoryInterface.setCollectionItems(
+            self._libraryItems, self._historyOrder
+        )
+
+    def _recordLocalHistory(self, item):
+        gid = int(item.gid)
+        self._historyOrder = [
+            current_gid for current_gid in self._historyOrder
+            if current_gid != gid
+        ]
+        self._historyOrder.insert(0, gid)
+        items = list(self._libraryItems)
+        if not any(current.gid == gid for current in items):
+            items.append(item)
+        self.mangaHistoryInterface.setCollectionItems(items, self._historyOrder)
+        self.progressThreadPool.start(
+            BrowsingHistorySaveWorker(self.userLibraryRepository, gid)
+        )
 
     def openLocalMangaSearch(self):
         self.switchTo(self.localMangaInterface)
@@ -225,6 +295,7 @@ class MainWindow(FluentWindow):
 
     def openMangaDetail(self, item):
         self._clearPlaylistContext()
+        self._recordLocalHistory(item)
         if self.mangaReaderInterface.isFullscreen:
             self.setReaderFullscreen(False)
         self.mangaDetailInterface.setManga(item)
@@ -232,6 +303,7 @@ class MainWindow(FluentWindow):
 
     def openPlaylistMangaDetail(self, item, playlist_id, items, position):
         self._setPlaylistContext(playlist_id, items, position)
+        self._recordLocalHistory(item)
         if self.mangaReaderInterface.isFullscreen:
             self.setReaderFullscreen(False)
         self.mangaDetailInterface.setManga(item)
@@ -318,6 +390,7 @@ class MainWindow(FluentWindow):
     def openMangaReader(self, item, page_index=-1):
         if not item.page_paths:
             return
+        self._recordLocalHistory(item)
         self.mangaDetailInterface.cancelLoads()
         if page_index == -2:
             page_index = len(item.page_paths) - 1
@@ -351,6 +424,10 @@ class MainWindow(FluentWindow):
 
     def updateReadingProgress(self, gid: int, page_index: int, page_count: int):
         self.localMangaInterface.updateReadingProgress(gid, page_index, page_count)
+        self.favoriteMangaInterface.updateReadingProgress(gid, page_index, page_count)
+        self.mangaHistoryInterface.localHistoryInterface.updateReadingProgress(
+            gid, page_index, page_count
+        )
         self.mangaDetailInterface.updateReadingProgress(gid, page_index, page_count)
         self._pendingProgress[int(gid)] = int(page_index)
         self.progressSaveTimer.start()
@@ -461,6 +538,8 @@ class MainWindow(FluentWindow):
     def closeEvent(self, e):
         self._cancelPlaylistLoad()
         self.localMangaInterface.cancelLoad()
+        self.favoriteMangaInterface.cancelLoad()
+        self.mangaHistoryInterface.cancelLoad()
         self.mangaDetailInterface.cancelLoads()
         self.mangaReaderInterface.deactivate()
         self.progressSaveTimer.stop()
