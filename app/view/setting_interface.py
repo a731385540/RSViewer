@@ -292,6 +292,19 @@ class SettingInterface(ScrollArea):
             self.onlineGroup,
             placeholder="http://127.0.0.1:7890",
         )
+        self.onlineTimeoutCard = OptionsSettingCard(
+            cfg.onlineEhRequestTimeout,
+            FIF.SPEED_HIGH,
+            self.tr("请求超时"),
+            self.tr("提供给在线 provider 的单次请求超时时间"),
+            texts=[
+                self.tr("10 秒"),
+                self.tr("20 秒"),
+                self.tr("30 秒"),
+                self.tr("60 秒"),
+            ],
+            parent=self.onlineGroup,
+        )
         self._updateManualProxyEnabled(cfg.get(cfg.onlineEhProxyMode))
         self.searchShortcutCard = ShortcutSettingCard(
             cfg.searchShortcut,
@@ -396,6 +409,7 @@ class SettingInterface(ScrollArea):
         self.onlineGroup.addSettingCard(self.onlineCookieCard)
         self.onlineGroup.addSettingCard(self.onlineProxyModeCard)
         self.onlineGroup.addSettingCard(self.onlineManualProxyCard)
+        self.onlineGroup.addSettingCard(self.onlineTimeoutCard)
         self.personalGroup.addSettingCard(self.themeCard)
         self.personalGroup.addSettingCard(self.themeColorCard)
         self.personalGroup.addSettingCard(self.libraryFoldersCard)

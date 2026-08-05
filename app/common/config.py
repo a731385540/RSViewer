@@ -70,6 +70,9 @@ class Config(QConfig):
         OptionsValidator(["system", "direct", "manual"]),
     )
     onlineEhManualProxy = ConfigItem("OnlineEH", "ManualProxy", "")
+    onlineEhRequestTimeout = OptionsConfigItem(
+        "OnlineEH", "RequestTimeout", 20, OptionsValidator([10, 20, 30, 60])
+    )
 
     # manga reader
     readerBackgroundColor = ColorConfigItem(

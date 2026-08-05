@@ -1,6 +1,6 @@
 # RSViewer 项目维护指南
 
-本文档面向未来接手本仓库的 AI 助手和开发者。开始任何工作前，请先完整阅读本文、`README.md` 和 `CHANGELOG.md`，然后执行 `git status --short`。本文描述的是 2026-08-04 的工作区现状；若代码与本文冲突，以代码为准，并在本次修改中同步修正文档。
+本文档面向未来接手本仓库的 AI 助手和开发者。开始任何工作前，请先完整阅读本文、`README.md` 和 `CHANGELOG.md`，然后执行 `git status --short`。本文描述的是 2026-08-05 的工作区现状；若代码与本文冲突，以代码为准，并在本次修改中同步修正文档。
 
 ## 1. 项目背景与边界
 
@@ -52,7 +52,7 @@ RSViewer/
    ├─ domain/online_gallery.py       # 在线画廊与翻页结果模型
    ├─ repositories/user_library_repository.py # RSViewer 用户标签与阅读进度库
    ├─ sources/ehviewer_source.py     # EhViewer 只读查询、分类写入与惰性页面加载
-   ├─ sources/eh_online_source.py    # EH/EX 搜索页解析、鉴权与代理访问
+   ├─ sources/eh_online_source.py    # EH/EX provider 接口、运行配置与默认空实现
    ├─ workers/eh_online_worker.py    # 在线搜索与封面下载 Worker
    ├─ workers/reading_progress_worker.py # 后台保存阅读进度
    ├─ resource/qss/
@@ -64,7 +64,7 @@ RSViewer/
       ├─ manga_history_interface.py  # 本地浏览历史与在线历史预留路由
       ├─ manga_detail_interface.py   # 单本详情与按需页面预览
       ├─ manga_reader_interface.py   # 单页阅读、缩放、预读和全屏控制
-      ├─ online_manga_interface.py   # EH/EX 在线搜索、翻页与封面卡片
+      ├─ online_manga_interface.py   # 在线 provider 的搜索、翻页与封面 UI 壳
       ├─ reader_setting_dialog.py    # 阅读页内即时同步设置面板
       ├─ media_interface.py          # 未实现媒体路由的轻量占位页面
       └─ setting_interface.py        # 设置页、数据源路径和配置绑定
@@ -91,7 +91,8 @@ RSViewer/
 - `mangaPrimaryLabelFilter`：上次选择的分类；默认 `__none__`，即未分类。
 - `onlineEhSite`：在线资源默认站点，支持 `ehentai` 与 `exhentai`。
 - `onlineEhCookie`：用户自行提供的完整 EH Cookie；裸 token 按 `igneous` 兼容。该值仅存于被忽略的本机配置 JSON，不得输出到日志或提交。
-- `onlineEhProxyMode` / `onlineEhManualProxy`：在线请求使用系统代理、直连或手动 HTTP(S) 代理；手动地址仅在 `manual` 模式消费。
+- `onlineEhProxyMode` / `onlineEhManualProxy`：在线 provider 使用系统代理、直连或手动 HTTP(S) 代理；手动地址仅在 `manual` 模式消费。
+- `onlineEhRequestTimeout`：传给在线 provider 的单次请求超时，支持 10/20/30/60 秒。
 - `readerBackgroundColor`：阅读画布背景色。
 - `readerPageDirection`：从左向右、从右向左、从上向下或从下向上的下一页按键方向。
 - `readerImageLoadSize`：适应窗口、适应宽度或原始大小的初始显示模式。
@@ -131,13 +132,15 @@ RSViewer 独立 SQLite 使用 `PRAGMA user_version` 执行可重复迁移。版�
 
 ### `app/sources/eh_online_source.py` 与 `app/view/online_manga_interface.py`
 
-在线源仅访问 HTTPS 的 `e-hentai.org`、`exhentai.org` 和已列入允许名单的封面域名。搜索强制使用 compact 列表，从每行提取 GID、gallery token、标题、分类、发布时间、页数、标签和延迟封面地址；翻页沿用站点给出的 `next` 游标，不把它误当普通页码。EH/EX 切换、查询、搜索页下载和封面下载均通过 Worker 运行，退出或重新搜索时旧 Worker 的结果必须失效。当前点击卡片交给系统浏览器打开原画廊，尚未下载原图或写入在线历史。
+`EhOnlineProvider` 是用户自行实现爬虫的稳定扩展点。UI 将 `OnlineGalleryQuery(keyword, cursor, page_number, filters)` 交给 provider；基类先调用抽象的 `fetch_page()`，再调用可覆盖的 `filter_items()`，最后返回统一的 `OnlineGalleryPage`。远程封面可选择实现 `load_thumbnail()`。`create_eh_online_provider()` 是组合入口，当前返回完全不访问网络的 `UnimplementedEhOnlineProvider`；接入实际爬虫时只替换这里或向 `OnlineMangaInterface` 注入 factory，不得把抓取/解析写进 QWidget 或 Worker。
 
-Cookie 可粘贴完整 `ipb_member_id=...; ipb_pass_hash=...; igneous=...` 字符串，单独的裸 token 只作为 `igneous` 使用。Cookie 不得进入异常消息、URL、数据库或测试 fixture。系统代理基于 Python/Windows 的系统代理发现，直连明确禁用代理，手动模式仅接受 HTTP(S) URL。所有翻页和图片 URL 都必须校验 scheme 与 host，防止站点内容把客户端引向任意地址。
+`EhOnlineSettings` 统一提供站点基址、规范化 Cookie、代理模式/映射和请求超时。Cookie 可粘贴完整 `ipb_member_id=...; ipb_pass_hash=...; igneous=...` 字符串，单独裸 token 按 `igneous` 兼容，并从 settings 的 `repr` 中排除。系统代理由标准库发现，直连返回空映射，手动模式验证并补全 HTTP(S) URL。具体 HTTP 客户端、站点请求、HTML/API 解析、URL 白名单和结果过滤均由用户的 provider 实现。
 
 ### `app/view/local_manga_interface.py`
 
-本地资源页标签栏默认隐藏，通过工具栏“标签”按钮展开；其中“分类”“播放列表”“归类”三个面板互斥，各自带新增加号，顶部另有“显示全部漫画”。分隔条可拖动但标签栏最多占页面宽度 30%；使用 `FluentSplitterHandle` 提供 7 像素命中区和 1 像素主题色细线，透明度规则应与 `NavigationResizeHandle` 一致，不得恢复 Qt 默认实心手柄。展开、收起或拖动后必须等待 `QSplitter` 几何更新并主动调用卡片重排，不能依赖主窗口 `resizeEvent`。分类为单选并记忆选择，默认未分类；播放列表和树状归类为多对多。三个树都提供右键删除并必须二次确认；未分类不可删除，分类删除时关联漫画先回到未分类，归类父节点删除会级联整个子树。播放列表按持久顺序展示，提供播放、继续上一次，以及拖拽、上下移动、置顶/置底编排；编排保存必须绑定打开窗口时的播放列表 ID。网格和列表卡片始终提供三类右键菜单，不需要先开启复选；分类子菜单顶部的“移至未分类”只清空所选漫画的 `DOWNLOADS.LABEL`，不得删除 `DOWNLOAD_LABELS` 中的分类。右键不得触发详情。分类更新目标 `DOWNLOADS.LABEL`，播放列表和归类写 RSViewer 自有库；复选模式下右键可批量操作。数据库变更应在 Worker 中执行。
+本地资源页标签栏默认隐藏，通过工具栏“标签”按钮展开；其中“分类”“播放列表”“归类”三个面板互斥，各自带新增加号，顶部另有“显示全部漫画”。分隔条可拖动但标签栏最多占页面宽度 30%；使用 `FluentSplitterHandle` 提供 7 像素命中区和 1 像素主题色细线，透明度规则应与 `NavigationResizeHandle` 一致，不得恢复 Qt 默认实心手柄。展开、收起或拖动后必须等待 `QSplitter` 几何更新并主动调用卡片重排，不能依赖主窗口 `resizeEvent`。分类为单选并记忆选择，默认未分类；播放列表和树状归类为多对多。三个树都提供右键删除并必须二次确认；未分类不可删除，分类删除时关联漫画先回到未分类，归类父节点删除会级联整个子树。播放列表按持久顺序展示，提供播放、继续上一次，以及拖拽、上下移动、置顶/置底编排；编排保存必须绑定打开窗口时的播放列表 ID。
+
+网格和列表卡片的右键菜单只保留固定的“选择分类…”“选择播放列表…”“选择归类…”入口，不得重新把大量标签展开为悬浮子菜单。入口打开主题化 `MangaLabelSelectionDialog`：提供搜索和可滚动树，分类单选并包含“未分类”，播放列表与树状归类多选；批量目标成员状态不一致时显示半选，半选保持不变，用户明确勾选或取消后才批量写入。播放列表/归类窗口保留“新建并添加…”入口。右键不需要先开启复选且不得触发详情。分类更新目标 `DOWNLOADS.LABEL`，播放列表和归类写 RSViewer 自有库；数据库变更应在 Worker 中执行，多项选择变化应合并为单个后台任务。
 
 `LocalMangaInterface` 还提供收藏/历史集合模式：不启动 `MangaLoadWorker`，隐藏标签栏和添加时间排序，按 Repository 给出的 GID 顺序分页展示共享漫画对象。卡片右键菜单顶部提供收藏或取消收藏，复选时批量生效；收藏状态变更必须同步本地资源、收藏和历史三个视图。
 
@@ -167,7 +170,7 @@ OptionsSettingCard
   -> QFluentWidgets 样式管理器刷新所有已注册 QSS
 ```
 
-设置页还提供 EhViewer 数据库文件与漫画根目录选择器，变更后立即重建数据源并后台刷新本地漫画；常规读取使用只读连接，分类操作按用户指令另开写事务。快捷键使用点击后捕获一次按键的交互，组合键或单键按下即保存，`Esc` 取消。全局设置新增漫画阅读器分组，与阅读页内设置面板共用配置并即时同步。通用 `libraryFolders` 仍未被扫描器消费。
+设置页还提供 EhViewer 数据库文件与漫画根目录选择器，变更后立即重建数据源并后台刷新本地漫画；常规读取使用只读连接，分类操作按用户指令另开写事务。在线资源分组提供站点、Cookie/Token、系统/直连/手动代理、手动 HTTP(S) 地址和 10/20/30/60 秒超时，手动地址只在对应模式启用。快捷键使用点击后捕获一次按键的交互，组合键或单键按下即保存，`Esc` 取消。全局设置新增漫画阅读器分组，与阅读页内设置面板共用配置并即时同步。通用 `libraryFolders` 仍未被扫描器消费。
 
 ### 外部 EhViewer 数据源约束
 
@@ -230,6 +233,19 @@ OptionsSettingCard
   -> 打开详情/阅读时后台更新本地历史；右键收藏后刷新共享集合视图
 ```
 
+在线资源预留流：
+
+```text
+cfg.onlineEh* -> EhOnlineSettings
+  -> OnlineMangaInterface 构造 OnlineGalleryQuery
+  -> OnlineSearchWorker 调用 EhOnlineProvider.search
+  -> provider.fetch_page -> provider.filter_items
+  -> OnlineGalleryPage -> 通用卡片/游标翻页 UI
+  -> 可选 OnlineCoverWorker 调用 provider.load_thumbnail
+```
+
+默认 `create_eh_online_provider()` 返回空实现，以上流程在用户接入实际 provider 前不会产生网络请求。
+
 列表阶段禁止递归或逐本枚举页面；21,389 部漫画的真实库验证为 0 个页面路径常驻。通用媒体流仍按 `Source -> Worker -> Repository -> Service -> View` 目标继续实现。
 
 网络和磁盘 I/O 不得阻塞 Qt GUI 线程。
@@ -266,14 +282,14 @@ NAS 第一阶段按普通文件系统路径处理，包括已挂载盘符和可�
 - 全局设置页和阅读设置弹窗的 light/dark QSS 已接入 Fluent 样式管理器；主题切换时背景、文字和卡片外观同步刷新。
 - 应用默认直接进入本地漫画库；保留虚拟“漫画”父路由和独立“本地资源”子项，不再创建空展示首页。
 - EhViewer 外部 DB 与漫画根目录可在设置中选择，变更后自动刷新；外部 DB 除用户显式新增分类或分配分类时更新既有表内容外均只读，schema 始终不可变。
-- 本地漫画支持封面/标题布局、分页、搜索，以及互斥的分类、播放列表、树状归类视图；标签栏可拖动至最多 30%，分类记忆上次选择，播放列表可编排/续播/跨漫画翻页，三类标签均支持单项或复选批量右键分配。
+- 本地漫画支持封面/标题布局、分页、搜索，以及互斥的分类、播放列表、树状归类视图；标签栏可拖动至最多 30%，分类记忆上次选择，播放列表可编排/续播/跨漫画翻页。三类标签通过可搜索、可滚动的独立选择窗口支持单项或复选批量分配，不再使用无界右键子菜单。
 - 漫画阅读器支持窗口内与沉浸式全屏模式、全屏上下边缘触发控制栏、独立透明页码、键盘/按钮翻页、页码跳转、适应窗口、原始尺寸、缩放、拖动和相邻页后台预读。
 - 阅读页内与全局阅读设置即时同步，支持画布背景、四向翻页、适应宽度长图滚动、滚动快捷键及自动翻页间隔。
 - 阅读进度在 RSViewer 独立 SQLite 保存并恢复；兼容首次导入 `.ehviewer` 十六进制页索引，自有记录优先，列表卡片与详情页显示当前进度。
 - 详情页只创建并解码当前预览页的至多 40 张缩略图，任意预览缩略图可点击并直接从对应页码进入阅读。
 - 详情页按命名空间分组展示去重后的胶囊标签，支持浅色/深色主题配色和大量标签自动换行。
 - 收藏页和本地历史页复用大型库首次加载结果；收藏支持右键单项/批量切换，本地历史按最近打开详情或阅读的时间排列，并预留在线历史入口。
-- 在线资源支持 E-Hentai / ExHentai 即时切换、关键词或空查询、站点游标翻页与后台封面加载；设置页提供隐藏显示的 Cookie/Token、系统/直连/手动代理选项和手动 HTTP(S) 代理地址。
+- 在线资源已预留 provider 接口和通用后台 UI/Worker：支持 E-Hentai / ExHentai 查询上下文、可扩展过滤参数、游标翻页和可选封面回传；设置页提供隐藏显示的 Cookie/Token、系统/直连/手动代理、手动 HTTP(S) 地址和请求超时。默认 provider 不访问网络。
 - 快捷键设置采用点击捕获交互，支持单键和 `Ctrl+S` 等组合键即时确认，`Esc` 取消。
 - 大型库采用列表元数据与详情页面两级惰性加载；21,389 部真实漫画列表读取约 0.42 秒，加入自有进度批量读取约 0.483 秒，完整首屏约 1.33 秒。
 - RSViewer 独立 SQLite v5 保存播放列表、树状归类、收藏、本地浏览历史和阅读进度；目标 EhViewer 数据库只在显式分类操作或新增分类时更新既有业务表，schema 永不变更。
@@ -281,11 +297,11 @@ NAS 第一阶段按普通文件系统路径处理，包括已挂载盘符和可�
 - DPI、语言和 Mica 配置模型。
 - 模板 Gallery、演示资源、音乐配置和无用生成资源已清理。
 - `README.md`、`requirements.txt` 和 `.gitignore` 已建立。
-- 已做过 `compileall`、`git diff --check`、52 项自动化测试、EH 公开搜索页真实响应解析、真实大型库计时，以及默认页/详情/快速退出的 Qt offscreen 冒烟验证。
+- 已做过 `compileall`、`git diff --check`、provider 契约与配置自动化测试、真实大型库计时，以及默认页/详情/快速退出的 Qt offscreen 冒烟验证。
 
 ## 8. 正在开发的内容
 
-EhViewer 本地漫画浏览、收藏、本地历史、基础阅读链路和 EH/EX 在线搜索已经可用，下一阶段应补齐 RSViewer 完整媒体 schema/migration、通用本地/UNC 扫描服务，以及双页/多图连续滚动。在线原图阅读/下载、在线历史和视频仍未实现。
+EhViewer 本地漫画浏览、收藏、本地历史和基础阅读链路已经可用；EH/EX 的 provider 接口、配置与 UI 壳已就绪，但具体抓取和过滤由用户另行实现。下一阶段应补齐 RSViewer 完整媒体 schema/migration、通用本地/UNC 扫描服务，以及双页/多图连续滚动。在线抓取/阅读/下载、在线历史和视频仍未实现。
 
 工作区当前包含本次惰性加载、数据源配置、默认导航和测试改动；`testData/`、`app/config/config.json` 与 `app/data/` 是忽略的本机数据，不得提交或删除。
 
@@ -296,7 +312,7 @@ EhViewer 本地漫画浏览、收藏、本地历史、基础阅读链路和 EH/E
 - 当前 RSViewer SQLite 已有版本化的播放列表、树状归类、收藏、本地浏览历史、漫画进度和历史兼容分类覆盖表，尚无完整媒体 schema、缩略图缓存及缓存失效策略。
 - 为保证大型库首屏速度，漫画卡片在列表阶段不显示精确页数；页数在打开单本详情并完成按需枚举后可用。
 - 阅读器当前只有单页模式；单张长图可按屏滚动，但尚未把多张图片拼接为连续长图，也未建立磁盘级解码缓存。
-- 在线资源当前只浏览搜索结果并在系统浏览器打开原画廊，没有在线详情、原图阅读/下载、磁盘封面缓存或在线历史；鉴权 Cookie 目前保存在被忽略的本机 JSON，打包前应迁移到 Windows 凭据存储。
+- 在线资源当前只有 provider 契约、后台 Worker 和 UI 壳，默认空实现不会访问网络；具体抓取、过滤、URL 安全校验、在线详情、原图阅读/下载、磁盘封面缓存和在线历史尚未实现。鉴权 Cookie 目前保存在被忽略的本机 JSON，打包前应迁移到 Windows 凭据存储。
 - 数据源已有小型自动化测试，但空库、数据库损坏、UNC 断线、取消中的慢速 NAS 和超长路径仍需覆盖。
 - 语言枚举和 Fluent 翻译器已存在，但 RSViewer 自身的中文文案是硬编码，切换英语不会完整翻译。
 - 依赖只声明范围，没有锁定可复现版本；本机验证版本是 PySide6 6.10.1 和 PySide6-Fluent-Widgets 1.10.5。
@@ -314,7 +330,7 @@ EhViewer 本地漫画浏览、收藏、本地历史、基础阅读链路和 EH/E
 5. 在现有单页/单张长图阅读器上补充双页和多图连续滚动。
 6. 实现 Qt Multimedia 视频播放器和播放进度。
 7. 扩充自动化测试，覆盖损坏 DB、空目录、目录不可达、UNC 断线、中文/特殊字符、超长路径和大目录取消。
-8. 完善在线详情、原图阅读/下载与在线历史接口，再处理打包、更新和发布流程。
+8. 用户接入 EH/EX provider 后，再完善在线详情、原图阅读/下载与在线历史接口，以及打包、更新和发布流程。
 
 ## 11. 开发规范
 

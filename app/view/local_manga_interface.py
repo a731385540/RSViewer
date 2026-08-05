@@ -46,6 +46,7 @@ from qfluentwidgets import (
     InfoBar,
     InfoBarPosition,
     MessageBox,
+    MessageBoxBase,
     PushButton,
     RoundMenu,
     ScrollArea,
@@ -54,6 +55,7 @@ from qfluentwidgets import (
     SegmentedToolWidget,
     SimpleCardWidget,
     SpinBox,
+    SubtitleLabel,
     ToolButton,
     TreeWidget,
     TitleLabel,
@@ -700,6 +702,188 @@ class PlaylistOrderDialog(QDialog):
             int(self.listWidget.item(index).data(Qt.UserRole))
             for index in range(self.listWidget.count())
         )
+
+
+class MangaLabelSelectionDialog(MessageBoxBase):
+    """Searchable modal selector replacing unbounded context submenus."""
+
+    CATEGORY = "category"
+    PLAYLIST = "playlist"
+    TAXONOMY = "taxonomy"
+    CREATE_REQUESTED = 2
+
+    def __init__(
+        self,
+        mode,
+        target_items,
+        primary_labels=(),
+        playlists=(),
+        taxonomy_labels=(),
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.mode = mode
+        self.targetItems = tuple(target_items)
+        self._treeItems = []
+        self._initialStates = {}
+        self._categoryValue = None
+        self.widget.setMinimumSize(600, 590)
+
+        titles = {
+            self.CATEGORY: self.tr("选择分类"),
+            self.PLAYLIST: self.tr("选择播放列表"),
+            self.TAXONOMY: self.tr("选择归类"),
+        }
+        descriptions = {
+            self.CATEGORY: self.tr("分类为单选；选择“未分类”可取消现有分类。"),
+            self.PLAYLIST: self.tr("播放列表可多选；半选表示批量项目的当前状态不一致。"),
+            self.TAXONOMY: self.tr("归类按树状层级显示，可独立选择任意父节点或子节点。"),
+        }
+        self.titleLabel = SubtitleLabel(titles[mode], self.widget)
+        self.descriptionLabel = BodyLabel(descriptions[mode], self.widget)
+        self.descriptionLabel.setWordWrap(True)
+        self.searchEdit = SearchLineEdit(self.widget)
+        self.searchEdit.setPlaceholderText(self.tr("搜索标签"))
+        self.tree = TreeWidget(self.widget)
+        self.tree.setHeaderHidden(True)
+        self.tree.setMinimumHeight(390)
+
+        self.viewLayout.addWidget(self.titleLabel)
+        self.viewLayout.addWidget(self.descriptionLabel)
+        self.viewLayout.addWidget(self.searchEdit)
+        self.viewLayout.addWidget(self.tree, 1)
+        self.yesButton.setText(self.tr("应用"))
+        self.cancelButton.setText(self.tr("取消"))
+
+        self.createButton = None
+        if mode in {self.PLAYLIST, self.TAXONOMY}:
+            self.createButton = PushButton(self.tr("新建并添加…"), self.buttonGroup)
+            self.buttonLayout.insertWidget(0, self.createButton, 1, Qt.AlignVCenter)
+            self.createButton.clicked.connect(
+                lambda: self.done(self.CREATE_REQUESTED)
+            )
+
+        if mode == self.CATEGORY:
+            self._populateCategories(primary_labels)
+            self.tree.currentItemChanged.connect(self._onCategoryChanged)
+        elif mode == self.PLAYLIST:
+            self._populatePlaylists(playlists)
+        else:
+            self._populateTaxonomy(taxonomy_labels)
+
+        self.searchEdit.textChanged.connect(self._applySearch)
+        self.tree.expandAll()
+
+    def _populateCategories(self, labels):
+        current_labels = {item.primary_label for item in self.targetItems}
+        selected_value = next(iter(current_labels)) if len(current_labels) == 1 else None
+        entries = [("", self.tr("未分类"))] + [
+            (name, name) for name in labels
+        ]
+        for value, text in entries:
+            tree_item = QTreeWidgetItem([text])
+            tree_item.setData(0, Qt.UserRole, value)
+            self.tree.addTopLevelItem(tree_item)
+            self._treeItems.append(tree_item)
+            if selected_value == value:
+                self.tree.setCurrentItem(tree_item)
+                self._categoryValue = value
+        self.yesButton.setEnabled(self._categoryValue is not None)
+
+    def _populatePlaylists(self, playlists):
+        total = len(self.targetItems)
+        for label_id, name, _count, _last_gid in playlists:
+            membership = sum(
+                name in item.multiple_labels for item in self.targetItems
+            )
+            state = self._membershipState(membership, total)
+            tree_item = self._checkableItem(name, int(label_id), state)
+            self.tree.addTopLevelItem(tree_item)
+
+    def _populateTaxonomy(self, labels):
+        total = len(self.targetItems)
+        by_parent = {}
+        for label_id, parent_id, name, _count in labels:
+            by_parent.setdefault(parent_id, []).append((int(label_id), name))
+
+        def add_children(parent_item, parent_id):
+            for label_id, name in by_parent.get(parent_id, ()):
+                membership = sum(
+                    label_id in item.taxonomy_label_ids
+                    for item in self.targetItems
+                )
+                state = self._membershipState(membership, total)
+                tree_item = self._checkableItem(name, label_id, state)
+                if parent_item is None:
+                    self.tree.addTopLevelItem(tree_item)
+                else:
+                    parent_item.addChild(tree_item)
+                add_children(tree_item, label_id)
+
+        add_children(None, None)
+
+    @staticmethod
+    def _membershipState(membership, total):
+        if total and membership == total:
+            return Qt.Checked
+        if membership:
+            return Qt.PartiallyChecked
+        return Qt.Unchecked
+
+    def _checkableItem(self, text, value, state):
+        item = QTreeWidgetItem([text])
+        item.setData(0, Qt.UserRole, value)
+        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+        item.setCheckState(0, state)
+        self._initialStates[value] = state
+        self._treeItems.append(item)
+        return item
+
+    def _onCategoryChanged(self, current, _previous):
+        if current is None:
+            self._categoryValue = None
+            self.yesButton.setEnabled(False)
+            return
+        self._categoryValue = current.data(0, Qt.UserRole)
+        self.yesButton.setEnabled(True)
+
+    def _applySearch(self, text):
+        query = text.strip().casefold()
+        if self.mode != self.TAXONOMY:
+            for item in self._treeItems:
+                item.setHidden(bool(query) and query not in item.text(0).casefold())
+            return
+
+        def update_visibility(item):
+            child_visible = False
+            for index in range(item.childCount()):
+                child_visible = update_visibility(item.child(index)) or child_visible
+            matches = not query or query in item.text(0).casefold()
+            visible = matches or child_visible
+            item.setHidden(not visible)
+            return visible
+
+        for index in range(self.tree.topLevelItemCount()):
+            update_visibility(self.tree.topLevelItem(index))
+        if query:
+            self.tree.expandAll()
+
+    def selectedCategory(self):
+        return self._categoryValue
+
+    def validate(self):
+        return self.mode != self.CATEGORY or self._categoryValue is not None
+
+    def selectionChanges(self):
+        changes = {}
+        for item in self._treeItems:
+            value = item.data(0, Qt.UserRole)
+            state = item.checkState(0)
+            if state == Qt.PartiallyChecked:
+                continue
+            if state != self._initialStates[value]:
+                changes[int(value)] = state == Qt.Checked
+        return changes
 
 
 class LocalMangaInterface(QWidget):
@@ -1532,124 +1716,82 @@ class LocalMangaInterface(QWidget):
         )
         menu.addAction(favorite_action)
         menu.addSeparator()
-        primary_menu = RoundMenu(self.tr("添加到分类"), menu)
-        uncategorized_action = QAction(self.tr("移至未分类"), primary_menu)
-        uncategorized_action.setCheckable(True)
-        uncategorized_action.setChecked(
-            bool(target_items)
-            and all(not current.primary_label for current in target_items)
-        )
-        uncategorized_action.triggered.connect(
-            lambda: self._setMangaPrimaryLabel(target_gids, "")
-        )
-        primary_menu.addAction(uncategorized_action)
-        primary_menu.addSeparator()
-        if self._primary_labels:
-            for name in self._primary_labels:
-                action = QAction(name, primary_menu)
-                action.setCheckable(True)
-                action.setChecked(
-                    bool(target_items)
-                    and all(current.primary_label == name for current in target_items)
-                )
-                action.triggered.connect(
-                    lambda _checked=False, current_name=name: (
-                        self._setMangaPrimaryLabel(target_gids, current_name)
+        for mode, text in (
+            (self.TAG_CATEGORY, self.tr("选择分类…")),
+            (self.TAG_PLAYLIST, self.tr("选择播放列表…")),
+            (self.TAG_TAXONOMY, self.tr("选择归类…")),
+        ):
+            action = QAction(text, menu)
+            action.triggered.connect(
+                lambda _checked=False, current_mode=mode: (
+                    self._openLabelSelection(
+                        current_mode, target_gids, target_items
                     )
                 )
-                primary_menu.addAction(action)
-        else:
-            empty_action = QAction(self.tr("暂无分类"), primary_menu)
-            empty_action.setEnabled(False)
-            primary_menu.addAction(empty_action)
-        menu.addMenu(primary_menu)
-
-        playlist_menu = RoundMenu(self.tr("添加到播放列表"), menu)
-        if self._playlists:
-            for label_id, name, _count, _last_gid in self._playlists:
-                action = QAction(name, playlist_menu)
-                action.setCheckable(True)
-                action.setChecked(
-                    bool(target_items)
-                    and all(name in current.multiple_labels for current in target_items)
-                )
-                action.toggled.connect(
-                    lambda checked, current_id=label_id, current_name=name: (
-                        self._setMangaMultipleLabel(
-                            target_gids,
-                            current_id,
-                            current_name,
-                            checked,
-                        )
-                    )
-                )
-                playlist_menu.addAction(action)
-            playlist_menu.addSeparator()
-
-        create_action = QAction(self.tr("新建并添加…"), playlist_menu)
-        create_action.triggered.connect(
-            lambda: self._createPlaylist(target_gids)
-        )
-        playlist_menu.addAction(create_action)
-        menu.addMenu(playlist_menu)
-
-        taxonomy_menu = RoundMenu(self.tr("添加到归类"), menu)
-        self._buildTaxonomySubmenus(
-            taxonomy_menu, None, target_gids, target_items
-        )
-        if not self._taxonomy_labels:
-            empty_action = QAction(self.tr("暂无归类"), taxonomy_menu)
-            empty_action.setEnabled(False)
-            taxonomy_menu.addAction(empty_action)
-        create_taxonomy_action = QAction(self.tr("新建并添加…"), taxonomy_menu)
-        create_taxonomy_action.triggered.connect(
-            lambda: self._createTaxonomyLabel(target_gids)
-        )
-        taxonomy_menu.addSeparator()
-        taxonomy_menu.addAction(create_taxonomy_action)
-        menu.addMenu(taxonomy_menu)
+            )
+            menu.addAction(action)
         return menu
 
-    def _buildTaxonomySubmenus(
-        self, parent_menu, parent_id, target_gids, target_items
-    ):
-        children = [
-            entry for entry in self._taxonomy_labels if entry[1] == parent_id
-        ]
-        for label_id, _parent_id, name, _count in children:
-            grandchildren = [
-                entry for entry in self._taxonomy_labels
-                if entry[1] == label_id
-            ]
-            checked = bool(target_items) and all(
-                int(label_id) in item.taxonomy_label_ids for item in target_items
-            )
-            if grandchildren:
-                child_menu = RoundMenu(name, parent_menu)
-                assign_action = QAction(self.tr("添加到此归类"), child_menu)
-                assign_action.setCheckable(True)
-                assign_action.setChecked(checked)
-                assign_action.toggled.connect(
-                    lambda value, current_id=label_id: self._setMangaTaxonomyLabel(
-                        target_gids, current_id, value
+    def _openLabelSelection(self, mode, target_gids, target_items):
+        dialog = MangaLabelSelectionDialog(
+            mode,
+            target_items,
+            primary_labels=self._primary_labels,
+            playlists=self._playlists,
+            taxonomy_labels=self._taxonomy_labels,
+            parent=self.window(),
+        )
+        result = dialog.exec()
+        if result == MangaLabelSelectionDialog.CREATE_REQUESTED:
+            if mode == self.TAG_PLAYLIST:
+                self._createPlaylist(target_gids)
+            elif mode == self.TAG_TAXONOMY:
+                self._createTaxonomyLabel(target_gids)
+            return
+        if result != QDialog.Accepted:
+            return
+        if mode == self.TAG_CATEGORY:
+            self._setMangaPrimaryLabel(target_gids, dialog.selectedCategory())
+        elif mode == self.TAG_PLAYLIST:
+            self._applyPlaylistSelection(target_gids, dialog.selectionChanges())
+        else:
+            self._applyTaxonomySelection(target_gids, dialog.selectionChanges())
+
+    def _applyPlaylistSelection(self, gids, changes):
+        if not changes:
+            return
+        target_gids = tuple(dict.fromkeys(int(gid) for gid in gids))
+
+        def operation():
+            for label_id, checked in changes.items():
+                if checked:
+                    self.userRepository.assign_label_to_mangas(
+                        target_gids, label_id
                     )
-                )
-                child_menu.addAction(assign_action)
-                child_menu.addSeparator()
-                self._buildTaxonomySubmenus(
-                    child_menu, label_id, target_gids, target_items
-                )
-                parent_menu.addMenu(child_menu)
-            else:
-                action = QAction(name, parent_menu)
-                action.setCheckable(True)
-                action.setChecked(checked)
-                action.toggled.connect(
-                    lambda value, current_id=label_id: self._setMangaTaxonomyLabel(
-                        target_gids, current_id, value
+                else:
+                    self.userRepository.unassign_label_from_mangas(
+                        target_gids, label_id
                     )
-                )
-                parent_menu.addAction(action)
+
+        self._startLabelMutation(operation, self._refreshTagData)
+
+    def _applyTaxonomySelection(self, gids, changes):
+        if not changes:
+            return
+        target_gids = tuple(dict.fromkeys(int(gid) for gid in gids))
+
+        def operation():
+            for label_id, checked in changes.items():
+                if checked:
+                    self.userRepository.assign_taxonomy_to_mangas(
+                        target_gids, label_id
+                    )
+                else:
+                    self.userRepository.unassign_taxonomy_from_mangas(
+                        target_gids, label_id
+                    )
+
+        self._startLabelMutation(operation, self._refreshTagData)
 
     def _setMangaPrimaryLabel(self, gids, label_name: str):
         target_gids = tuple(dict.fromkeys(int(gid) for gid in gids))

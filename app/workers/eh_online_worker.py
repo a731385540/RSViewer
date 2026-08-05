@@ -7,17 +7,16 @@ class OnlineSearchSignals(QObject):
 
 
 class OnlineSearchWorker(QRunnable):
-    def __init__(self, source, query="", page_url=""):
+    def __init__(self, provider, query):
         super().__init__()
-        self.source = source
+        self.provider = provider
         self.query = query
-        self.page_url = page_url
         self.cancelled = False
         self.signals = OnlineSearchSignals()
 
     def run(self):
         try:
-            page = self.source.search(self.query, self.page_url)
+            page = self.provider.search(self.query)
         except Exception as error:
             if not self.cancelled:
                 self.signals.failed.emit(str(error))
@@ -31,9 +30,9 @@ class OnlineCoverSignals(QObject):
 
 
 class OnlineCoverWorker(QRunnable):
-    def __init__(self, source, items):
+    def __init__(self, provider, items):
         super().__init__()
-        self.source = source
+        self.provider = provider
         self.items = tuple(items)
         self.cancelled = False
         self.signals = OnlineCoverSignals()
@@ -43,7 +42,7 @@ class OnlineCoverWorker(QRunnable):
             if self.cancelled:
                 return
             try:
-                data = self.source.load_thumbnail(item.thumbnail_url)
+                data = self.provider.load_thumbnail(item.thumbnail_url)
             except Exception:
                 data = b""
             if self.cancelled:

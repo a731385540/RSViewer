@@ -1,6 +1,6 @@
 from functools import partial
 
-from PySide6.QtCore import QThreadPool, Qt, QTimer, QUrl
+from PySide6.QtCore import QThreadPool, Qt, QUrl
 from PySide6.QtGui import QDesktopServices, QImage, QPixmap
 from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
@@ -16,7 +16,12 @@ from qfluentwidgets import (
 from qfluentwidgets import FluentIcon as FIF
 
 from app.common.config import cfg
-from app.sources.eh_online_source import EhOnlineError, EhOnlineSource
+from app.domain.online_gallery import OnlineGalleryQuery
+from app.sources.eh_online_source import (
+    EhOnlineError,
+    EhOnlineSettings,
+    create_eh_online_provider,
+)
 from app.workers.eh_online_worker import OnlineCoverWorker, OnlineSearchWorker
 
 
@@ -70,19 +75,18 @@ class OnlineGalleryCard(CardWidget):
 class OnlineMangaInterface(QWidget):
     """Search-only online EH/EX browser; gallery pages open in the system browser."""
 
-    def __init__(self, parent=None, source_factory=EhOnlineSource):
+    def __init__(self, parent=None, provider_factory=create_eh_online_provider):
         super().__init__(parent)
         self.setObjectName("onlineMangaInterface")
-        self._source_factory = source_factory
+        self._provider_factory = provider_factory
         self._search_worker = None
         self._cover_worker = None
         self._cards = []
         self._cards_by_gid = {}
         self._page_number = 1
-        self._page_history = []
-        self._next_url = ""
-        self._loaded_once = False
-        self._needs_reload = False
+        self._cursor_history = []
+        self._next_cursor = ""
+        self._filters = {}
         self.threadPool = QThreadPool(self)
         self.threadPool.setMaxThreadCount(2)
 
@@ -109,7 +113,10 @@ class OnlineMangaInterface(QWidget):
         search_row.addWidget(self.searchEdit, 1)
         search_row.addWidget(self.searchButton)
 
-        self.resultLabel = BodyLabel(self.tr("进入页面后将加载在线画廊。"), self)
+        self.resultLabel = BodyLabel(
+            self.tr("爬虫接口和运行配置已就绪；接入 provider 后可在这里搜索。"),
+            self,
+        )
         self.resultLabel.setWordWrap(True)
         self.scrollArea = ScrollArea(self)
         self.scrollArea.setWidgetResizable(True)
@@ -147,69 +154,72 @@ class OnlineMangaInterface(QWidget):
 
         cfg.onlineEhSite.valueChanged.connect(self._syncSite)
 
-    def showEvent(self, event):
-        super().showEvent(event)
-        if not self._loaded_once or self._needs_reload:
-            self._loaded_once = True
-            self._needs_reload = False
-            QTimer.singleShot(0, self.search)
-
     def _syncSite(self, site):
         if site in {"ehentai", "exhentai"}:
             self.siteSwitch.setCurrentItem(site)
-            self._page_history = []
+            self._cursor_history = []
             self._page_number = 1
-            self._needs_reload = True
-            if self._loaded_once and self.isVisible():
-                self._needs_reload = False
-                QTimer.singleShot(0, self.search)
+            self._next_cursor = ""
 
     def setSite(self, site):
         if site == cfg.get(cfg.onlineEhSite):
             return
         cfg.set(cfg.onlineEhSite, site)
 
-    def _makeSource(self):
-        return self._source_factory(
+    def setFilters(self, filters):
+        """Set provider-defined filters without coupling them to this widget."""
+
+        self._filters = dict(filters or {})
+
+    def _makeProvider(self):
+        settings = EhOnlineSettings.create(
             site=cfg.get(cfg.onlineEhSite),
             cookie=cfg.get(cfg.onlineEhCookie),
             proxy_mode=cfg.get(cfg.onlineEhProxyMode),
             manual_proxy=cfg.get(cfg.onlineEhManualProxy),
+            timeout_seconds=cfg.get(cfg.onlineEhRequestTimeout),
         )
+        return self._provider_factory(settings)
 
-    def search(self, *_args, page_url="", keep_history=False):
+    def search(self, *_args, cursor="", keep_history=False):
         self.cancelLoad()
         if not keep_history:
-            self._page_history = []
+            self._cursor_history = []
             self._page_number = 1
         try:
-            source = self._makeSource()
+            provider = self._makeProvider()
         except EhOnlineError as error:
             self._showError(str(error))
             return
-        self.resultLabel.setText(self.tr("正在连接在线画廊…"))
+        query = OnlineGalleryQuery(
+            keyword=self.searchEdit.text().strip(),
+            cursor=cursor,
+            page_number=self._page_number,
+            filters=dict(self._filters),
+        )
+        self.resultLabel.setText(self.tr("正在调用在线 provider…"))
         self.searchButton.setEnabled(False)
         self.previousButton.setEnabled(False)
         self.nextButton.setEnabled(False)
-        worker = OnlineSearchWorker(source, self.searchEdit.text(), page_url)
-        worker.signals.loaded.connect(partial(self._finishSearch, worker, source))
+        worker = OnlineSearchWorker(provider, query)
+        worker.signals.loaded.connect(partial(self._finishSearch, worker, provider))
         worker.signals.failed.connect(partial(self._failSearch, worker))
         self._search_worker = worker
         self.threadPool.start(worker)
 
-    def _finishSearch(self, worker, source, page):
+    def _finishSearch(self, worker, provider, page):
         if self._search_worker is not worker:
             return
         self._search_worker = None
         self.searchButton.setEnabled(True)
-        self._next_url = page.next_url
-        self.nextButton.setEnabled(bool(page.next_url))
-        self.previousButton.setEnabled(bool(self._page_history))
+        self._next_cursor = page.next_cursor
+        self.nextButton.setEnabled(bool(page.next_cursor))
+        self.previousButton.setEnabled(bool(self._cursor_history))
         self.pageLabel.setText(self.tr(f"第 {self._page_number} 页"))
         self.resultLabel.setText(self.tr(f"本页 {len(page.items)} 个画廊；点击卡片在浏览器中打开。"))
         self._setItems(page.items)
         if page.items:
-            cover_worker = OnlineCoverWorker(source, page.items)
+            cover_worker = OnlineCoverWorker(provider, page.items)
             cover_worker.signals.loaded.connect(partial(self._setCover, cover_worker))
             self._cover_worker = cover_worker
             self.threadPool.start(cover_worker)
@@ -223,8 +233,8 @@ class OnlineMangaInterface(QWidget):
 
     def _showError(self, message):
         self.resultLabel.setText(self.tr(f"加载失败：{message}"))
-        self.previousButton.setEnabled(bool(self._page_history))
-        self.nextButton.setEnabled(bool(self._next_url))
+        self.previousButton.setEnabled(bool(self._cursor_history))
+        self.nextButton.setEnabled(bool(self._next_cursor))
 
     def _setItems(self, items):
         while self.gridLayout.count():
@@ -253,19 +263,19 @@ class OnlineMangaInterface(QWidget):
         self._relayoutCards()
 
     def nextPage(self):
-        if not self._next_url:
+        if not self._next_cursor:
             return
-        self._page_history.append(self._next_url)
+        self._cursor_history.append(self._next_cursor)
         self._page_number += 1
-        self.search(page_url=self._next_url, keep_history=True)
+        self.search(cursor=self._next_cursor, keep_history=True)
 
     def previousPage(self):
-        if not self._page_history:
+        if not self._cursor_history:
             return
-        self._page_history.pop()
+        self._cursor_history.pop()
         self._page_number = max(1, self._page_number - 1)
-        page_url = self._page_history[-1] if self._page_history else ""
-        self.search(page_url=page_url, keep_history=True)
+        cursor = self._cursor_history[-1] if self._cursor_history else ""
+        self.search(cursor=cursor, keep_history=True)
 
     def cancelLoad(self):
         if self._search_worker is not None:
