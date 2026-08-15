@@ -1,0 +1,732 @@
+import os
+import tempfile
+import unittest
+from dataclasses import replace
+from pathlib import Path
+from unittest.mock import patch
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtCore import QEvent, QPoint, Qt, QThreadPool
+from PySide6.QtGui import QContextMenuEvent
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QDialog
+
+from app.common.config import cfg
+from app.domain.manga import MangaItem
+from app.repositories.user_library_repository import UserLibraryRepository
+from app.view.local_manga_interface import (
+    FluentSplitterHandle,
+    LocalMangaInterface,
+    MangaLabelSelectionDialog,
+    PlaylistOrderDialog,
+)
+from app.view.manga_history_interface import MangaHistoryInterface
+
+
+class EmptySource:
+    def __init__(self):
+        self.primary_updates = []
+        self.primary_deletes = []
+        self.primary_clears = []
+
+    def list_local_manga(self):
+        return []
+
+    def list_primary_labels(self):
+        return ["分类 A", "分类 B"]
+
+    def set_primary_label(self, gids, label):
+        self.primary_updates.append((tuple(gids), label))
+
+    def create_primary_label(self, label):
+        return None
+
+    def delete_primary_label(self, label):
+        self.primary_deletes.append(label)
+
+    def clear_primary_label(self, gids):
+        self.primary_clears.append(tuple(gids))
+
+
+def make_item(root: Path, gid: int, added_time: int):
+    return MangaItem(
+        gid=gid,
+        english_title=f"Manga {gid}",
+        original_title="",
+        category=4,
+        category_name="漫画",
+        primary_label="",
+        multiple_labels=(),
+        tags=(),
+        folder=root / str(gid),
+        cover_path=root / f"{gid}.thumb",
+        thumbnail_path=None,
+        page_paths=(),
+        page_count=0,
+        added_time=added_time,
+    )
+
+
+class LocalLibraryControlsTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.original_sort_order = cfg.get(cfg.mangaSortOrder)
+        self.original_primary_filter = cfg.get(cfg.mangaPrimaryLabelFilter)
+        self.original_search_hover = cfg.get(cfg.mangaSearchHoverEnabled)
+        cfg.set(cfg.mangaSortOrder, "desc")
+        cfg.set(cfg.mangaPrimaryLabelFilter, "__none__")
+        cfg.set(cfg.mangaSearchHoverEnabled, True)
+        self.temp_directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_directory.name)
+        self.repository = UserLibraryRepository(self.root / "rsviewer.db")
+        self.source = EmptySource()
+        self.interface = LocalMangaInterface(self.source, self.repository)
+        QThreadPool.globalInstance().waitForDone(3000)
+        QApplication.processEvents()
+        self.interface._preloadCovers = lambda: None
+        self.items = [
+            make_item(self.root, 1, 10),
+            make_item(self.root, 2, 30),
+            make_item(self.root, 3, 20),
+        ]
+        self.interface._onLoaded(
+            (self.items, ["分类 A", "分类 B"], [])
+        )
+
+    def tearDown(self):
+        self.interface.cancelLoad()
+        self.interface.close()
+        self.interface.deleteLater()
+        cfg.set(cfg.mangaSortOrder, self.original_sort_order)
+        cfg.set(cfg.mangaPrimaryLabelFilter, self.original_primary_filter)
+        cfg.set(cfg.mangaSearchHoverEnabled, self.original_search_hover)
+        QApplication.processEvents()
+        self.temp_directory.cleanup()
+
+    def test_added_time_sort_defaults_to_desc_and_can_switch_to_asc(self):
+        self.assertEqual(
+            [2, 3, 1],
+            [item.gid for item in self.interface._filtered_items],
+        )
+
+        self.interface.sortCombo.setCurrentIndex(1)
+        QApplication.processEvents()
+
+        self.assertEqual("asc", cfg.get(cfg.mangaSortOrder))
+        self.assertEqual(
+            [1, 3, 2],
+            [item.gid for item in self.interface._filtered_items],
+        )
+
+    def test_category_defaults_to_unclassified_and_remembers_selection(self):
+        self.assertEqual("未分类", self.interface.primaryLabelTree.currentItem().text(0))
+        self.assertNotIn(
+            "全部漫画",
+            [
+                self.interface.primaryLabelTree.topLevelItem(index).text(0)
+                for index in range(self.interface.primaryLabelTree.topLevelItemCount())
+            ],
+        )
+        self.interface.primaryLabelTree.setCurrentItem(
+            self.interface.primaryLabelTree.topLevelItem(2)
+        )
+        self.assertEqual("分类 B", cfg.get(cfg.mangaPrimaryLabelFilter))
+        self.interface._populatePrimaryLabels(["分类 A", "分类 B"])
+        self.assertEqual("分类 B", self.interface.primaryLabelTree.currentItem().text(0))
+
+    def test_tag_sidebar_is_hidden_by_default_and_can_be_toggled(self):
+        self.interface.resize(1100, 760)
+        self.interface.show()
+        QApplication.processEvents()
+        self.assertTrue(self.interface.classificationCard.isHidden())
+
+        self.interface.tagButton.click()
+        QApplication.processEvents()
+        self.assertTrue(self.interface.classificationCard.isVisible())
+        splitter_handle = self.interface.tagSplitter.handle(1)
+        self.assertIsInstance(splitter_handle, FluentSplitterHandle)
+        self.assertEqual(7, splitter_handle.width())
+        QApplication.sendEvent(splitter_handle, QEvent(QEvent.Enter))
+        self.assertTrue(splitter_handle._hovered)
+        self.interface._all_items[0] = replace(
+            self.interface._all_items[0], primary_label="分类 A"
+        )
+        self.interface.primaryLabelTree.setCurrentItem(
+            self.interface.primaryLabelTree.topLevelItem(1)
+        )
+        QApplication.processEvents()
+        self.assertEqual(
+            [self.interface._all_items[0].gid],
+            [item.gid for item in self.interface._filtered_items],
+        )
+        expanded_sidebar_viewport_width = self.interface.scrollArea.viewport().width()
+
+        self.interface.tagButton.click()
+        QTest.qWait(80)
+        QApplication.processEvents()
+        self.assertTrue(self.interface.classificationCard.isHidden())
+        collapsed_sidebar_viewport_width = self.interface.scrollArea.viewport().width()
+        expected_columns = max(
+            1,
+            (
+                collapsed_sidebar_viewport_width
+                + self.interface.contentLayout.horizontalSpacing()
+            )
+            // (
+                188 + self.interface.contentLayout.horizontalSpacing()
+            ),
+        )
+        self.assertGreater(
+            collapsed_sidebar_viewport_width,
+            expanded_sidebar_viewport_width,
+        )
+        self.assertEqual(expected_columns, self.interface._last_columns)
+
+    def test_search_hover_expands_and_only_empty_search_auto_hides(self):
+        self.interface.resize(1000, 700)
+        self.interface.show()
+        QApplication.processEvents()
+        self.assertTrue(self.interface.searchPanel.isHidden())
+
+        QApplication.sendEvent(
+            self.interface.searchButton, QEvent(QEvent.Enter)
+        )
+        QApplication.processEvents()
+        self.assertTrue(self.interface.searchPanel.isVisible())
+        self.assertIsNot(QApplication.focusWidget(), self.interface.searchEdit)
+
+        self.interface.searchEdit.setText("Manga")
+        QApplication.sendEvent(
+            self.interface.searchButton, QEvent(QEvent.Leave)
+        )
+        QTest.qWait(200)
+        self.assertTrue(self.interface.searchPanel.isVisible())
+
+        self.interface.searchEdit.clear()
+        QApplication.sendEvent(
+            self.interface.searchPanel, QEvent(QEvent.Leave)
+        )
+        QTest.qWait(200)
+        self.assertTrue(self.interface.searchPanel.isHidden())
+
+        cfg.set(cfg.mangaSearchHoverEnabled, False)
+        QApplication.sendEvent(
+            self.interface.searchButton, QEvent(QEvent.Enter)
+        )
+        QApplication.processEvents()
+        self.assertTrue(self.interface.searchPanel.isHidden())
+
+    def test_context_menu_opens_three_fixed_label_selection_dialogs(self):
+        self.repository.create_playlist("播放列表 A")
+        self.repository.create_taxonomy_label("全彩")
+        self.interface._refreshTagData()
+        requests = []
+        self.interface._openLabelSelection = (
+            lambda mode, gids, items: requests.append(
+                (mode, tuple(gids), tuple(item.gid for item in items))
+            )
+        )
+        menu = self.interface._buildLabelMenu(self.items[0])
+
+        self.assertEqual(
+            [
+                "添加到收藏",
+                "搜索相似画廊",
+                "选择分类…",
+                "选择播放列表…",
+                "选择归类…",
+            ],
+            [action.text() for action in menu.menuActions() if action.text()],
+        )
+        self.assertEqual([], menu._subMenus)
+        for action in menu.menuActions():
+            if action.text().startswith("选择"):
+                action.trigger()
+
+        self.assertEqual(
+            [
+                (self.interface.TAG_CATEGORY, (1,), (1,)),
+                (self.interface.TAG_PLAYLIST, (1,), (1,)),
+                (self.interface.TAG_TAXONOMY, (1,), (1,)),
+            ],
+            requests,
+        )
+
+    def test_context_menu_searches_similar_chapters_and_duplicates(self):
+        similar_items = [
+            replace(
+                self.items[0],
+                english_title="[Circle (Author)] Real Work Ch. 01 [English]",
+            ),
+            replace(self.items[1], english_title="Real Work Chapter 2 [Digital]"),
+            replace(self.items[2], english_title="Real Work 第3話"),
+            make_item(self.root, 4, 40),
+        ]
+        similar_items[3] = replace(
+            similar_items[3], english_title="A Completely Different Work"
+        )
+        self.interface._onLoaded(
+            (similar_items, ["分类 A", "分类 B"], [], [])
+        )
+
+        menu = self.interface._buildLabelMenu(similar_items[0])
+        next(
+            action
+            for action in menu.menuActions()
+            if action.text() == "搜索相似画廊"
+        ).trigger()
+        QThreadPool.globalInstance().waitForDone(3000)
+        QApplication.processEvents()
+
+        self.assertEqual(
+            [1, 2, 3], [item.gid for item in self.interface._filtered_items]
+        )
+        self.assertIn("找到 3 个", self.interface.resultLabel.text())
+        self.assertFalse(self.interface.sortCombo.isEnabled())
+
+        self.interface.searchEdit.setText("Different")
+        QTest.qWait(220)
+        QApplication.processEvents()
+        self.assertIsNone(self.interface._similar_result_gids)
+        self.assertTrue(self.interface.sortCombo.isEnabled())
+        self.assertEqual([4], [item.gid for item in self.interface._filtered_items])
+
+    def test_label_selection_dialog_searches_and_preserves_partial_state(self):
+        category_item = replace(self.items[0], primary_label="分类 A")
+        category_dialog = MangaLabelSelectionDialog(
+            MangaLabelSelectionDialog.CATEGORY,
+            (category_item,),
+            primary_labels=("分类 A", "分类 B"),
+            parent=self.interface,
+        )
+        self.assertEqual("分类 A", category_dialog.selectedCategory())
+        category_dialog.searchEdit.setText("分类 B")
+        QApplication.processEvents()
+        self.assertTrue(category_dialog.tree.topLevelItem(1).isHidden())
+        self.assertFalse(category_dialog.tree.topLevelItem(2).isHidden())
+        category_dialog.tree.setCurrentItem(category_dialog.tree.topLevelItem(2))
+        self.assertEqual("分类 B", category_dialog.selectedCategory())
+
+        mixed_items = (
+            replace(self.items[0], multiple_labels=("列表 A",)),
+            self.items[1],
+        )
+        playlist_dialog = MangaLabelSelectionDialog(
+            MangaLabelSelectionDialog.PLAYLIST,
+            mixed_items,
+            playlists=((7, "列表 A", 1, None),),
+            parent=self.interface,
+        )
+        playlist_item = playlist_dialog.tree.topLevelItem(0)
+        self.assertEqual(Qt.PartiallyChecked, playlist_item.checkState(0))
+        self.assertEqual({}, playlist_dialog.selectionChanges())
+        playlist_item.setCheckState(0, Qt.Checked)
+        self.assertEqual({7: True}, playlist_dialog.selectionChanges())
+
+        taxonomy_dialog = MangaLabelSelectionDialog(
+            MangaLabelSelectionDialog.TAXONOMY,
+            self.items,
+            taxonomy_labels=(
+                (10, None, "全彩", 0),
+                (11, 10, "作者一", 0),
+                (12, None, "黑白", 0),
+            ),
+            parent=self.interface,
+        )
+        taxonomy_dialog.searchEdit.setText("作者一")
+        QApplication.processEvents()
+        self.assertFalse(taxonomy_dialog.tree.topLevelItem(0).isHidden())
+        self.assertTrue(taxonomy_dialog.tree.topLevelItem(1).isHidden())
+        category_dialog.close()
+        playlist_dialog.close()
+        taxonomy_dialog.close()
+
+    def test_dialog_selection_changes_apply_in_bulk(self):
+        playlist_id = self.repository.create_playlist("批量播放列表")
+        taxonomy_id = self.repository.create_taxonomy_label("批量归类")
+        self.interface._refreshTagData()
+
+        self.interface._applyPlaylistSelection((1, 2), {playlist_id: True})
+        self.interface._applyTaxonomySelection((1, 2), {taxonomy_id: True})
+        QThreadPool.globalInstance().waitForDone(3000)
+        QApplication.processEvents()
+
+        self.assertEqual(
+            {1: ("批量播放列表",), 2: ("批量播放列表",)},
+            self.repository.labels_for_manga((1, 2)),
+        )
+        self.assertEqual(
+            {
+                1: ((taxonomy_id, "批量归类"),),
+                2: ((taxonomy_id, "批量归类"),),
+            },
+            self.repository.taxonomy_for_mangas((1, 2)),
+        )
+
+        self.interface._applyPlaylistSelection((1, 2), {playlist_id: False})
+        self.interface._applyTaxonomySelection((1, 2), {taxonomy_id: False})
+        QThreadPool.globalInstance().waitForDone(3000)
+        QApplication.processEvents()
+        self.assertEqual({}, self.repository.labels_for_manga((1, 2)))
+        self.assertEqual({}, self.repository.taxonomy_for_mangas((1, 2)))
+
+    def test_context_menu_adds_and_removes_favorite(self):
+        changes = []
+        self.interface.favoriteChanged.connect(
+            lambda gids, favorite: changes.append((tuple(gids), favorite))
+        )
+        menu = self.interface._buildLabelMenu(self.items[0])
+        self.assertEqual("添加到收藏", menu.menuActions()[0].text())
+        menu.menuActions()[0].trigger()
+        QThreadPool.globalInstance().waitForDone(3000)
+        QApplication.processEvents()
+
+        self.assertEqual((1,), self.repository.favorite_gids())
+        self.assertTrue(
+            next(item for item in self.interface._all_items if item.gid == 1).is_favorite
+        )
+        self.assertEqual([((1,), True)], changes)
+
+        refreshed = next(item for item in self.interface._all_items if item.gid == 1)
+        remove_menu = self.interface._buildLabelMenu(refreshed)
+        self.assertEqual("取消收藏", remove_menu.menuActions()[0].text())
+        remove_menu.menuActions()[0].trigger()
+        QThreadPool.globalInstance().waitForDone(3000)
+        QApplication.processEvents()
+        self.assertEqual((), self.repository.favorite_gids())
+        self.assertEqual([((1,), True), ((1,), False)], changes)
+
+    def test_playlist_gallery_context_menu_removes_current_members(self):
+        playlist_id = self.repository.create_playlist("待整理")
+        self.repository.assign_label_to_mangas((1, 2, 3), playlist_id)
+        self.interface._refreshTagData()
+        self.interface._setTagMode(self.interface.TAG_PLAYLIST)
+        self.interface.playlistTree.setCurrentItem(
+            self.interface._playlist_items[playlist_id]
+        )
+        QApplication.processEvents()
+
+        menu = self.interface._buildLabelMenu(self.interface._filtered_items[0], (1, 2))
+        remove_action = next(
+            action
+            for action in menu.menuActions()
+            if action.text() == "从当前播放列表移除"
+        )
+        remove_action.trigger()
+        QThreadPool.globalInstance().waitForDone(3000)
+        QApplication.processEvents()
+
+        self.assertEqual((3,), self.repository.playlist_items(playlist_id))
+        self.assertEqual([3], [item.gid for item in self.interface._filtered_items])
+        self.interface._setTagMode(self.interface.TAG_CATEGORY)
+        self.assertNotIn(
+            "从当前播放列表移除",
+            [
+                action.text()
+                for action in self.interface._buildLabelMenu(
+                    self.interface._all_items[0]
+                ).menuActions()
+            ],
+        )
+
+    def test_collection_mode_reuses_items_and_preserves_repository_order(self):
+        collection = LocalMangaInterface(
+            self.source,
+            self.repository,
+            collection_kind="favorites",
+            object_name="testFavoriteCollection",
+        )
+        collection._preloadCovers = lambda: None
+        collection.setCollectionItems(self.items, (3, 1))
+
+        self.assertEqual([3, 1], [item.gid for item in collection._filtered_items])
+        self.assertTrue(collection.tagButton.isHidden())
+        self.assertTrue(collection.sortCombo.isHidden())
+        collection.close()
+        collection.deleteLater()
+
+    def test_history_page_has_local_content_and_reserved_online_tab(self):
+        history = MangaHistoryInterface(self.source, self.repository)
+        history.localHistoryInterface._preloadCovers = lambda: None
+        history.setCollectionItems(self.items, (2, 3))
+
+        self.assertEqual(
+            [2, 3],
+            [item.gid for item in history.localHistoryInterface._filtered_items],
+        )
+        history.modeSwitch.setCurrentItem(history.ONLINE)
+        history.stack.setCurrentWidget(history.onlineHistoryInterface)
+        self.assertIn("预留", history.onlineHistoryInterface.descriptionLabel.text())
+        history.cancelLoad()
+        history.close()
+        history.deleteLater()
+
+    def test_tag_tree_context_menus_delete_all_three_tag_types(self):
+        self.assertIsNone(
+            self.interface._buildTagTreeMenu(
+                self.interface.TAG_CATEGORY,
+                self.interface.primaryLabelTree.topLevelItem(0),
+            )
+        )
+        self.interface._confirmDeleteTag = lambda _name, _description: False
+        cancelled_menu = self.interface._buildTagTreeMenu(
+            self.interface.TAG_CATEGORY,
+            self.interface.primaryLabelTree.topLevelItem(1),
+        )
+        cancelled_menu.menuActions()[0].trigger()
+        self.assertEqual([], self.source.primary_deletes)
+
+        self.interface._confirmDeleteTag = lambda _name, _description: True
+        category_menu = self.interface._buildTagTreeMenu(
+            self.interface.TAG_CATEGORY,
+            self.interface.primaryLabelTree.topLevelItem(1),
+        )
+        category_menu.menuActions()[0].trigger()
+        QThreadPool.globalInstance().waitForDone(3000)
+        QApplication.processEvents()
+        self.assertEqual(["分类 A"], self.source.primary_deletes)
+        self.assertNotIn("分类 A", self.interface._primary_labels)
+
+        playlist_id = self.repository.create_playlist("待删除播放列表")
+        self.repository.assign_label_to_mangas((1, 2), playlist_id)
+        taxonomy_id = self.repository.create_taxonomy_label("待删除归类")
+        self.repository.assign_taxonomy_to_mangas((1, 2), taxonomy_id)
+        self.interface._refreshTagData()
+
+        playlist_menu = self.interface._buildTagTreeMenu(
+            self.interface.TAG_PLAYLIST,
+            self.interface._playlist_items[playlist_id],
+        )
+        playlist_menu.menuActions()[0].trigger()
+        QThreadPool.globalInstance().waitForDone(3000)
+        QApplication.processEvents()
+        self.assertNotIn(
+            playlist_id,
+            [entry[0] for entry in self.repository.list_playlists()],
+        )
+
+        taxonomy_menu = self.interface._buildTagTreeMenu(
+            self.interface.TAG_TAXONOMY,
+            self.interface._taxonomy_items[taxonomy_id],
+        )
+        taxonomy_menu.menuActions()[0].trigger()
+        QThreadPool.globalInstance().waitForDone(3000)
+        QApplication.processEvents()
+        self.assertNotIn(
+            taxonomy_id,
+            [entry[0] for entry in self.repository.list_taxonomy_labels()],
+        )
+
+    def test_right_click_without_multi_select_opens_menu_not_gallery(self):
+        self.interface.resize(1100, 760)
+        self.interface.show()
+        QApplication.processEvents()
+
+        for mode in (self.interface.GRID_MODE, self.interface.LIST_MODE):
+            with self.subTest(mode=mode):
+                self.interface.setLayoutMode(mode)
+                QApplication.processEvents()
+                card = self.interface._cards[0]
+                activated = []
+                menu_requests = []
+                card.openCallback = lambda item: activated.append(item.gid)
+                card.labelMenuCallback = (
+                    lambda item, position: menu_requests.append(item.gid)
+                )
+
+                QTest.mouseClick(card, Qt.RightButton, pos=card.rect().center())
+                event = QContextMenuEvent(
+                    QContextMenuEvent.Mouse,
+                    QPoint(10, 10),
+                    card.mapToGlobal(QPoint(10, 10)),
+                )
+                QApplication.sendEvent(card, event)
+
+                self.assertFalse(self.interface._selection_mode)
+                self.assertEqual([], activated)
+                self.assertEqual([card.item.gid], menu_requests)
+
+    def test_multi_select_applies_context_actions_to_all_selected_items(self):
+        self.repository.create_playlist("批量列表")
+        self.interface._refreshTagData()
+        activated = []
+        self.interface.mangaActivated.connect(lambda item: activated.append(item.gid))
+        self.interface.resize(1100, 760)
+        self.interface.show()
+        self.interface.multiSelectCheckBox.setChecked(True)
+        QApplication.processEvents()
+
+        QTest.mouseClick(
+            self.interface._cards[0],
+            Qt.LeftButton,
+            pos=self.interface._cards[0].rect().center(),
+        )
+        QTest.mouseClick(
+            self.interface._cards[1],
+            Qt.LeftButton,
+            pos=self.interface._cards[1].rect().center(),
+        )
+        self.assertEqual({2, 3}, self.interface._selected_gids)
+        self.assertEqual([], activated)
+        self.assertEqual("已选 2 项", self.interface.selectionCountLabel.text())
+
+        selected_item = self.interface._cards[0].item
+        menu = self.interface._buildLabelMenu(
+            selected_item, self.interface._selected_gids
+        )
+        selection_requests = []
+        self.interface._openLabelSelection = (
+            lambda mode, gids, items: selection_requests.append(
+                (mode, tuple(gids), tuple(item.gid for item in items))
+            )
+        )
+        for action in menu.menuActions():
+            if action.text() in {"选择分类…", "选择播放列表…"}:
+                action.trigger()
+        self.assertEqual(
+            [
+                (self.interface.TAG_CATEGORY, (2, 3), (2, 3)),
+                (self.interface.TAG_PLAYLIST, (2, 3), (2, 3)),
+            ],
+            selection_requests,
+        )
+
+        playlist_id = self.repository.list_playlists()[0][0]
+        self.interface._setMangaPrimaryLabel((2, 3), "分类 B")
+        self.interface._applyPlaylistSelection((2, 3), {playlist_id: True})
+        QThreadPool.globalInstance().waitForDone(3000)
+        QApplication.processEvents()
+
+        self.assertIn(((2, 3), "分类 B"), self.source.primary_updates)
+        self.assertEqual(
+            {2: ("批量列表",), 3: ("批量列表",)},
+            self.repository.labels_for_manga([1, 2, 3]),
+        )
+
+        self.interface._setMangaPrimaryLabel((2, 3), "")
+        QThreadPool.globalInstance().waitForDone(3000)
+        QApplication.processEvents()
+        self.assertEqual([(2, 3)], self.source.primary_clears)
+        self.assertTrue(
+            all(
+                not item.primary_label
+                for item in self.interface._all_items
+                if item.gid in (2, 3)
+            )
+        )
+        self.interface._applyPlaylistSelection((2, 3), {playlist_id: False})
+        QThreadPool.globalInstance().waitForDone(3000)
+        QApplication.processEvents()
+        self.assertEqual({}, self.repository.labels_for_manga([2, 3]))
+
+    def test_playlist_order_and_play_actions_use_the_selected_playlist(self):
+        playlist_id = self.repository.create_playlist("顺序测试")
+        self.repository.assign_label_to_mangas((1, 2, 3), playlist_id)
+        self.repository.set_playlist_order(playlist_id, (3, 1, 2))
+        self.interface._refreshTagData()
+        self.interface._setTagMode(self.interface.TAG_PLAYLIST)
+
+        self.assertEqual(
+            [3, 1, 2],
+            [item.gid for item in self.interface._filtered_items],
+        )
+        requests = []
+        self.interface.playlistPlayRequested.connect(
+            lambda playlist, items, position, resume: requests.append(
+                (playlist, tuple(item.gid for item in items), position, resume)
+            )
+        )
+        self.interface._requestPlaylistPlayback(False)
+        self.repository.save_playlist_position(playlist_id, 1)
+        self.interface._requestPlaylistPlayback(True)
+
+        self.assertEqual(
+            [
+                (playlist_id, (3, 1, 2), 0, False),
+                (playlist_id, (3, 1, 2), 1, True),
+            ],
+            requests,
+        )
+
+    def test_playlist_order_dialog_moves_items_and_returns_new_order(self):
+        dialog = PlaylistOrderDialog("顺序测试", self.items, self.interface)
+        dialog.listWidget.setCurrentRow(2)
+        dialog.topButton.click()
+        self.assertEqual((3, 1, 2), dialog.orderedGids())
+        dialog.downButton.click()
+        self.assertEqual((1, 3, 2), dialog.orderedGids())
+        dialog.bottomButton.click()
+        self.assertEqual((1, 2, 3), dialog.orderedGids())
+        dialog.close()
+
+    def test_playlist_order_action_saves_dialog_result(self):
+        playlist_id = self.repository.create_playlist("保存顺序")
+        self.repository.assign_label_to_mangas((1, 2, 3), playlist_id)
+        self.interface._refreshTagData()
+        self.interface._setTagMode(self.interface.TAG_PLAYLIST)
+
+        class AcceptedOrderDialog:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def exec(self):
+                return QDialog.Accepted
+
+            def orderedGids(self):
+                return (3, 2, 1)
+
+        with patch(
+            "app.view.local_manga_interface.PlaylistOrderDialog",
+            AcceptedOrderDialog,
+        ):
+            self.interface._editPlaylistOrder()
+        QThreadPool.globalInstance().waitForDone(3000)
+        QApplication.processEvents()
+
+        self.assertEqual((3, 2, 1), self.repository.playlist_items(playlist_id))
+        self.assertEqual((3, 2, 1), self.interface._playlist_order)
+
+    def test_taxonomy_tree_filters_many_to_many_assignments(self):
+        root_id = self.repository.create_taxonomy_label("全彩")
+        child_id = self.repository.create_taxonomy_label("作者1", root_id)
+        self.repository.assign_taxonomy_to_mangas((2, 3), child_id)
+        self.interface._refreshTagData()
+        self.interface._setTagMode(self.interface.TAG_TAXONOMY)
+        self.interface.taxonomyTree.setCurrentItem(
+            self.interface._taxonomy_items[child_id]
+        )
+
+        self.assertEqual(
+            {2, 3}, {item.gid for item in self.interface._filtered_items}
+        )
+        self.assertIs(
+            self.interface._taxonomy_items[child_id].parent(),
+            self.interface._taxonomy_items[root_id],
+        )
+        self.interface.taxonomyTree.setCurrentItem(
+            self.interface._taxonomy_items[root_id]
+        )
+        self.assertEqual(
+            {2, 3}, {item.gid for item in self.interface._filtered_items}
+        )
+
+    def test_tag_sidebar_never_exceeds_thirty_percent(self):
+        self.interface.resize(1000, 700)
+        self.interface.show()
+        QApplication.processEvents()
+        self.interface.tagSplitter.setSizes([700, 300])
+        self.interface.resizeEvent.__self__.resize(1001, 700)
+        QApplication.processEvents()
+
+        self.assertLessEqual(
+            self.interface.tagSplitter.sizes()[0],
+            int(self.interface.width() * 0.3),
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
