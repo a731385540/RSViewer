@@ -8,8 +8,10 @@ venv/
 .vscode/
 /lib/
 /testData/
+/Database/
 
 app/config/config.json
+app/cache/
 app/data/
 *.log
 

@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Tuple
+from typing import Any, Mapping, Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -15,6 +15,9 @@ class OnlineGallery:
     posted: str = ""
     page_count: int = 0
     tags: Tuple[str, ...] = ()
+    uploader: str = ""
+    rating: Optional[float] = None
+    source_mode: str = ""
 
 
 @dataclass(frozen=True)

@@ -3,7 +3,9 @@ from dataclasses import dataclass, field, replace
 from typing import Dict, Iterable
 from urllib.parse import urlparse
 from urllib.request import getproxies
-import requests
+
+from eh_tool_refactored import EhData
+
 from app.domain.online_gallery import (
     OnlineGallery,
     OnlineGalleryPage,
@@ -134,6 +136,11 @@ class EhOnlineProvider(ABC):
 
         return b""
 
+    def set_display_mode(self, mode: str):
+        """Update the account/session list mode through the site's own page control."""
+
+        raise EhOnlineError("当前在线 provider 不支持更新站点默认页面模式")
+
 
 class UnimplementedEhOnlineProvider(EhOnlineProvider):
     """Safe default that performs no network access."""
@@ -145,16 +152,125 @@ class UnimplementedEhOnlineProvider(EhOnlineProvider):
         )
 
 
+class RefactoredEhOnlineProvider(EhOnlineProvider):
+    """Adapter for the user-supplied ``eh_tool_refactored`` list crawler."""
+
+    SOURCE_NAMES = {
+        "ehentai": "e-hentai",
+        "exhentai": "exhentai",
+    }
+
+    def __init__(self, settings: EhOnlineSettings):
+        super().__init__(settings)
+        proxy_mapping = settings.proxy_mapping()
+        use_proxy = settings.proxy_mode == "manual" or (
+            settings.proxy_mode == "system" and bool(proxy_mapping)
+        )
+        self._crawler = EhData(
+            settings.cookie,
+            source=self.SOURCE_NAMES[settings.site],
+            proxies=proxy_mapping,
+            use_proxy=use_proxy,
+            timeout=settings.timeout_seconds,
+            trust_env=settings.proxy_mode == "system",
+        )
+
+    def fetch_page(self, query: OnlineGalleryQuery) -> OnlineGalleryPage:
+        if query.cursor:
+            self._validate_list_url(query.cursor)
+            result = self._crawler.getUrl(query.cursor)
+        else:
+            result = self._crawler.getMain(search=query.keyword)
+        if not isinstance(result, dict):
+            raise EhOnlineError("画廊爬虫返回了未知数据")
+        if result.get("error"):
+            raise EhOnlineError(str(result["error"]))
+
+        items = tuple(
+            gallery
+            for gallery in (
+                self._to_gallery(raw) for raw in result.get("data", ())
+            )
+            if gallery is not None
+        )
+        return OnlineGalleryPage(
+            items=items,
+            next_cursor=str(result.get("next_url") or ""),
+            previous_cursor=str(result.get("prev_url") or ""),
+        )
+
+    def load_thumbnail(self, url: str) -> bytes:
+        if not url:
+            return b""
+        self._validate_thumbnail_url(url)
+        response = self._crawler.req.get(url)
+        if response is None or not getattr(response, "ok", False):
+            return b""
+        return bytes(response.content or b"")
+
+    def set_display_mode(self, mode: str):
+        result = self._crawler.setDisplayMode(mode)
+        if not isinstance(result, dict):
+            raise EhOnlineError("画廊爬虫返回了未知的页面模式设置结果")
+        if result.get("error"):
+            raise EhOnlineError(str(result["error"]))
+
+    def _validate_list_url(self, url: str):
+        parsed = urlparse(url)
+        expected_host = urlparse(self.settings.base_url).hostname
+        if parsed.scheme != "https" or parsed.hostname != expected_host:
+            raise EhOnlineError("拒绝访问站点列表页之外的翻页地址")
+
+    @staticmethod
+    def _validate_thumbnail_url(url: str):
+        parsed = urlparse(url)
+        hostname = (parsed.hostname or "").casefold()
+        allowed = (
+            hostname in {"e-hentai.org", "exhentai.org", "ehgt.org"}
+            or hostname.endswith(".e-hentai.org")
+            or hostname.endswith(".exhentai.org")
+            or hostname.endswith(".ehgt.org")
+        )
+        if parsed.scheme != "https" or not allowed:
+            raise EhOnlineError("拒绝加载未知站点的缩略图")
+
+    @staticmethod
+    def _to_gallery(raw):
+        gid = raw.get("gid")
+        token = raw.get("token")
+        url = raw.get("gallery_url")
+        if gid is None or not token or not url:
+            return None
+        tags = []
+        for namespace, names in (raw.get("label") or {}).items():
+            for name in names or ():
+                value = f"{namespace}:{name}" if namespace else str(name)
+                if value not in tags:
+                    tags.append(value)
+        score = raw.get("score")
+        try:
+            rating = float(score) if score is not None else None
+        except (TypeError, ValueError):
+            rating = None
+        if rating is not None and not 0 <= rating <= 5:
+            rating = None
+        return OnlineGallery(
+            gid=int(gid),
+            token=str(token),
+            url=str(url),
+            title=str(raw.get("title") or raw.get("alt") or gid),
+            category=str(raw.get("type") or ""),
+            thumbnail_url=str(raw.get("thumb_url") or ""),
+            posted=str(raw.get("upload") or ""),
+            page_count=int(raw.get("page_num") or 0),
+            tags=tuple(tags),
+            uploader=str(raw.get("uploader") or ""),
+            rating=rating,
+            source_mode=str(raw.get("page_mode") or ""),
+        )
+
+
 def create_eh_online_provider(settings: EhOnlineSettings) -> EhOnlineProvider:
-    """Application composition hook for a user-supplied crawler.
+    """Compose the bundled adapter around ``eh_tool_refactored.py``."""
 
-    Replace the returned class here, or inject another factory into
-    ``OnlineMangaInterface``. Keeping this function network-free ensures the
-    stock application never accesses EH/EX before a crawler is supplied.
-    """
-
-    return UnimplementedEhOnlineProvider(settings)
-
-
-if __name__ == '__main__':
-    print(1)
+    return RefactoredEhOnlineProvider(settings)

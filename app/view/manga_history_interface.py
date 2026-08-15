@@ -11,7 +11,14 @@ class MangaHistoryInterface(QWidget):
     LOCAL = "local"
     ONLINE = "online"
 
-    def __init__(self, source, user_repository, parent=None):
+    def __init__(
+        self,
+        source,
+        user_repository,
+        parent=None,
+        tag_search_index=None,
+        search_history_service=None,
+    ):
         super().__init__(parent)
         self.setObjectName("mangaHistoryInterface")
         self.modeSwitch = SegmentedWidget(self)
@@ -21,6 +28,8 @@ class MangaHistoryInterface(QWidget):
             self,
             collection_kind="history",
             object_name="localMangaHistoryInterface",
+            tag_search_index=tag_search_index,
+            search_history_service=search_history_service,
         )
         self.onlineHistoryInterface = MediaInterface(
             self.tr("在线历史"),

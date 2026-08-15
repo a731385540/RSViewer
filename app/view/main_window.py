@@ -19,6 +19,8 @@ from qfluentwidgets import FluentIcon as FIF
 
 from app.common.config import PROJECT_ROOT, cfg
 from app.repositories.user_library_repository import UserLibraryRepository
+from app.services.eh_tag_search import EhTagSearchIndex
+from app.services.search_history import SearchHistoryService
 from app.sources.ehviewer_source import EhViewerDataSource
 from app.view.local_manga_interface import LocalMangaInterface
 from app.view.manga_detail_interface import MangaDetailInterface, PageDiscoveryWorker
@@ -45,10 +47,23 @@ class MainWindow(FluentWindow):
         self.userLibraryRepository = UserLibraryRepository(
             PROJECT_ROOT / "app" / "data" / "rsviewer.db"
         )
+        self.ehTagSearchIndex = EhTagSearchIndex.from_repository(
+            self.userLibraryRepository
+        )
+        self.searchHistoryService = SearchHistoryService(
+            self.userLibraryRepository,
+            cfg.get(cfg.searchHistoryLimit),
+            self,
+        )
+        cfg.searchHistoryLimit.valueChanged.connect(
+            self.searchHistoryService.setLimit
+        )
         self.localMangaInterface = LocalMangaInterface(
             self.mangaSource,
             self.userLibraryRepository,
             self,
+            tag_search_index=self.ehTagSearchIndex,
+            search_history_service=self.searchHistoryService,
         )
         self.favoriteMangaInterface = LocalMangaInterface(
             self.mangaSource,
@@ -56,11 +71,15 @@ class MainWindow(FluentWindow):
             self,
             collection_kind="favorites",
             object_name="favoriteMangaInterface",
+            tag_search_index=self.ehTagSearchIndex,
+            search_history_service=self.searchHistoryService,
         )
         self.mangaHistoryInterface = MangaHistoryInterface(
             self.mangaSource,
             self.userLibraryRepository,
             self,
+            tag_search_index=self.ehTagSearchIndex,
+            search_history_service=self.searchHistoryService,
         )
         self.mangaDetailInterface = MangaDetailInterface(
             self.mangaSource,
@@ -116,7 +135,11 @@ class MainWindow(FluentWindow):
         self.mangaReaderInterface.previousMangaRequested.connect(
             self._openPreviousPlaylistManga
         )
-        self.onlineMangaInterface = OnlineMangaInterface(self)
+        self.onlineMangaInterface = OnlineMangaInterface(
+            self,
+            tag_search_index=self.ehTagSearchIndex,
+            search_history_service=self.searchHistoryService,
+        )
         self.videoInterface = MediaInterface(
             self.tr("视频"),
             self.tr("本地目录、映射盘与 NAS 视频将在这里显示。"),
@@ -137,6 +160,13 @@ class MainWindow(FluentWindow):
         self._updateSearchShortcut(cfg.get(cfg.searchShortcut))
         self.searchShortcut.activated.connect(self.openLocalMangaSearch)
         cfg.searchShortcut.valueChanged.connect(self._updateSearchShortcut)
+        self.tagSidebarShortcut = QShortcut(self)
+        self.tagSidebarShortcut.setContext(Qt.ApplicationShortcut)
+        self._updateTagSidebarShortcut(cfg.get(cfg.tagSidebarShortcut))
+        self.tagSidebarShortcut.activated.connect(self.toggleLocalMangaTags)
+        cfg.tagSidebarShortcut.valueChanged.connect(
+            self._updateTagSidebarShortcut
+        )
         self._backKeySequence = QKeySequence()
         self._updateBackShortcut(cfg.get(cfg.backShortcut))
         cfg.backShortcut.valueChanged.connect(self._updateBackShortcut)
@@ -288,6 +318,10 @@ class MainWindow(FluentWindow):
     def openLocalMangaSearch(self):
         self.switchTo(self.localMangaInterface)
         self.localMangaInterface.openSearch()
+
+    def toggleLocalMangaTags(self):
+        self.switchTo(self.localMangaInterface)
+        self.localMangaInterface.toggleClassification()
 
     def openMangaDetail(self, item):
         self._clearPlaylistContext()
@@ -495,6 +529,9 @@ class MainWindow(FluentWindow):
 
     def _updateSearchShortcut(self, shortcut: str):
         self.searchShortcut.setKey(QKeySequence(shortcut))
+
+    def _updateTagSidebarShortcut(self, shortcut: str):
+        self.tagSidebarShortcut.setKey(QKeySequence(shortcut))
 
     def _updateBackShortcut(self, shortcut: str):
         self._backKeySequence = QKeySequence(shortcut)

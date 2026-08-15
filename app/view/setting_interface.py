@@ -305,12 +305,58 @@ class SettingInterface(ScrollArea):
             ],
             parent=self.onlineGroup,
         )
+        self.onlineViewModeCard = OptionsSettingCard(
+            cfg.onlineEhViewMode,
+            FIF.VIEW,
+            self.tr("默认展示视图"),
+            self.tr("在线资源页切换视图时会同时更新此默认设置"),
+            texts=[self.tr("卡片"), "Extended"],
+            parent=self.onlineGroup,
+        )
+        self.onlineThumbnailConcurrencyCard = OptionsSettingCard(
+            cfg.onlineEhThumbnailConcurrency,
+            FIF.DOWNLOAD,
+            self.tr("封面并发请求数"),
+            self.tr("同时加载在线画廊封面的后台任务数量"),
+            texts=[
+                self.tr("1 个"),
+                self.tr("2 个"),
+                self.tr("4 个"),
+                self.tr("6 个"),
+                self.tr("8 个"),
+                self.tr("12 个"),
+            ],
+            parent=self.onlineGroup,
+        )
+        self.onlineThumbnailCacheHoursCard = OptionsSettingCard(
+            cfg.onlineEhThumbnailCacheHours,
+            FIF.HISTORY,
+            self.tr("封面缓存过期时间"),
+            self.tr("过期后再次显示封面时会重新下载并更新本地缓存"),
+            texts=[
+                self.tr("1 小时"),
+                self.tr("6 小时"),
+                self.tr("12 小时"),
+                self.tr("1 天"),
+                self.tr("3 天"),
+                self.tr("7 天"),
+                self.tr("30 天"),
+            ],
+            parent=self.onlineGroup,
+        )
         self._updateManualProxyEnabled(cfg.get(cfg.onlineEhProxyMode))
         self.searchShortcutCard = ShortcutSettingCard(
             cfg.searchShortcut,
             FIF.SEARCH,
-            self.tr("打开漫画搜索"),
-            self.tr("切换到本地漫画并展开搜索栏"),
+            self.tr("展开漫画搜索栏"),
+            self.tr("切换到本地资源并展开、聚焦搜索栏"),
+            self.shortcutGroup,
+        )
+        self.tagSidebarShortcutCard = ShortcutSettingCard(
+            cfg.tagSidebarShortcut,
+            FIF.TAG,
+            self.tr("展开或收起漫画标签栏"),
+            self.tr("切换到本地资源并切换分类、播放列表和归类侧栏"),
             self.shortcutGroup,
         )
         self.backShortcutCard = ShortcutSettingCard(
@@ -319,6 +365,26 @@ class SettingInterface(ScrollArea):
             self.tr("返回上一级"),
             self.tr("详情页等下一级页面的通用返回快捷键"),
             self.shortcutGroup,
+        )
+        self.mangaSearchHoverCard = SwitchSettingCard(
+            FIF.SEARCH,
+            self.tr("鼠标悬停展开搜索栏"),
+            self.tr("移到搜索按钮时自动展开；搜索词为空且鼠标离开后自动收起"),
+            cfg.mangaSearchHoverEnabled,
+            self.personalGroup,
+        )
+        self.searchHistoryLimitCard = OptionsSettingCard(
+            cfg.searchHistoryLimit,
+            FIF.HISTORY,
+            self.tr("搜索历史记录上限"),
+            self.tr("本地与在线资源共用；新搜索会保留在最近记录中"),
+            texts=[
+                self.tr("5 条"),
+                self.tr("10 条"),
+                self.tr("15 条"),
+                self.tr("20 条"),
+            ],
+            parent=self.personalGroup,
         )
         self.readerBackgroundCard = ColorSettingCard(
             cfg.readerBackgroundColor,
@@ -410,9 +476,14 @@ class SettingInterface(ScrollArea):
         self.onlineGroup.addSettingCard(self.onlineProxyModeCard)
         self.onlineGroup.addSettingCard(self.onlineManualProxyCard)
         self.onlineGroup.addSettingCard(self.onlineTimeoutCard)
+        self.onlineGroup.addSettingCard(self.onlineViewModeCard)
+        self.onlineGroup.addSettingCard(self.onlineThumbnailConcurrencyCard)
+        self.onlineGroup.addSettingCard(self.onlineThumbnailCacheHoursCard)
         self.personalGroup.addSettingCard(self.themeCard)
         self.personalGroup.addSettingCard(self.themeColorCard)
         self.personalGroup.addSettingCard(self.libraryFoldersCard)
+        self.personalGroup.addSettingCard(self.mangaSearchHoverCard)
+        self.personalGroup.addSettingCard(self.searchHistoryLimitCard)
         self.readerGroup.addSettingCard(self.readerBackgroundCard)
         self.readerGroup.addSettingCard(self.readerDirectionCard)
         self.readerGroup.addSettingCard(self.readerImageLoadSizeCard)
@@ -420,6 +491,7 @@ class SettingInterface(ScrollArea):
         self.readerGroup.addSettingCard(self.readerAutoPageCard)
         self.readerGroup.addSettingCard(self.readerAutoPageIntervalCard)
         self.shortcutGroup.addSettingCard(self.searchShortcutCard)
+        self.shortcutGroup.addSettingCard(self.tagSidebarShortcutCard)
         self.shortcutGroup.addSettingCard(self.backShortcutCard)
         self.expandLayout.setSpacing(28)
         self.expandLayout.setContentsMargins(36, 10, 36, 0)

@@ -1,9 +1,9 @@
 from collections import OrderedDict
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Optional
 
 from PySide6.QtCore import QEvent, QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QImageReader, QKeyEvent, QKeySequence, QPixmap
+from PySide6.QtGui import QImage, QImageReader, QKeyEvent, QKeySequence, QMovie, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsOpacityEffect,
@@ -36,6 +36,23 @@ class ReaderLoadSignals(QObject):
     finished = Signal()
 
 
+@dataclass(frozen=True)
+class ReaderPageImage:
+    """A preloaded first frame plus the file type detected from its contents."""
+
+    image: QImage
+    is_gif: bool = False
+
+
+def _has_gif_signature(path) -> bool:
+    """Recognize GIF87a/GIF89a without trusting a possibly renamed extension."""
+    try:
+        with open(path, "rb") as stream:
+            return stream.read(6) in (b"GIF87a", b"GIF89a")
+    except OSError:
+        return False
+
+
 class ReaderLoadWorker(QRunnable):
     """Decode the current page first, then preload nearby pages."""
 
@@ -50,13 +67,18 @@ class ReaderLoadWorker(QRunnable):
         for index in self.indexes:
             if self.cancelled:
                 return
-            reader = QImageReader(str(self.page_paths[index]))
+            path = self.page_paths[index]
+            is_gif = _has_gif_signature(path)
+            reader = QImageReader(str(path))
+            if is_gif:
+                # An explicit format keeps renamed GIF files working on every Qt build.
+                reader.setFormat(b"gif")
             reader.setAutoTransform(True)
             image = reader.read()
             if self.cancelled:
                 return
             try:
-                self.signals.imageReady.emit(index, image)
+                self.signals.imageReady.emit(index, ReaderPageImage(image, is_gif))
             except RuntimeError:
                 return
         try:
@@ -83,6 +105,8 @@ class MangaReaderInterface(QWidget):
         self._image_cache = OrderedDict()
         self._load_worker: Optional[ReaderLoadWorker] = None
         self._pixmap_item: Optional[QGraphicsPixmapItem] = None
+        self._active_movie: Optional[QMovie] = None
+        self._movie_page_index = -1
         self._display_mode = cfg.get(cfg.readerImageLoadSize)
         self._zoom_factor = 1.0
         self._fullscreen = False
@@ -239,6 +263,7 @@ class MangaReaderInterface(QWidget):
 
     def setManga(self, item: MangaItem, page_index=0):
         self.cancelLoads()
+        self._stopMovie()
         self._reader_active = True
         self._item = item
         self._image_cache.clear()
@@ -276,8 +301,9 @@ class MangaReaderInterface(QWidget):
         self._updatePageIndicator(len(self._item.page_paths))
         self._updateControls()
         self._auto_page_timer.stop()
+        self._stopMovie()
         if index in self._image_cache:
-            self._displayImage(self._image_cache[index])
+            self._displayPageImage(index, self._image_cache[index])
             self._image_cache.move_to_end(index)
             self._preloadAround(index, include_current=False)
             return
@@ -344,6 +370,7 @@ class MangaReaderInterface(QWidget):
         self._reader_active = False
         self._auto_page_timer.stop()
         self.cancelLoads()
+        self._stopMovie()
 
     def setPlaylistContinuation(
         self, has_following_manga: bool, has_previous_manga: bool = False
@@ -443,19 +470,25 @@ class MangaReaderInterface(QWidget):
         self._load_worker = worker
         QThreadPool.globalInstance().start(worker)
 
-    def _onImageReady(self, worker, index: int, image):
+    def _onImageReady(self, worker, index: int, page_image):
         if self._load_worker is not worker:
             return
-        self._image_cache[index] = image
+        self._image_cache[index] = page_image
         self._image_cache.move_to_end(index)
         while len(self._image_cache) > 5:
             self._image_cache.popitem(last=False)
         if index == self._page_index:
-            self._displayImage(image)
+            self._displayPageImage(index, page_image)
 
     def _finishLoad(self, worker):
         if self._load_worker is worker:
             self._load_worker = None
+
+    def _displayPageImage(self, index: int, page_image: ReaderPageImage):
+        self._stopMovie()
+        self._displayImage(page_image.image)
+        if page_image.is_gif and not page_image.image.isNull():
+            self._startMovie(index)
 
     def _displayImage(self, image):
         self.scene.clear()
@@ -474,6 +507,53 @@ class MangaReaderInterface(QWidget):
                 self.graphicsView.verticalScrollBar().minimum()
             ),
         )
+
+    def _startMovie(self, index: int):
+        if self._item is None or index >= len(self._item.page_paths):
+            return
+        movie = QMovie(str(self._item.page_paths[index]), b"gif", self)
+        movie.setCacheMode(QMovie.CacheNone)
+        if not movie.isValid():
+            movie.deleteLater()
+            return
+        self._active_movie = movie
+        self._movie_page_index = index
+        movie.frameChanged.connect(
+            lambda _frame_number, active_movie=movie: self._updateMovieFrame(
+                active_movie
+            )
+        )
+        movie.start()
+
+    def _updateMovieFrame(self, movie: QMovie):
+        if (
+            movie is not self._active_movie
+            or self._movie_page_index != self._page_index
+            or self._pixmap_item is None
+        ):
+            return
+        pixmap = movie.currentPixmap()
+        if pixmap.isNull():
+            return
+        old_size = self._pixmap_item.boundingRect().size()
+        self._pixmap_item.setPixmap(pixmap)
+        self.scene.setSceneRect(self._pixmap_item.boundingRect())
+        if old_size != self._pixmap_item.boundingRect().size() and self._display_mode in (
+            "fit_window",
+            "fit_width",
+        ):
+            self._applyViewTransform()
+
+    def _stopMovie(self):
+        movie = self._active_movie
+        self._active_movie = None
+        self._movie_page_index = -1
+        if movie is not None:
+            movie.stop()
+            # Release QMovie's Windows file handle immediately; deferred QObject
+            # deletion can otherwise keep a removable/local file locked briefly.
+            movie.setFileName("")
+            movie.deleteLater()
 
     def _applyViewTransform(self):
         if self._pixmap_item is None:
@@ -668,9 +748,13 @@ class MangaReaderInterface(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self._reader_active = True
+        if self._active_movie is not None:
+            self._active_movie.setPaused(False)
         self._updateAutoPageTimer()
 
     def hideEvent(self, event):
         self._reader_active = False
         self._auto_page_timer.stop()
+        if self._active_movie is not None:
+            self._active_movie.setPaused(True)
         super().hideEvent(event)

@@ -1,2 +1,5 @@
 PySide6
 PySide6-Fluent-Widgets
+requests
+beautifulsoup4
+lxml

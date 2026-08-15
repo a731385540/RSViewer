@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple
 
 
 @dataclass(frozen=True)
@@ -62,4 +62,8 @@ class MangaItem:
 
     def matches(self, query: str) -> bool:
         words = [word.casefold() for word in query.split() if word]
-        return all(word in self.searchable_text for word in words)
+        return self.matches_terms(words)
+
+    def matches_terms(self, terms: Sequence[str]) -> bool:
+        searchable_text = self.searchable_text
+        return all(str(term).casefold() in searchable_text for term in terms if term)

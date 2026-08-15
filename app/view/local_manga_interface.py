@@ -5,7 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
-from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import (
     QAction,
     QBrush,
@@ -69,6 +69,8 @@ from app.common.config import cfg
 from app.domain.manga import MangaItem
 from app.repositories.user_library_repository import UserLibraryRepository
 from app.sources.ehviewer_source import EhViewerDataSource
+from app.view.eh_tag_search_line_edit import EhTagSearchLineEdit
+from app.workers.similar_manga_worker import SimilarMangaWorker
 
 
 class FluentSplitterHandle(QSplitterHandle):
@@ -907,6 +909,8 @@ class LocalMangaInterface(QWidget):
         parent=None,
         collection_kind=None,
         object_name=None,
+        tag_search_index=None,
+        search_history_service=None,
     ):
         super().__init__(parent=parent)
         self._collection_kind = collection_kind
@@ -914,6 +918,8 @@ class LocalMangaInterface(QWidget):
         self.setObjectName(object_name or "localMangaInterface")
         self.source = source
         self.userRepository = user_repository
+        self.tagSearchIndex = tag_search_index
+        self.searchHistoryService = search_history_service
         self._all_items: List[MangaItem] = []
         self._filtered_items: List[MangaItem] = []
         self._cards: List[QWidget] = []
@@ -942,13 +948,22 @@ class LocalMangaInterface(QWidget):
         self._load_worker = None
         self._cover_worker = None
         self._cover_cache = OrderedDict()
+        self._similar_search_worker: Optional[SimilarMangaWorker] = None
+        self._similar_result_gids: Optional[tuple] = None
+        self._similar_reference_title = ""
+        self._search_hover_widgets = set()
+        self._search_opened_by_hover = False
 
         title = {
             "favorites": self.tr("收藏"),
             "history": self.tr("本地历史"),
         }.get(collection_kind, self.tr("本地资源"))
         self.titleLabel = TitleLabel(title, self)
-        self.searchEdit = SearchLineEdit(self)
+        self.searchEdit = EhTagSearchLineEdit(
+            tag_search_index,
+            self,
+            search_history_service,
+        )
         self.searchEdit.setPlaceholderText(self.tr("搜索英语标题、原标题或标签"))
         self.searchEdit.setMinimumWidth(260)
         self.searchPanel = QWidget(self)
@@ -956,6 +971,10 @@ class LocalMangaInterface(QWidget):
         search_layout.setContentsMargins(0, 0, 0, 0)
         search_layout.addWidget(self.searchEdit)
         self.searchPanel.hide()
+        self.searchHoverTimer = QTimer(self)
+        self.searchHoverTimer.setSingleShot(True)
+        self.searchHoverTimer.setInterval(160)
+        self.searchHoverTimer.timeout.connect(self._finishSearchHover)
 
         self.searchButton = TransparentPushButton(
             FIF.SEARCH,
@@ -963,6 +982,12 @@ class LocalMangaInterface(QWidget):
             self,
         )
         self.searchButton.clicked.connect(self.toggleSearch)
+        for hover_widget in (self.searchButton, self.searchPanel, self.searchEdit):
+            hover_widget.setAttribute(Qt.WA_Hover, True)
+            hover_widget.installEventFilter(self)
+        cfg.mangaSearchHoverEnabled.valueChanged.connect(
+            self._onSearchHoverSettingChanged
+        )
         self.tagButton = TransparentPushButton(
             FIF.TAG,
             self.tr("标签"),
@@ -1194,7 +1219,7 @@ class LocalMangaInterface(QWidget):
         self.searchTimer.setSingleShot(True)
         self.searchTimer.setInterval(180)
         self.searchTimer.timeout.connect(self.applyFilters)
-        self.searchEdit.textChanged.connect(self._scheduleSearch)
+        self.searchEdit.textChanged.connect(self._onSearchTextChanged)
         self.primaryLabelTree.currentItemChanged.connect(self._onPrimaryLabelChanged)
         self.playlistTree.currentItemChanged.connect(self._onPlaylistChanged)
         self.taxonomyTree.currentItemChanged.connect(self._onTaxonomyChanged)
@@ -1280,6 +1305,7 @@ class LocalMangaInterface(QWidget):
             self._load_worker.cancelled = True
             self._load_worker = None
         self._cancelCoverPreload()
+        self._cancelSimilarSearchWorker()
 
     def _cancelCoverPreload(self):
         if self._cover_worker is not None:
@@ -1288,6 +1314,7 @@ class LocalMangaInterface(QWidget):
 
     def reload(self):
         self.cancelLoad()
+        self._clearSimilarSearch(clear_query=True)
         self._selected_gids.clear()
         self._updateSelectionState()
         self._cover_cache.clear()
@@ -1427,6 +1454,7 @@ class LocalMangaInterface(QWidget):
         if value is None:
             return
         self._primary_label_filter = value
+        self._clearSimilarSearch(clear_query=True)
         self._show_all_manga = False
         cfg.set(cfg.mangaPrimaryLabelFilter, value)
         self.applyFilters(reset_page=True)
@@ -1435,6 +1463,7 @@ class LocalMangaInterface(QWidget):
         if current is None or current.data(0, Qt.UserRole) is None:
             return
         self._playlist_filter_id = int(current.data(0, Qt.UserRole))
+        self._clearSimilarSearch(clear_query=True)
         self._playlist_filter_name = str(current.data(0, Qt.UserRole + 1))
         self._playlist_order = self.userRepository.playlist_items(
             self._playlist_filter_id
@@ -1448,6 +1477,7 @@ class LocalMangaInterface(QWidget):
         if current is None or current.data(0, Qt.UserRole) is None:
             return
         self._taxonomy_filter_id = int(current.data(0, Qt.UserRole))
+        self._clearSimilarSearch(clear_query=True)
         self._show_all_manga = False
         if self._tag_mode == self.TAG_TAXONOMY:
             self.applyFilters(reset_page=True)
@@ -1455,6 +1485,7 @@ class LocalMangaInterface(QWidget):
     def _setTagMode(self, mode: str, reset_page=True):
         if mode not in (self.TAG_CATEGORY, self.TAG_PLAYLIST, self.TAG_TAXONOMY):
             return
+        self._clearSimilarSearch(clear_query=True)
         self._tag_mode = mode
         self._show_all_manga = False
         self.tagModeSwitch.setCurrentItem(mode)
@@ -1476,6 +1507,7 @@ class LocalMangaInterface(QWidget):
             self.applyFilters(reset_page=reset_page)
 
     def _showAllManga(self):
+        self._clearSimilarSearch(clear_query=True)
         self._show_all_manga = True
         self.sortCombo.setEnabled(True)
         self.applyFilters(reset_page=True)
@@ -1715,6 +1747,29 @@ class LocalMangaInterface(QWidget):
             lambda: self._setMangaFavorite(target_gids, favorite)
         )
         menu.addAction(favorite_action)
+        if self._collection_kind is None:
+            similar_action = QAction(self.tr("搜索相似画廊"), menu)
+            similar_action.triggered.connect(
+                lambda _checked=False, reference=item: self._searchSimilarGalleries(
+                    reference
+                )
+            )
+            menu.addAction(similar_action)
+        if (
+            self._tag_mode == self.TAG_PLAYLIST
+            and not self._show_all_manga
+            and self._playlist_filter_id is not None
+        ):
+            playlist_id = self._playlist_filter_id
+            remove_action = QAction(self.tr("从当前播放列表移除"), menu)
+            remove_action.triggered.connect(
+                lambda _checked=False, current_playlist_id=playlist_id: (
+                    self._applyPlaylistSelection(
+                        target_gids, {current_playlist_id: False}
+                    )
+                )
+            )
+            menu.addAction(remove_action)
         menu.addSeparator()
         for mode, text in (
             (self.TAG_CATEGORY, self.tr("选择分类…")),
@@ -1930,6 +1985,86 @@ class LocalMangaInterface(QWidget):
     def _scheduleSearch(self):
         self.searchTimer.start()
 
+    def _onSearchTextChanged(self):
+        self._clearSimilarSearch()
+        self._scheduleSearch()
+        if (
+            cfg.get(cfg.mangaSearchHoverEnabled)
+            and not self.searchEdit.text().strip()
+            and not self._isPointerInSearchArea()
+        ):
+            self.searchHoverTimer.start()
+
+    def _cancelSimilarSearchWorker(self):
+        if self._similar_search_worker is not None:
+            self._similar_search_worker.cancelled = True
+            self._similar_search_worker = None
+
+    def _clearSimilarSearch(self, clear_query=False):
+        was_active = bool(
+            self._similar_search_worker is not None
+            or self._similar_result_gids is not None
+            or self._similar_reference_title
+        )
+        self._cancelSimilarSearchWorker()
+        self._similar_result_gids = None
+        self._similar_reference_title = ""
+        if clear_query and was_active:
+            self.searchEdit.blockSignals(True)
+            self.searchEdit.clear()
+            self.searchEdit.blockSignals(False)
+        if self._collection_kind is None:
+            self.sortCombo.setEnabled(self._tag_mode != self.TAG_PLAYLIST)
+
+    def _searchSimilarGalleries(self, item: MangaItem):
+        self._cancelSimilarSearchWorker()
+        self.searchTimer.stop()
+        self._similar_result_gids = None
+        self._similar_reference_title = item.display_title
+        self._show_all_manga = True
+        self.sortCombo.setEnabled(False)
+        self.openSearch()
+        self.searchEdit.blockSignals(True)
+        self.searchEdit.setText(item.display_title)
+        self.searchEdit.blockSignals(False)
+        self.searchEdit.selectAll()
+        self.resultLabel.setText(
+            self.tr("正在分析《{}》的主标题并搜索相似画廊…").format(
+                item.display_title
+            )
+        )
+        worker = SimilarMangaWorker(item, self._all_items)
+        worker.signals.found.connect(
+            lambda matches: self._finishSimilarSearch(worker, matches)
+        )
+        worker.signals.failed.connect(
+            lambda message: self._failSimilarSearch(worker, message)
+        )
+        self._similar_search_worker = worker
+        QThreadPool.globalInstance().start(worker)
+
+    def _finishSimilarSearch(self, worker, matches):
+        if self._similar_search_worker is not worker:
+            return
+        self._similar_search_worker = None
+        self._similar_result_gids = tuple(item.gid for item in matches)
+        self.applyFilters(reset_page=True)
+
+    def _failSimilarSearch(self, worker, message: str):
+        if self._similar_search_worker is not worker:
+            return
+        self._clearSimilarSearch(clear_query=True)
+        InfoBar.error(
+            title=self.tr("相似画廊搜索失败"),
+            content=message,
+            orient=Qt.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP_RIGHT,
+            duration=5000,
+            parent=self,
+        )
+        self.applyFilters(reset_page=True)
+
     def _onSortOrderChanged(self):
         order = self.sortCombo.currentData()
         if order not in ("desc", "asc"):
@@ -1940,10 +2075,45 @@ class LocalMangaInterface(QWidget):
 
     def toggleSearch(self):
         if self.searchPanel.isVisible():
-            self.searchPanel.hide()
-            self.searchButton.setIcon(FIF.SEARCH)
+            self._hideSearchPanel()
         else:
             self.openSearch()
+
+    def eventFilter(self, watched, event):
+        if watched in (self.searchButton, self.searchPanel, self.searchEdit):
+            if event.type() in (QEvent.Enter, QEvent.HoverEnter):
+                self.searchHoverTimer.stop()
+                if (
+                    cfg.get(cfg.mangaSearchHoverEnabled)
+                    and not self.searchPanel.isVisible()
+                ):
+                    self._showSearchPanel(focus=False, opened_by_hover=True)
+            elif event.type() in (QEvent.Leave, QEvent.HoverLeave):
+                if cfg.get(cfg.mangaSearchHoverEnabled):
+                    self.searchHoverTimer.start()
+        return super().eventFilter(watched, event)
+
+    def _isPointerInSearchArea(self):
+        return any(
+            widget.isVisible() and widget.underMouse()
+            for widget in (self.searchButton, self.searchPanel, self.searchEdit)
+        )
+
+    def _finishSearchHover(self):
+        if (
+            not cfg.get(cfg.mangaSearchHoverEnabled)
+            or self._isPointerInSearchArea()
+            or self.searchEdit.text().strip()
+        ):
+            return
+        self._hideSearchPanel()
+
+    def _onSearchHoverSettingChanged(self, enabled):
+        if enabled:
+            return
+        self.searchHoverTimer.stop()
+        if self._search_opened_by_hover and not self.searchEdit.text().strip():
+            self._hideSearchPanel()
 
     def toggleClassification(self):
         show_sidebar = self.classificationCard.isHidden()
@@ -1978,16 +2148,50 @@ class LocalMangaInterface(QWidget):
         QTimer.singleShot(0, self._relayoutCards)
 
     def openSearch(self):
+        self._showSearchPanel(focus=True, opened_by_hover=False)
+
+    def _showSearchPanel(self, focus: bool, opened_by_hover: bool):
         self.searchPanel.show()
         self.searchButton.setIcon(FIF.UP)
-        self.searchEdit.setFocus(Qt.ShortcutFocusReason)
-        self.searchEdit.selectAll()
+        self._search_opened_by_hover = bool(opened_by_hover)
+        if focus:
+            self.searchEdit.setFocus(Qt.ShortcutFocusReason)
+            self.searchEdit.selectAll()
+
+    def _hideSearchPanel(self):
+        self.searchHoverTimer.stop()
+        self.searchPanel.hide()
+        self.searchButton.setIcon(FIF.SEARCH)
+        self._search_opened_by_hover = False
 
     def applyFilters(self, reset_page=False):
         query = self.searchEdit.text().strip()
+        query_terms = (
+            self.tagSearchIndex.local_query_terms(query)
+            if self.tagSearchIndex is not None
+            else tuple(word.casefold() for word in query.split() if word)
+        )
+        if self._similar_result_gids is not None:
+            by_gid = {item.gid: item for item in self._all_items}
+            self._filtered_items = [
+                by_gid[gid] for gid in self._similar_result_gids if gid in by_gid
+            ]
+            if reset_page:
+                self._page = 1
+            self._page = min(max(1, self._page), self.pageCount())
+            self.resultLabel.setText(
+                self.tr(
+                    "找到 {} 个与《{}》相关的画廊（含当前画廊）；修改搜索词可退出"
+                ).format(
+                    len(self._filtered_items), self._similar_reference_title
+                )
+            )
+            self._updatePagination()
+            self._renderCards()
+            return
         if self._collection_kind:
             self._filtered_items = [
-                item for item in self._all_items if item.matches(query)
+                item for item in self._all_items if item.matches_terms(query_terms)
             ]
             order = {
                 gid: position for position, gid in enumerate(self._collection_order)
@@ -2012,7 +2216,8 @@ class LocalMangaInterface(QWidget):
         self._filtered_items = [
             item
             for item in self._all_items
-            if self._matchesActiveTag(item, taxonomy_label_ids) and item.matches(query)
+            if self._matchesActiveTag(item, taxonomy_label_ids)
+            and item.matches_terms(query_terms)
         ]
         if (
             self._tag_mode == self.TAG_PLAYLIST

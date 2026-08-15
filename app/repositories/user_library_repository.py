@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 class UserLibraryRepository:
     """RSViewer 自有数据库；绝不在外部 EhViewer 库中建表。"""
 
-    SCHEMA_VERSION = 5
+    SCHEMA_VERSION = 7
 
     def __init__(self, database_path: Path):
         self.database_path = Path(database_path).resolve()
@@ -179,6 +179,49 @@ class UserLibraryRepository:
                     """
                 )
                 connection.execute("PRAGMA user_version = 5")
+            if version < 6:
+                connection.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS eh_tag_namespaces (
+                        namespace TEXT PRIMARY KEY COLLATE NOCASE,
+                        display_name TEXT NOT NULL,
+                        abbreviation TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                        aliases_json TEXT NOT NULL DEFAULT '[]',
+                        source_file TEXT NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS eh_tags (
+                        namespace TEXT NOT NULL COLLATE NOCASE,
+                        raw_tag TEXT NOT NULL COLLATE NOCASE,
+                        translated_name TEXT NOT NULL DEFAULT '',
+                        description TEXT NOT NULL DEFAULT '',
+                        external_links TEXT NOT NULL DEFAULT '',
+                        source_file TEXT NOT NULL,
+                        PRIMARY KEY (namespace, raw_tag),
+                        FOREIGN KEY (namespace) REFERENCES eh_tag_namespaces(namespace)
+                            ON DELETE CASCADE
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_eh_tags_raw_tag
+                        ON eh_tags(raw_tag COLLATE NOCASE);
+                    CREATE INDEX IF NOT EXISTS idx_eh_tags_translated_name
+                        ON eh_tags(translated_name COLLATE NOCASE);
+                    """
+                )
+                connection.execute("PRAGMA user_version = 6")
+            if version < 7:
+                connection.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS search_history (
+                        query TEXT PRIMARY KEY COLLATE NOCASE,
+                        searched_at INTEGER NOT NULL
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_search_history_recent
+                        ON search_history(searched_at DESC);
+                    """
+                )
+                connection.execute("PRAGMA user_version = 7")
 
     def list_labels(self) -> List[Tuple[int, str, int]]:
         self.initialize()
@@ -613,6 +656,125 @@ class UserLibraryRepository:
         imported_progress = max(0, int(ehviewer_page_index))
         self.save_progress(gid, imported_progress)
         return imported_progress
+
+    def replace_eh_tags(
+        self,
+        namespaces: Sequence[Tuple[str, str, str, str, str]],
+        tags: Sequence[Tuple[str, str, str, str, str, str]],
+    ):
+        """Atomically replace the imported EH tag snapshot in RSViewer's DB.
+
+        Namespace tuples contain ``(key, display_name, abbreviation,
+        aliases_json, source_file)``. Tag tuples contain ``(namespace,
+        raw_tag, translated_name, description, external_links, source_file)``.
+        """
+
+        self.initialize()
+        with self._connect() as connection:
+            connection.execute("DELETE FROM eh_tags")
+            connection.execute("DELETE FROM eh_tag_namespaces")
+            connection.executemany(
+                """
+                INSERT INTO eh_tag_namespaces(
+                    namespace, display_name, abbreviation, aliases_json,
+                    source_file
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                namespaces,
+            )
+            connection.executemany(
+                """
+                INSERT INTO eh_tags(
+                    namespace, raw_tag, translated_name, description,
+                    external_links, source_file
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                tags,
+            )
+
+    def load_eh_tags(self) -> List[Tuple[str, str, str, str, str, str]]:
+        """Load the compact tag fields needed by the in-memory search index."""
+
+        self.initialize()
+        with self._connect() as connection:
+            return [
+                tuple(str(value or "") for value in row)
+                for row in connection.execute(
+                    """
+                    SELECT namespaces.namespace,
+                           namespaces.abbreviation,
+                           namespaces.aliases_json,
+                           tags.raw_tag,
+                           tags.translated_name,
+                           namespaces.display_name
+                    FROM eh_tags AS tags
+                    JOIN eh_tag_namespaces AS namespaces
+                      ON namespaces.namespace = tags.namespace
+                    ORDER BY namespaces.namespace COLLATE NOCASE,
+                             tags.raw_tag COLLATE NOCASE
+                    """
+                )
+            ]
+
+    def eh_tag_count(self) -> int:
+        self.initialize()
+        with self._connect() as connection:
+            return int(connection.execute("SELECT COUNT(*) FROM eh_tags").fetchone()[0])
+
+    def list_search_history(self, limit: int = 20) -> List[str]:
+        self.initialize()
+        limit = max(1, min(20, int(limit)))
+        with self._connect() as connection:
+            return [
+                str(row[0])
+                for row in connection.execute(
+                    """
+                    SELECT query FROM search_history
+                    ORDER BY searched_at DESC, query COLLATE NOCASE
+                    LIMIT ?
+                    """,
+                    (limit,),
+                )
+            ]
+
+    def save_search_history(self, query: str, limit: int = 20):
+        self.initialize()
+        query = " ".join(str(query or "").strip().split())
+        if not query:
+            return
+        limit = max(1, min(20, int(limit)))
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO search_history(query, searched_at)
+                VALUES (?, ?)
+                ON CONFLICT(query) DO UPDATE SET
+                    query = excluded.query,
+                    searched_at = excluded.searched_at
+                """,
+                (query, time.time_ns()),
+            )
+            self._trim_search_history(connection, limit)
+
+    def trim_search_history(self, limit: int):
+        self.initialize()
+        limit = max(1, min(20, int(limit)))
+        with self._connect() as connection:
+            self._trim_search_history(connection, limit)
+
+    @staticmethod
+    def _trim_search_history(connection, limit: int):
+        connection.execute(
+            """
+            DELETE FROM search_history
+            WHERE query NOT IN (
+                SELECT query FROM search_history
+                ORDER BY searched_at DESC, query COLLATE NOCASE
+                LIMIT ?
+            )
+            """,
+            (limit,),
+        )
 
     @contextmanager
     def _connect(self):

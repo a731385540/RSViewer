@@ -55,7 +55,14 @@ class Config(QConfig):
     mangaPrimaryLabelFilter = ConfigItem(
         "Library", "MangaPrimaryLabelFilter", "__none__"
     )
+    mangaSearchHoverEnabled = ConfigItem(
+        "Library", "MangaSearchHoverEnabled", True, BoolValidator()
+    )
+    searchHistoryLimit = OptionsConfigItem(
+        "Library", "SearchHistoryLimit", 20, OptionsValidator([5, 10, 15, 20])
+    )
     searchShortcut = ConfigItem("Shortcuts", "OpenSearch", "Ctrl+K")
+    tagSidebarShortcut = ConfigItem("Shortcuts", "ToggleMangaTags", "Ctrl+L")
     backShortcut = ConfigItem("Shortcuts", "NavigateBack", "Z")
 
     # online E-Hentai / ExHentai source
@@ -72,6 +79,18 @@ class Config(QConfig):
     onlineEhManualProxy = ConfigItem("OnlineEH", "ManualProxy", "")
     onlineEhRequestTimeout = OptionsConfigItem(
         "OnlineEH", "RequestTimeout", 20, OptionsValidator([10, 20, 30, 60])
+    )
+    onlineEhViewMode = OptionsConfigItem(
+        "OnlineEH", "ViewMode", "card", OptionsValidator(["card", "extended"])
+    )
+    onlineEhThumbnailConcurrency = OptionsConfigItem(
+        "OnlineEH", "ThumbnailConcurrency", 6, OptionsValidator([1, 2, 4, 6, 8, 12])
+    )
+    onlineEhThumbnailCacheHours = OptionsConfigItem(
+        "OnlineEH",
+        "ThumbnailCacheHours",
+        168,
+        OptionsValidator([1, 6, 12, 24, 72, 168, 720]),
     )
 
     # manga reader
