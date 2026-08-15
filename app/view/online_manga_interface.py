@@ -3,8 +3,8 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import List, Optional, Tuple
 
-from PySide6.QtCore import QThreadPool, QTimer, Qt, QUrl
-from PySide6.QtGui import QDesktopServices, QImage, QPainter, QPixmap
+from PySide6.QtCore import QThreadPool, QTimer, Qt, Signal
+from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
@@ -21,6 +21,7 @@ from qfluentwidgets import (
     PushButton,
     ScrollArea,
     SegmentedWidget,
+    ToolButton,
     TitleLabel,
 )
 from qfluentwidgets import FluentIcon as FIF
@@ -169,33 +170,73 @@ class MarqueeLabel(QLabel):
         painter.drawText(x, y, text)
 
 
-class _OnlineGalleryCardBase(CardWidget):
-    def __init__(self, item, parent=None):
+class OnlineCoverLabel(QLabel):
+    """Keep source pixels so layout changes can rescale an existing cover."""
+
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.item = item
-        self.setCursor(Qt.PointingHandCursor)
-        self.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(item.url)))
+        self._sourceImage = QImage()
 
     def setCoverData(self, data: bytes):
         image = QImage.fromData(data)
         if image.isNull():
-            self.coverLabel.setText(self.tr("封面不可用"))
+            self._sourceImage = QImage()
+            self.clear()
+            self.setText(self.tr("封面不可用"))
             return
-        pixmap = QPixmap.fromImage(image).scaled(
-            self.coverLabel.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+        self._sourceImage = image
+        self.setText("")
+        self._rescaleCover()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._rescaleCover()
+
+    def _rescaleCover(self):
+        if self._sourceImage.isNull() or self.width() <= 0 or self.height() <= 0:
+            return
+        pixmap = QPixmap.fromImage(self._sourceImage).scaled(
+            self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
         )
-        self.coverLabel.setText("")
-        self.coverLabel.setPixmap(pixmap)
+        self.setPixmap(pixmap)
+
+
+class _OnlineGalleryCardBase(CardWidget):
+    def __init__(self, item, parent=None, open_callback=None):
+        super().__init__(parent)
+        self.item = item
+        self.setCursor(Qt.PointingHandCursor)
+        if open_callback is not None:
+            self.clicked.connect(lambda: open_callback(item))
+        self.downloadedBadge = QLabel(self)
+        self.downloadedBadge.setObjectName("onlineGalleryDownloadedBadge")
+        self.downloadedBadge.setFixedSize(28, 28)
+        self.downloadedBadge.setAlignment(Qt.AlignCenter)
+        self.downloadedBadge.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.downloadedBadge.setToolTip(self.tr("已下载到本地资源"))
+        self.downloadedBadge.setPixmap(
+            FIF.DOWNLOAD.icon(color=QColor("#2dbb68")).pixmap(16, 16)
+        )
+        self.downloadedBadge.move(16, 16)
+        self.downloadedBadge.hide()
+
+    def setDownloaded(self, downloaded):
+        self.downloadedBadge.setVisible(bool(downloaded))
+        if downloaded:
+            self.downloadedBadge.raise_()
+
+    def setCoverData(self, data: bytes):
+        self.coverLabel.setCoverData(data)
 
 
 class OnlineGalleryCard(_OnlineGalleryCardBase):
-    def __init__(self, item, parent=None):
-        super().__init__(item, parent)
+    def __init__(self, item, parent=None, is_downloaded=False, open_callback=None):
+        super().__init__(item, parent, open_callback)
         self.setObjectName("onlineGalleryCard")
         self.setFixedWidth(254)
         self.setMinimumHeight(408)
 
-        self.coverLabel = QLabel(self)
+        self.coverLabel = OnlineCoverLabel(self)
         self.coverLabel.setObjectName("onlineGalleryCover")
         self.coverLabel.setAlignment(Qt.AlignCenter)
         self.coverLabel.setFixedHeight(268)
@@ -252,17 +293,18 @@ class OnlineGalleryCard(_OnlineGalleryCardBase):
         layout.addLayout(info_layout)
         layout.addWidget(self.titleLabel)
         layout.addLayout(meta_layout)
+        self.setDownloaded(is_downloaded)
 
 
 class OnlineGalleryExtendedCard(_OnlineGalleryCardBase):
-    def __init__(self, item, parent=None):
-        super().__init__(item, parent)
+    def __init__(self, item, parent=None, is_downloaded=False, open_callback=None):
+        super().__init__(item, parent, open_callback)
         self.setObjectName("onlineGalleryExtendedCard")
         self.setMinimumWidth(520)
         self.setMinimumHeight(188)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
-        self.coverLabel = QLabel(self)
+        self.coverLabel = OnlineCoverLabel(self)
         self.coverLabel.setObjectName("onlineGalleryCover")
         self.coverLabel.setAlignment(Qt.AlignCenter)
         self.coverLabel.setFixedSize(132, 166)
@@ -335,10 +377,13 @@ class OnlineGalleryExtendedCard(_OnlineGalleryCardBase):
         layout.setSpacing(12)
         layout.addWidget(self.coverLabel)
         layout.addLayout(content_layout, 1)
+        self.setDownloaded(is_downloaded)
 
 
 class OnlineMangaInterface(QWidget):
-    """Search-only online EH/EX browser; gallery pages open in the browser."""
+    """Online EH/EX browser whose gallery cards open the shared detail page."""
+
+    galleryActivated = Signal(object, object, bytes)
 
     def __init__(
         self,
@@ -363,12 +408,19 @@ class OnlineMangaInterface(QWidget):
         }
         self._search_worker = None
         self._cover_workers = set()
+        self._cover_data = {}
+        self._site_providers = {}
+        self._downloaded_gids = set()
         self._cards = []
         self._cards_by_gid = {}
         self._filters = {}
         self._relayoutTimer = QTimer(self)
         self._relayoutTimer.setSingleShot(True)
         self._relayoutTimer.timeout.connect(self._relayoutCards)
+        self._scrollRestoreTimer = QTimer(self)
+        self._scrollRestoreTimer.setSingleShot(True)
+        self._scrollRestoreTimer.timeout.connect(self._applyPendingScrollPosition)
+        self._pendingScrollRestore = None
 
         self.searchThreadPool = QThreadPool(self)
         self.searchThreadPool.setMaxThreadCount(2)
@@ -384,12 +436,11 @@ class OnlineMangaInterface(QWidget):
         self.siteSwitch.addItem("ehentai", "E-Hentai", lambda: self.setSite("ehentai"))
         self.siteSwitch.addItem("exhentai", "ExHentai", lambda: self.setSite("exhentai"))
         self.siteSwitch.setCurrentItem(self._current_site)
-        self.viewSwitch = SegmentedWidget(self)
-        self.viewSwitch.addItem("card", self.tr("卡片"), lambda: self.setViewMode("card"))
-        self.viewSwitch.addItem(
-            "extended", "Extended", lambda: self.setViewMode("extended")
-        )
-        self.viewSwitch.setCurrentItem(cfg.get(cfg.onlineEhViewMode))
+        self.viewModeButton = ToolButton(self)
+        self.viewModeButton.setObjectName("onlineViewModeButton")
+        self.viewModeButton.setFixedSize(36, 36)
+        self.viewModeButton.clicked.connect(self.toggleViewMode)
+        self._updateViewModeButton(cfg.get(cfg.onlineEhViewMode))
 
         self.searchEdit = EhTagSearchLineEdit(
             tag_search_index,
@@ -409,7 +460,7 @@ class OnlineMangaInterface(QWidget):
         header = QHBoxLayout()
         header.addWidget(self.titleLabel)
         header.addStretch(1)
-        header.addWidget(self.viewSwitch)
+        header.addWidget(self.viewModeButton)
         header.addWidget(self.siteSwitch)
 
         search_row = QHBoxLayout()
@@ -510,14 +561,18 @@ class OnlineMangaInterface(QWidget):
         if mode not in ("card", "extended"):
             return
         if mode == cfg.get(cfg.onlineEhViewMode):
-            self.viewSwitch.setCurrentItem(mode)
+            self._updateViewModeButton(mode)
             return
         cfg.set(cfg.onlineEhViewMode, mode)
+
+    def toggleViewMode(self):
+        mode = cfg.get(cfg.onlineEhViewMode)
+        self.setViewMode("extended" if mode == "card" else "card")
 
     def _syncViewMode(self, mode):
         if mode not in ("card", "extended"):
             return
-        self.viewSwitch.setCurrentItem(mode)
+        self._updateViewModeButton(mode)
         state = self.currentState
         if state.current_page is None or self._rendered_site != self._current_site:
             return
@@ -539,6 +594,20 @@ class OnlineMangaInterface(QWidget):
             display_mode=self._siteDisplayMode(mode),
         )
 
+    def _updateViewModeButton(self, mode):
+        if mode == "extended":
+            icon = FIF.TILES
+            target_mode = "card"
+            tool_tip = self.tr("切换到卡片布局")
+        else:
+            icon = FIF.MENU
+            target_mode = "extended"
+            tool_tip = self.tr("切换到 Extended 布局")
+        self.viewModeButton.setIcon(icon)
+        self.viewModeButton.setProperty("targetViewMode", target_mode)
+        self.viewModeButton.setToolTip(tool_tip)
+        self.viewModeButton.setAccessibleName(tool_tip)
+
     def _activateCurrentSite(self):
         site = self._current_site
         state = self.currentState
@@ -550,6 +619,7 @@ class OnlineMangaInterface(QWidget):
             self._displayPage(site, state, state.current_page)
             return
 
+        self._cover_data.clear()
         self._setItems(())
         self.pageLabel.setText(self.tr("第 1 页"))
         self.previousButton.setEnabled(False)
@@ -572,6 +642,14 @@ class OnlineMangaInterface(QWidget):
         """Set provider-defined filters without coupling them to this widget."""
 
         self._filters = dict(filters or {})
+
+    def setDownloadedGids(self, gids):
+        downloaded_gids = {int(gid) for gid in gids}
+        if downloaded_gids == self._downloaded_gids:
+            return
+        self._downloaded_gids = downloaded_gids
+        for card in self._cards:
+            card.setDownloaded(card.item.gid in downloaded_gids)
 
     def _makeProvider(self, site=None):
         site = site or self._current_site
@@ -687,19 +765,23 @@ class OnlineMangaInterface(QWidget):
         self.previousButton.setEnabled(bool(state.cursor_history))
         self.pageLabel.setText(self.tr("第 {} 页").format(state.page_number))
         self.resultLabel.setText(
-            self.tr("{} · 本页 {} 个画廊；点击卡片在浏览器中打开。").format(
+            self.tr("{} · 本页 {} 个画廊；点击卡片查看详情。").format(
                 self._siteName(site), len(page.items)
             )
         )
+        self._retainCurrentPageCovers(site, page.items)
         self._setItems(page.items)
         self._restoreScrollPosition(site, state.scroll_position)
         if not page.items:
             return
         if provider is None:
-            try:
-                provider = self._makeProvider(site)
-            except EhOnlineError:
-                return
+            provider = self._site_providers.get(site)
+            if provider is None:
+                try:
+                    provider = self._makeProvider(site)
+                except EhOnlineError:
+                    return
+        self._site_providers[site] = provider
         self._startCoverLoads(site, provider, page.items)
 
     def _failSearch(self, worker, site, message):
@@ -734,16 +816,49 @@ class OnlineMangaInterface(QWidget):
             if cfg.get(cfg.onlineEhViewMode) == "extended"
             else OnlineGalleryCard
         )
-        self._cards = [card_class(item, self.scrollWidget) for item in items]
+        self._cards = [
+            card_class(
+                item,
+                self.scrollWidget,
+                is_downloaded=item.gid in self._downloaded_gids,
+                open_callback=self._openGallery,
+            )
+            for item in items
+        ]
         self._cards_by_gid = {card.item.gid: card for card in self._cards}
+        for card in self._cards:
+            data = self._cover_data.get(
+                self._coverMemoryKey(self._current_site, card.item)
+            )
+            if data:
+                card.setCoverData(data)
         self._relayoutCards()
         self._scheduleRelayout()
+
+    def _openGallery(self, item):
+        site = self._rendered_site or self._current_site
+        provider = self._site_providers.get(site)
+        if provider is None:
+            try:
+                provider = self._makeProvider(site)
+            except EhOnlineError as error:
+                self._showError(str(error))
+                return
+            self._site_providers[site] = provider
+        cover_data = self._cover_data.get(self._coverMemoryKey(site, item), b"")
+        self.galleryActivated.emit(item, provider, cover_data)
 
     def _startCoverLoads(self, site, provider, items):
         self._cancelCoverLoads()
         cache_hours = int(cfg.get(cfg.onlineEhThumbnailCacheHours))
         for item in items:
             if not item.thumbnail_url:
+                continue
+            data = self._cover_data.get(self._coverMemoryKey(site, item))
+            if data:
+                card = self._cards_by_gid.get(item.gid)
+                if card is not None:
+                    card.setCoverData(data)
                 continue
             worker = OnlineCoverWorker(
                 provider,
@@ -762,6 +877,8 @@ class OnlineMangaInterface(QWidget):
     def _setCover(self, worker, site, gid, data):
         if worker not in self._cover_workers:
             return
+        if data:
+            self._cover_data[self._coverMemoryKey(site, worker.item)] = data
         if site != self._current_site or self._rendered_site != site:
             return
         card = self._cards_by_gid.get(gid)
@@ -779,6 +896,20 @@ class OnlineMangaInterface(QWidget):
 
     def _setCoverConcurrency(self, value):
         self.coverThreadPool.setMaxThreadCount(max(1, int(value)))
+
+    @staticmethod
+    def _coverMemoryKey(site, item):
+        return site, item.thumbnail_url
+
+    def _retainCurrentPageCovers(self, site, items):
+        keys = {
+            self._coverMemoryKey(site, item)
+            for item in items
+            if item.thumbnail_url
+        }
+        self._cover_data = {
+            key: data for key, data in self._cover_data.items() if key in keys
+        }
 
     def _scheduleRelayout(self):
         self._relayoutTimer.start(0)
@@ -801,11 +932,17 @@ class OnlineMangaInterface(QWidget):
             self.gridLayout.addWidget(card, index // columns, index % columns)
 
     def _restoreScrollPosition(self, site, position):
-        def restore():
-            if site == self._current_site and self._rendered_site == site:
-                self.scrollArea.verticalScrollBar().setValue(position)
+        self._pendingScrollRestore = site, position
+        self._scrollRestoreTimer.start(0)
 
-        QTimer.singleShot(0, restore)
+    def _applyPendingScrollPosition(self):
+        pending = self._pendingScrollRestore
+        self._pendingScrollRestore = None
+        if pending is None:
+            return
+        site, position = pending
+        if site == self._current_site and self._rendered_site == site:
+            self.scrollArea.verticalScrollBar().setValue(position)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

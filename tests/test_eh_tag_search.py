@@ -4,7 +4,9 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 
-from PySide6.QtCore import QEvent
+from PySide6.QtCore import QEvent, Qt
+from PySide6.QtGui import QFocusEvent
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from qfluentwidgets import Theme, qconfig, setTheme
 
@@ -174,7 +176,8 @@ class EhTagImportAndSearchTests(unittest.TestCase):
         try:
             search_edit.setText("full")
             search_edit.setCursorPosition(len(search_edit.text()))
-            search_edit.refreshTagSuggestions()
+            search_edit.setFocus()
+            search_edit._onTextEdited(search_edit.text())
 
             setTheme(Theme.LIGHT)
             self.app.processEvents()
@@ -189,6 +192,9 @@ class EhTagImportAndSearchTests(unittest.TestCase):
 
             setTheme(Theme.DARK)
             self.app.processEvents()
+            search_edit.setFocus()
+            search_edit._onTextEdited(search_edit.text())
+            self.app.processEvents()
             search_edit._showCompleterMenu()
             self.app.processEvents()
             dark_pixel = menu.view.viewport().grab().toImage().pixelColor(3, 3)
@@ -197,12 +203,48 @@ class EhTagImportAndSearchTests(unittest.TestCase):
             setTheme(original_theme)
             if search_edit._completerMenu:
                 search_edit._completerMenu.close()
+                QTest.qWait(300)
                 search_edit._completerMenu.deleteLater()
                 search_edit._completerMenu = None
             search_edit.close()
             search_edit.deleteLater()
             QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
             self.app.processEvents()
+
+    def test_popup_focus_return_does_not_reopen_closed_suggestions(self):
+        self._import()
+        index = EhTagSearchIndex.from_repository(self.repository)
+        search_edit = EhTagSearchLineEdit(index)
+        search_edit.resize(620, 33)
+        search_edit.show()
+        search_edit.setFocus()
+        self.app.processEvents()
+        search_edit.setText("full")
+        search_edit.setCursorPosition(len(search_edit.text()))
+        search_edit._onTextEdited(search_edit.text())
+        self.app.processEvents()
+
+        menu = search_edit._completerMenu
+        self.assertIsNotNone(menu)
+        self.assertTrue(menu.isVisible())
+        menu.close()
+        self.app.processEvents()
+        self.assertFalse(menu.isVisible())
+
+        QApplication.sendEvent(
+            search_edit,
+            QFocusEvent(QEvent.FocusIn, Qt.PopupFocusReason),
+        )
+        self.app.processEvents()
+        self.app.processEvents()
+        self.assertFalse(menu.isVisible())
+        self.assertFalse(search_edit._suggestion_timer.isActive())
+
+        QTest.qWait(300)
+        search_edit.close()
+        search_edit.deleteLater()
+        QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        self.app.processEvents()
 
 
 if __name__ == "__main__":

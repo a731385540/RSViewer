@@ -1,14 +1,18 @@
+import json
 import sqlite3
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from app.domain.online_download import GallerySyncRecord, OnlineGalleryDownloadRecord
+from app.domain.online_gallery import OnlineGalleryComment
+
 
 class UserLibraryRepository:
     """RSViewer 自有数据库；绝不在外部 EhViewer 库中建表。"""
 
-    SCHEMA_VERSION = 7
+    SCHEMA_VERSION = 9
 
     def __init__(self, database_path: Path):
         self.database_path = Path(database_path).resolve()
@@ -222,6 +226,77 @@ class UserLibraryRepository:
                     """
                 )
                 connection.execute("PRAGMA user_version = 7")
+            if version < 8:
+                connection.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS online_gallery_downloads (
+                        gid INTEGER PRIMARY KEY,
+                        site TEXT NOT NULL,
+                        token TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        dirname TEXT NOT NULL,
+                        page_count INTEGER NOT NULL CHECK (page_count >= 0),
+                        completed_pages INTEGER NOT NULL DEFAULT 0
+                            CHECK (completed_pages >= 0),
+                        state TEXT NOT NULL,
+                        metadata_json TEXT NOT NULL DEFAULT '{}',
+                        error TEXT NOT NULL DEFAULT '',
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_online_downloads_state
+                        ON online_gallery_downloads(state, updated_at DESC);
+
+                    CREATE TABLE IF NOT EXISTS online_gallery_comments (
+                        gid INTEGER NOT NULL,
+                        comment_id TEXT NOT NULL,
+                        author TEXT NOT NULL DEFAULT '',
+                        posted TEXT NOT NULL DEFAULT '',
+                        body TEXT NOT NULL DEFAULT '',
+                        score INTEGER,
+                        is_uploader INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY (gid, comment_id),
+                        FOREIGN KEY (gid) REFERENCES online_gallery_downloads(gid)
+                            ON DELETE CASCADE
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_online_comments_gid
+                        ON online_gallery_comments(gid);
+                    """
+                )
+                connection.execute("PRAGMA user_version = 8")
+            if version < 9:
+                connection.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS gallery_sync_records (
+                        gid INTEGER PRIMARY KEY,
+                        site TEXT NOT NULL,
+                        token TEXT NOT NULL,
+                        metadata_json TEXT NOT NULL DEFAULT '{}',
+                        updated_at INTEGER NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS gallery_sync_comments (
+                        gid INTEGER NOT NULL,
+                        comment_id TEXT NOT NULL,
+                        author TEXT NOT NULL DEFAULT '',
+                        posted TEXT NOT NULL DEFAULT '',
+                        body TEXT NOT NULL DEFAULT '',
+                        score INTEGER,
+                        is_uploader INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY (gid, comment_id),
+                        FOREIGN KEY (gid) REFERENCES gallery_sync_records(gid)
+                            ON DELETE CASCADE
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_gallery_sync_updated
+                        ON gallery_sync_records(updated_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_gallery_sync_comments_gid
+                        ON gallery_sync_comments(gid);
+                    """
+                )
+                connection.execute("PRAGMA user_version = 9")
 
     def list_labels(self) -> List[Tuple[int, str, int]]:
         self.initialize()
@@ -774,6 +849,366 @@ class UserLibraryRepository:
             )
             """,
             (limit,),
+        )
+
+    def save_gallery_sync(
+        self,
+        record: GallerySyncRecord,
+        comments: Sequence[OnlineGalleryComment] = (),
+    ):
+        self.initialize()
+        metadata_json = json.dumps(
+            dict(record.metadata or {}),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with self._connect() as connection:
+            self._write_gallery_sync(
+                connection,
+                record.gid,
+                record.site,
+                record.token,
+                metadata_json,
+                int(record.updated_at or time.time_ns()),
+                comments,
+            )
+
+    def gallery_sync_record(self, gid: int) -> Optional[GallerySyncRecord]:
+        self.initialize()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT gid, site, token, metadata_json, updated_at
+                FROM gallery_sync_records WHERE gid = ?
+                """,
+                (int(gid),),
+            ).fetchone()
+        return self._gallery_sync_from_row(row) if row is not None else None
+
+    def gallery_sync_records_for_mangas(
+        self, gids: Sequence[int]
+    ) -> Dict[int, GallerySyncRecord]:
+        self.initialize()
+        target_gids = {int(gid) for gid in gids}
+        if not target_gids:
+            return {}
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT gid, site, token, metadata_json, updated_at
+                FROM gallery_sync_records
+                """
+            ).fetchall()
+        return {
+            int(row[0]): self._gallery_sync_from_row(row)
+            for row in rows
+            if int(row[0]) in target_gids
+        }
+
+    def save_online_gallery_download(
+        self,
+        record: OnlineGalleryDownloadRecord,
+        comments: Sequence[OnlineGalleryComment] = (),
+    ):
+        self.initialize()
+        now = time.time_ns()
+        metadata_json = json.dumps(
+            dict(record.metadata or {}),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO online_gallery_downloads(
+                    gid, site, token, title, dirname, page_count,
+                    completed_pages, state, metadata_json, error,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(gid) DO UPDATE SET
+                    site = excluded.site,
+                    token = excluded.token,
+                    title = excluded.title,
+                    dirname = excluded.dirname,
+                    page_count = excluded.page_count,
+                    completed_pages = excluded.completed_pages,
+                    state = excluded.state,
+                    metadata_json = excluded.metadata_json,
+                    error = excluded.error,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    int(record.gid),
+                    str(record.site),
+                    str(record.token),
+                    str(record.title),
+                    str(record.dirname),
+                    max(0, int(record.page_count)),
+                    max(0, int(record.completed_pages)),
+                    str(record.state),
+                    metadata_json,
+                    str(record.error or ""),
+                    int(record.created_at or now),
+                    int(record.updated_at or now),
+                ),
+            )
+            connection.execute(
+                "DELETE FROM online_gallery_comments WHERE gid = ?",
+                (int(record.gid),),
+            )
+            connection.executemany(
+                """
+                INSERT OR REPLACE INTO online_gallery_comments(
+                    gid, comment_id, author, posted, body, score, is_uploader
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    (
+                        int(record.gid),
+                        str(comment.comment_id),
+                        str(comment.author or ""),
+                        str(comment.posted or ""),
+                        str(comment.text or ""),
+                        int(comment.score) if comment.score is not None else None,
+                        1 if comment.is_uploader else 0,
+                    )
+                    for comment in comments
+                ),
+            )
+            self._write_gallery_sync(
+                connection,
+                record.gid,
+                record.site,
+                record.token,
+                metadata_json,
+                int(record.updated_at or now),
+                comments,
+            )
+
+    def update_online_download(
+        self,
+        gid: int,
+        completed_pages: int,
+        state: str,
+        error: str = "",
+    ):
+        self.initialize()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE online_gallery_downloads
+                SET completed_pages = ?, state = ?, error = ?, updated_at = ?
+                WHERE gid = ?
+                """,
+                (
+                    max(0, int(completed_pages)),
+                    str(state),
+                    str(error or ""),
+                    time.time_ns(),
+                    int(gid),
+                ),
+            )
+
+    def online_gallery_download(self, gid: int) -> Optional[OnlineGalleryDownloadRecord]:
+        self.initialize()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT gid, site, token, title, dirname, page_count,
+                       completed_pages, state, metadata_json, error,
+                       created_at, updated_at
+                FROM online_gallery_downloads WHERE gid = ?
+                """,
+                (int(gid),),
+            ).fetchone()
+        return self._online_download_from_row(row) if row is not None else None
+
+    def online_gallery_downloads_for_mangas(
+        self, gids: Sequence[int]
+    ) -> Dict[int, OnlineGalleryDownloadRecord]:
+        self.initialize()
+        target_gids = {int(gid) for gid in gids}
+        if not target_gids:
+            return {}
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT gid, site, token, title, dirname, page_count,
+                       completed_pages, state, metadata_json, error,
+                       created_at, updated_at
+                FROM online_gallery_downloads
+                """
+            ).fetchall()
+        return {
+            int(row[0]): self._online_download_from_row(row)
+            for row in rows
+            if int(row[0]) in target_gids
+        }
+
+    def incomplete_online_gallery_downloads(self) -> Tuple[OnlineGalleryDownloadRecord, ...]:
+        self.initialize()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT gid, site, token, title, dirname, page_count,
+                       completed_pages, state, metadata_json, error,
+                       created_at, updated_at
+                FROM online_gallery_downloads
+                WHERE state != 'completed'
+                ORDER BY updated_at DESC
+                """
+            ).fetchall()
+        return tuple(self._online_download_from_row(row) for row in rows)
+
+    def mark_interrupted_online_downloads(self):
+        self.initialize()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE online_gallery_downloads
+                SET state = 'paused',
+                    error = CASE
+                        WHEN error = '' THEN '上次下载已中断，可继续下载'
+                        ELSE error
+                    END,
+                    updated_at = ?
+                WHERE state IN ('queued', 'downloading')
+                """,
+                (time.time_ns(),),
+            )
+
+    def delete_online_gallery_download(self, gid: int):
+        self.initialize()
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM online_gallery_downloads WHERE gid = ?",
+                (int(gid),),
+            )
+
+    def online_gallery_comments(self, gid: int) -> Tuple[OnlineGalleryComment, ...]:
+        self.initialize()
+        with self._connect() as connection:
+            synced = connection.execute(
+                "SELECT 1 FROM gallery_sync_records WHERE gid = ?",
+                (int(gid),),
+            ).fetchone()
+            table = (
+                "gallery_sync_comments"
+                if synced is not None
+                else "online_gallery_comments"
+            )
+            rows = connection.execute(
+                f"""
+                SELECT comment_id, author, posted, body, score, is_uploader
+                FROM {table}
+                WHERE gid = ? ORDER BY rowid
+                """,
+                (int(gid),),
+            ).fetchall()
+        return tuple(
+            OnlineGalleryComment(
+                comment_id=str(row[0]),
+                author=str(row[1]),
+                posted=str(row[2]),
+                text=str(row[3]),
+                score=int(row[4]) if row[4] is not None else None,
+                is_uploader=bool(row[5]),
+            )
+            for row in rows
+        )
+
+    @staticmethod
+    def _write_gallery_sync(
+        connection,
+        gid,
+        site,
+        token,
+        metadata_json,
+        updated_at,
+        comments,
+    ):
+        connection.execute(
+            """
+            INSERT INTO gallery_sync_records(
+                gid, site, token, metadata_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(gid) DO UPDATE SET
+                site = excluded.site,
+                token = excluded.token,
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                int(gid),
+                str(site),
+                str(token),
+                str(metadata_json),
+                int(updated_at),
+            ),
+        )
+        connection.execute(
+            "DELETE FROM gallery_sync_comments WHERE gid = ?",
+            (int(gid),),
+        )
+        connection.executemany(
+            """
+            INSERT OR REPLACE INTO gallery_sync_comments(
+                gid, comment_id, author, posted, body, score, is_uploader
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                (
+                    int(gid),
+                    str(comment.comment_id),
+                    str(comment.author or ""),
+                    str(comment.posted or ""),
+                    str(comment.text or ""),
+                    int(comment.score) if comment.score is not None else None,
+                    1 if comment.is_uploader else 0,
+                )
+                for comment in comments
+            ),
+        )
+
+    @staticmethod
+    def _gallery_sync_from_row(row) -> GallerySyncRecord:
+        try:
+            metadata = json.loads(str(row[3] or "{}"))
+        except (TypeError, ValueError):
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        return GallerySyncRecord(
+            gid=int(row[0]),
+            site=str(row[1]),
+            token=str(row[2]),
+            metadata=metadata,
+            updated_at=int(row[4]),
+        )
+
+    @staticmethod
+    def _online_download_from_row(row) -> OnlineGalleryDownloadRecord:
+        try:
+            metadata = json.loads(str(row[8] or "{}"))
+        except (TypeError, ValueError):
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        return OnlineGalleryDownloadRecord(
+            gid=int(row[0]),
+            site=str(row[1]),
+            token=str(row[2]),
+            title=str(row[3]),
+            dirname=str(row[4]),
+            page_count=int(row[5]),
+            completed_pages=int(row[6]),
+            state=str(row[7]),
+            metadata=metadata,
+            error=str(row[9] or ""),
+            created_at=int(row[10]),
+            updated_at=int(row[11]),
         )
 
     @contextmanager

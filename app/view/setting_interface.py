@@ -328,6 +328,21 @@ class SettingInterface(ScrollArea):
             ],
             parent=self.onlineGroup,
         )
+        self.onlineDownloadConcurrencyCard = OptionsSettingCard(
+            cfg.onlineEhDownloadConcurrency,
+            FIF.DOWNLOAD,
+            self.tr("画廊下载并发数"),
+            self.tr("同时下载画廊的后台任务数量，范围 1–6"),
+            texts=[
+                self.tr("1 个"),
+                self.tr("2 个"),
+                self.tr("3 个"),
+                self.tr("4 个"),
+                self.tr("5 个"),
+                self.tr("6 个"),
+            ],
+            parent=self.onlineGroup,
+        )
         self.onlineThumbnailCacheHoursCard = OptionsSettingCard(
             cfg.onlineEhThumbnailCacheHours,
             FIF.HISTORY,
@@ -478,6 +493,7 @@ class SettingInterface(ScrollArea):
         self.onlineGroup.addSettingCard(self.onlineTimeoutCard)
         self.onlineGroup.addSettingCard(self.onlineViewModeCard)
         self.onlineGroup.addSettingCard(self.onlineThumbnailConcurrencyCard)
+        self.onlineGroup.addSettingCard(self.onlineDownloadConcurrencyCard)
         self.onlineGroup.addSettingCard(self.onlineThumbnailCacheHoursCard)
         self.personalGroup.addSettingCard(self.themeCard)
         self.personalGroup.addSettingCard(self.themeColorCard)

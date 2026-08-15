@@ -2,7 +2,17 @@ from collections import OrderedDict
 from dataclasses import dataclass, replace
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
+from PySide6.QtCore import (
+    QBuffer,
+    QEvent,
+    QIODevice,
+    QObject,
+    QRunnable,
+    Qt,
+    QThreadPool,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import QImage, QImageReader, QKeyEvent, QKeySequence, QMovie, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
@@ -28,7 +38,9 @@ from qfluentwidgets import FluentIcon as FIF
 
 from app.common.config import cfg
 from app.domain.manga import MangaItem
+from app.domain.online_gallery import OnlineGalleryDetail
 from app.view.reader_setting_dialog import ReaderSettingDialog
+from app.workers.eh_online_worker import OnlineReaderLoadWorker
 
 
 class ReaderLoadSignals(QObject):
@@ -101,11 +113,15 @@ class MangaReaderInterface(QWidget):
         self.setObjectName("mangaReaderInterface")
         self.setFocusPolicy(Qt.StrongFocus)
         self._item: Optional[MangaItem] = None
+        self._online_detail: Optional[OnlineGalleryDetail] = None
+        self._online_provider = None
+        self._online_cache = None
         self._page_index = 0
         self._image_cache = OrderedDict()
         self._load_worker: Optional[ReaderLoadWorker] = None
         self._pixmap_item: Optional[QGraphicsPixmapItem] = None
         self._active_movie: Optional[QMovie] = None
+        self._movie_buffer: Optional[QBuffer] = None
         self._movie_page_index = -1
         self._display_mode = cfg.get(cfg.readerImageLoadSize)
         self._zoom_factor = 1.0
@@ -255,7 +271,11 @@ class MangaReaderInterface(QWidget):
 
     @property
     def currentPage(self) -> int:
-        return self._page_index + 1 if self._item and self._item.page_paths else 0
+        return self._page_index + 1 if self._pageCount() else 0
+
+    @property
+    def isOnlineGallery(self) -> bool:
+        return self._online_detail is not None
 
     @property
     def isFullscreen(self) -> bool:
@@ -266,6 +286,9 @@ class MangaReaderInterface(QWidget):
         self._stopMovie()
         self._reader_active = True
         self._item = item
+        self._online_detail = None
+        self._online_provider = None
+        self._online_cache = None
         self._image_cache.clear()
         self.titleLabel.setText(item.display_title)
         page_count = len(item.page_paths)
@@ -284,21 +307,49 @@ class MangaReaderInterface(QWidget):
             return
         self.showPage(min(max(0, page_index), page_count - 1))
 
-    def showPage(self, index: int):
-        if self._item is None or not self._item.page_paths:
+    def setOnlineGallery(self, detail, provider, cache, page_index=0):
+        self.cancelLoads()
+        self._stopMovie()
+        self._reader_active = True
+        self._item = None
+        self._online_detail = detail
+        self._online_provider = provider
+        self._online_cache = cache
+        self._image_cache.clear()
+        self.titleLabel.setText(detail.title)
+        page_count = int(detail.page_count)
+        self.pageSpinBox.blockSignals(True)
+        self.pageSpinBox.setRange(1, max(1, page_count))
+        self.pageSpinBox.setValue(1 if not page_count else int(page_index) + 1)
+        self.pageSpinBox.blockSignals(False)
+        if not page_count:
+            self._page_index = 0
+            self._updatePageIndicator(0)
+            self.scene.clear()
+            self.scene.addText(self.tr("没有可读取的在线页面"))
+            self._pixmap_item = None
+            self._updateControls()
+            self._updateAutoPageTimer()
             return
-        index = min(max(0, index), len(self._item.page_paths) - 1)
+        self.showPage(min(max(0, int(page_index)), page_count - 1))
+
+    def showPage(self, index: int):
+        page_count = self._pageCount()
+        if page_count <= 0:
+            return
+        index = min(max(0, index), page_count - 1)
         self._page_index = index
-        self._item = replace(self._item, progress_page_index=index)
-        self.progressChanged.emit(
-            self._item.gid,
-            index,
-            len(self._item.page_paths),
-        )
+        if self._item is not None:
+            self._item = replace(self._item, progress_page_index=index)
+            self.progressChanged.emit(
+                self._item.gid,
+                index,
+                page_count,
+            )
         self.pageSpinBox.blockSignals(True)
         self.pageSpinBox.setValue(index + 1)
         self.pageSpinBox.blockSignals(False)
-        self._updatePageIndicator(len(self._item.page_paths))
+        self._updatePageIndicator(page_count)
         self._updateControls()
         self._auto_page_timer.stop()
         self._stopMovie()
@@ -314,9 +365,8 @@ class MangaReaderInterface(QWidget):
 
     def nextPage(self):
         if (
-            self._item
-            and self._item.page_paths
-            and self._page_index + 1 >= len(self._item.page_paths)
+            self._pageCount()
+            and self._page_index + 1 >= self._pageCount()
             and self._has_following_manga
         ):
             self._auto_page_timer.stop()
@@ -445,10 +495,10 @@ class MangaReaderInterface(QWidget):
             self._load_worker = None
 
     def _preloadAround(self, index: int, include_current: bool):
-        if self._item is None:
+        page_count = self._pageCount()
+        if page_count <= 0:
             return
         self.cancelLoads()
-        page_count = len(self._item.page_paths)
         candidates = [index, index + 1, index + 2, index - 1]
         indexes = []
         for candidate in candidates:
@@ -462,7 +512,21 @@ class MangaReaderInterface(QWidget):
                 indexes.append(candidate)
         if not indexes:
             return
-        worker = ReaderLoadWorker(self._item.page_paths, indexes)
+        if self._online_detail is not None:
+            worker = OnlineReaderLoadWorker(
+                self._online_provider,
+                self._online_detail.gallery,
+                indexes,
+                self._online_cache,
+                self._online_provider.settings.site,
+            )
+            worker.signals.imageFailed.connect(
+                lambda page_index, message: self._onImageFailed(
+                    worker, page_index, message
+                )
+            )
+        else:
+            worker = ReaderLoadWorker(self._item.page_paths, indexes)
         worker.signals.imageReady.connect(
             lambda page_index, image: self._onImageReady(worker, page_index, image)
         )
@@ -484,11 +548,21 @@ class MangaReaderInterface(QWidget):
         if self._load_worker is worker:
             self._load_worker = None
 
+    def _onImageFailed(self, worker, index, message):
+        if self._load_worker is not worker or index != self._page_index:
+            return
+        self.scene.clear()
+        self.scene.addText(
+            self.tr("第 {} 页加载失败：{}").format(index + 1, message)
+        )
+        self._pixmap_item = None
+        self._updateAutoPageTimer()
+
     def _displayPageImage(self, index: int, page_image: ReaderPageImage):
         self._stopMovie()
         self._displayImage(page_image.image)
         if page_image.is_gif and not page_image.image.isNull():
-            self._startMovie(index)
+            self._startMovie(index, page_image)
 
     def _displayImage(self, image):
         self.scene.clear()
@@ -508,13 +582,26 @@ class MangaReaderInterface(QWidget):
             ),
         )
 
-    def _startMovie(self, index: int):
-        if self._item is None or index >= len(self._item.page_paths):
+    def _startMovie(self, index: int, page_image):
+        if index >= self._pageCount():
             return
-        movie = QMovie(str(self._item.page_paths[index]), b"gif", self)
+        if self._online_detail is not None:
+            buffer = QBuffer(self)
+            buffer.setData(page_image.data)
+            if not buffer.open(QIODevice.ReadOnly):
+                buffer.deleteLater()
+                return
+            movie = QMovie(buffer, b"gif", self)
+            self._movie_buffer = buffer
+        else:
+            movie = QMovie(str(self._item.page_paths[index]), b"gif", self)
         movie.setCacheMode(QMovie.CacheNone)
         if not movie.isValid():
             movie.deleteLater()
+            if self._movie_buffer is not None:
+                self._movie_buffer.close()
+                self._movie_buffer.deleteLater()
+                self._movie_buffer = None
             return
         self._active_movie = movie
         self._movie_page_index = index
@@ -554,6 +641,11 @@ class MangaReaderInterface(QWidget):
             # deletion can otherwise keep a removable/local file locked briefly.
             movie.setFileName("")
             movie.deleteLater()
+        buffer = self._movie_buffer
+        self._movie_buffer = None
+        if buffer is not None:
+            buffer.close()
+            buffer.deleteLater()
 
     def _applyViewTransform(self):
         if self._pixmap_item is None:
@@ -608,10 +700,9 @@ class MangaReaderInterface(QWidget):
             self.tr("关闭自动翻页") if enabled else self.tr("开启自动翻页")
         )
         has_next_page = bool(
-            self._item
-            and self._item.page_paths
+            self._pageCount()
             and (
-                self._page_index + 1 < len(self._item.page_paths)
+                self._page_index + 1 < self._pageCount()
                 or self._has_following_manga
             )
         )
@@ -623,8 +714,8 @@ class MangaReaderInterface(QWidget):
             self._auto_page_timer.stop()
 
     def _autoAdvance(self):
-        if self._item and (
-            self._page_index + 1 < len(self._item.page_paths)
+        if self._pageCount() and (
+            self._page_index + 1 < self._pageCount()
             or self._has_following_manga
         ):
             self.nextPage()
@@ -647,7 +738,7 @@ class MangaReaderInterface(QWidget):
         self._positionFullscreenPageIndicator()
 
     def _updateControls(self):
-        page_count = len(self._item.page_paths) if self._item else 0
+        page_count = self._pageCount()
         self.previousButton.setEnabled(
             self._page_index > 0 or self._has_previous_manga
         )
@@ -705,8 +796,8 @@ class MangaReaderInterface(QWidget):
         if event.key() == Qt.Key_Home:
             self.showPage(0)
             return True
-        if event.key() == Qt.Key_End and self._item is not None:
-            self.showPage(len(self._item.page_paths) - 1)
+        if event.key() == Qt.Key_End and self._pageCount():
+            self.showPage(self._pageCount() - 1)
             return True
         if event.modifiers() & Qt.ControlModifier and event.key() in (
             Qt.Key_Plus,
@@ -718,6 +809,11 @@ class MangaReaderInterface(QWidget):
             self.zoomBy(0.8)
             return True
         return False
+
+    def _pageCount(self):
+        if self._online_detail is not None:
+            return max(0, int(self._online_detail.page_count))
+        return len(self._item.page_paths) if self._item is not None else 0
 
     def eventFilter(self, watched, event):
         if self._fullscreen and event.type() == QEvent.MouseMove:

@@ -86,6 +86,9 @@ class Config(QConfig):
     onlineEhThumbnailConcurrency = OptionsConfigItem(
         "OnlineEH", "ThumbnailConcurrency", 6, OptionsValidator([1, 2, 4, 6, 8, 12])
     )
+    onlineEhDownloadConcurrency = OptionsConfigItem(
+        "OnlineEH", "DownloadConcurrency", 2, OptionsValidator([1, 2, 3, 4, 5, 6])
+    )
     onlineEhThumbnailCacheHours = OptionsConfigItem(
         "OnlineEH",
         "ThumbnailCacheHours",

@@ -1,3 +1,4 @@
+import base64
 import os
 import sqlite3
 import tempfile
@@ -5,16 +6,24 @@ import unittest
 from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt, QThreadPool
+from PySide6.QtCore import QByteArray, QBuffer, QIODevice, Qt, QThreadPool
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel
 
 from app.domain.manga import MangaItem
+from app.domain.online_gallery import (
+    OnlineGallery,
+    OnlineGalleryComment,
+    OnlineGalleryDetail,
+    OnlineGalleryPreview,
+)
 from app.repositories.user_library_repository import UserLibraryRepository
+from app.services.online_gallery_memory_cache import OnlineGalleryMemoryCache
 from app.sources.ehviewer_source import EhViewerDataSource
 from app.view.local_manga_interface import manga_metadata_text
 from app.view.manga_detail_interface import MangaDetailInterface, group_manga_tags
@@ -209,6 +218,11 @@ class ReadingProgressTests(unittest.TestCase):
                 "female:full color",
                 "language:chinese",
             ),
+            posted="2026-08-15 12:00",
+            uploader="download-uploader",
+            rating=4.75,
+            language="Chinese",
+            file_size="18 MiB",
         )
         detail = MangaDetailInterface(
             EhViewerDataSource(self.root / "unused.db", self.root),
@@ -227,10 +241,235 @@ class ReadingProgressTests(unittest.TestCase):
             ["artist", "language", "female"],
             [group.property("tagNamespace") for group in detail._tagGroupWidgets],
         )
+        selectable_flags = Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard
+        for label in (
+            detail.originalTitleLabel,
+            detail.englishTitleLabel,
+            detail.metadataLabel,
+            *chips,
+        ):
+            self.assertEqual(
+                selectable_flags,
+                label.textInteractionFlags() & selectable_flags,
+            )
+            self.assertEqual(Qt.ClickFocus, label.focusPolicy())
+            self.assertEqual(Qt.IBeamCursor, label.cursor().shape())
+
+        clipboard = QApplication.clipboard()
+        clipboard.clear()
+        detail.metadataLabel.setFocus()
+        QTest.keyClick(detail.metadataLabel, Qt.Key_A, Qt.ControlModifier)
+        QTest.keyClick(detail.metadataLabel, Qt.Key_C, Qt.ControlModifier)
+        QApplication.processEvents()
+        self.assertEqual(detail.metadataLabel.text(), clipboard.text())
+        self.assertIn("上传者：download-uploader", detail.metadataLabel.text())
+        self.assertIn("评分：4.75", detail.metadataLabel.text())
+        self.assertIn("语言：Chinese", detail.metadataLabel.text())
+        self.assertIn("文件大小：18 MiB", detail.metadataLabel.text())
         self.assertIn("mangaTagChip", detail.styleSheet())
         detail.cancelLoads()
         detail.close()
         detail.deleteLater()
+        QApplication.processEvents()
+
+    def test_shared_detail_page_switches_between_online_comments_and_local_preview(self):
+        source = EhViewerDataSource(self.root / "unused.db", self.root)
+        detail_widget = MangaDetailInterface(source, self.repository)
+        sprite = QImage(4, 2, QImage.Format_RGB32)
+        sprite.fill(QColor("red"))
+        for x in range(2, 4):
+            for y in range(2):
+                sprite.setPixelColor(x, y, QColor("blue"))
+        sprite_data = QByteArray()
+        sprite_buffer = QBuffer(sprite_data)
+        self.assertTrue(sprite_buffer.open(QIODevice.WriteOnly))
+        self.assertTrue(sprite.save(sprite_buffer, "PNG"))
+
+        class Provider:
+            settings = SimpleNamespace(site="ehentai")
+
+            def load_preview_thumbnail(self, _preview):
+                return bytes(sprite_data)
+
+        provider = Provider()
+        cache = OnlineGalleryMemoryCache()
+        previews = tuple(
+            OnlineGalleryPreview(
+                index,
+                f"https://e-hentai.org/s/token{index}/456-{index + 1}",
+                "https://a.hath.network/sprite.webp",
+                thumbnail_width=2,
+                thumbnail_height=2,
+                thumbnail_x=index * 2,
+            )
+            for index in range(2)
+        )
+        gallery = OnlineGallery(
+            456,
+            "token",
+            "https://e-hentai.org/g/456/token/",
+            "Online title",
+            "Manga",
+            posted="2026-08-15 12:00",
+            page_count=20,
+            tags=("artist:someone",),
+            uploader="poster",
+            rating=4.0,
+        )
+        detail_widget.setOnlineLoading(gallery, provider, cache)
+        self.assertTrue(detail_widget.isOnlineGallery)
+        self.assertFalse(detail_widget.operationCard.isHidden())
+        self.assertFalse(detail_widget.previewCard.isHidden())
+        self.assertFalse(detail_widget.readButton.isEnabled())
+        self.assertFalse(detail_widget.commentsCard.isHidden())
+
+        online_detail = OnlineGalleryDetail(
+            gallery=gallery,
+            title="Full online title",
+            language="Chinese",
+            page_count=20,
+            tags=("artist:someone", "language:chinese"),
+            comments=(
+                OnlineGalleryComment(
+                    "12", "reader", "15 August 2026", "copyable comment", 2
+                ),
+            ),
+            previews=previews,
+        )
+        requested = []
+        download_requested = []
+        download_cancelled = []
+        detail_widget.onlineReadRequested.connect(
+            lambda _detail, page_index: requested.append(page_index)
+        )
+        detail_widget.onlineDownloadRequested.connect(download_requested.append)
+        detail_widget.onlineDownloadCancelRequested.connect(
+            download_cancelled.append
+        )
+        detail_widget.setOnlineDetail(online_detail, provider=provider, cache=cache)
+        detail_widget.waitForOnlineLoads(3000)
+        QApplication.processEvents()
+        comment_bodies = detail_widget.findChildren(QLabel, "onlineCommentBody")
+        self.assertEqual(["copyable comment"], [label.text() for label in comment_bodies])
+        selectable = Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard
+        self.assertEqual(
+            selectable,
+            comment_bodies[0].textInteractionFlags() & selectable,
+        )
+        self.assertIn("语言：Chinese", detail_widget.metadataLabel.text())
+        self.assertEqual([0, 1], [tile.pageIndex for tile in detail_widget._preview_tiles])
+        self.assertTrue(
+            all(not tile.imageLabel.pixmap().isNull() for tile in detail_widget._preview_tiles)
+        )
+        preview_colors = [
+            tile.imageLabel.pixmap().toImage().pixelColor(0, 0)
+            for tile in detail_widget._preview_tiles
+        ]
+        self.assertEqual(QColor("red"), preview_colors[0])
+        self.assertEqual(QColor("blue"), preview_colors[1])
+        QTest.mouseClick(detail_widget._preview_tiles[1], Qt.LeftButton)
+        self.assertEqual([1], requested)
+        detail_widget.setOnlineDownloadState("downloading", 3, 20)
+        self.assertIn("3 / 20", detail_widget.downloadButton.text())
+        self.assertFalse(detail_widget.downloadProgressBar.isHidden())
+        QTest.mouseClick(detail_widget.downloadButton, Qt.LeftButton)
+        self.assertEqual([456], download_cancelled)
+        detail_widget.resize(760, 700)
+        detail_widget.show()
+        long_error = "网络连接已经断开，请检查代理设置后继续下载这个画廊"
+        detail_widget.setOnlineDownloadState("failed", 3, 20, long_error)
+        QApplication.processEvents()
+        self.assertIn("3 / 20", detail_widget.downloadButton.text())
+        self.assertEqual(long_error, detail_widget.downloadProgressLabel.toolTip())
+        self.assertLessEqual(
+            detail_widget.readButton.geometry().right(),
+            detail_widget.operationCard.contentsRect().right(),
+        )
+        self.assertGreaterEqual(
+            detail_widget.downloadProgressBar.geometry().top(),
+            detail_widget.downloadButton.geometry().bottom(),
+        )
+        QTest.mouseClick(detail_widget.downloadButton, Qt.LeftButton)
+        self.assertEqual([online_detail], download_requested)
+
+        page = self._create_pages(1)[0]
+        detail_widget.setManga(make_item(self.root, (page,)))
+        QApplication.processEvents()
+        self.assertFalse(detail_widget.isOnlineGallery)
+        self.assertTrue(detail_widget.commentsCard.isHidden())
+        self.assertFalse(detail_widget.operationCard.isHidden())
+        self.assertFalse(detail_widget.previewCard.isHidden())
+        detail_widget.cancelLoads()
+        detail_widget.close()
+        detail_widget.deleteLater()
+        QApplication.processEvents()
+
+    def test_local_detail_sync_updates_comments_and_old_parent_status(self):
+        page = self._create_pages(1)[0]
+        item = replace(
+            make_item(self.root, (page,)),
+            gallery_token="localtoken",
+        )
+        source = EhViewerDataSource(self.root / "unused.db", self.root)
+        detail_widget = MangaDetailInterface(source, self.repository)
+        requested = []
+        detail_widget.localMetadataSyncRequested.connect(requested.append)
+        detail_widget.setManga(item)
+
+        QTest.mouseClick(detail_widget.syncButton, Qt.LeftButton)
+
+        self.assertEqual([item], requested)
+        gallery = OnlineGallery(
+            123,
+            "localtoken",
+            "https://e-hentai.org/g/123/localtoken/",
+            "Synced title",
+            page_count=1,
+        )
+        synced = OnlineGalleryDetail(
+            gallery=gallery,
+            title="Synced title",
+            page_count=1,
+            tags=("artist:updated",),
+            comments=(
+                OnlineGalleryComment("1", "reader", "today", "new comment"),
+            ),
+            newer_gallery_urls=(
+                "https://e-hentai.org/g/124/newtoken/",
+            ),
+        )
+
+        resolved = detail_widget.applyLocalSyncedDetail(synced)
+        QApplication.processEvents()
+
+        self.assertTrue(resolved.metadata_synced)
+        self.assertFalse(detail_widget.commentsCard.isHidden())
+        self.assertEqual(
+            ["new comment"],
+            [
+                label.text()
+                for label in detail_widget.findChildren(QLabel, "onlineCommentBody")
+            ],
+        )
+        self.assertIn("1", detail_widget.galleryVersionLabel.text())
+        self.assertEqual(
+            "outdated",
+            detail_widget.galleryVersionLabel.property("versionState"),
+        )
+        detail_widget.resize(560, 700)
+        detail_widget.show()
+        QApplication.processEvents()
+        self.assertLessEqual(
+            detail_widget.operationCard.width(),
+            detail_widget.scrollArea.viewport().width(),
+        )
+        self.assertLessEqual(
+            detail_widget.readButton.geometry().right(),
+            detail_widget.operationCard.contentsRect().right(),
+        )
+        detail_widget.cancelLoads()
+        detail_widget.close()
+        detail_widget.deleteLater()
         QApplication.processEvents()
 
     def test_two_thousand_page_preview_only_builds_current_page(self):

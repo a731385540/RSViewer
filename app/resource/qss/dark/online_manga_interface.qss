@@ -23,6 +23,12 @@ QLabel#onlineGalleryCover {
     color: rgba(255, 255, 255, 135);
 }
 
+QLabel#onlineGalleryDownloadedBadge {
+    background: rgba(24, 25, 28, 225);
+    border: 1px solid rgba(255, 255, 255, 38);
+    border-radius: 7px;
+}
+
 QLabel#onlineGalleryRating,
 QLabel#onlineGalleryPosted,
 QLabel#onlineGalleryUploader,

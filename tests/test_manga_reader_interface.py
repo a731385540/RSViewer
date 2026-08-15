@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -15,6 +16,13 @@ from qfluentwidgets import Theme, setTheme
 
 from app.common.config import cfg
 from app.domain.manga import MangaItem
+from app.domain.online_gallery import (
+    OnlineGallery,
+    OnlineGalleryDetail,
+    OnlineGalleryPreview,
+    OnlineGalleryPreviewPage,
+)
+from app.services.online_gallery_memory_cache import OnlineGalleryMemoryCache
 from app.view.manga_reader_interface import MangaReaderInterface
 from app.view.setting_interface import SettingInterface
 
@@ -118,6 +126,66 @@ class MangaReaderInterfaceTests(unittest.TestCase):
         self.assertEqual(2, self.reader.currentPage)
         self.assertEqual("第 2 / 4 页", self.reader.pageIndicatorLabel.text())
         self.assertIsNotNone(self.reader._pixmap_item)
+
+    def test_online_reader_reuses_controls_and_preloads_through_memory_cache(self):
+        image_data = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+        gallery = OnlineGallery(
+            9,
+            "token",
+            "https://e-hentai.org/g/9/token/",
+            "Online reader",
+            page_count=4,
+        )
+        previews = tuple(
+            OnlineGalleryPreview(
+                index,
+                f"https://e-hentai.org/s/t{index}/9-{index + 1}",
+                f"https://a.hath.network/{index}.webp",
+            )
+            for index in range(4)
+        )
+        detail = OnlineGalleryDetail(
+            gallery=gallery,
+            title="Online reader",
+            page_count=4,
+            previews=previews,
+        )
+        preview_page = OnlineGalleryPreviewPage(gallery, 1, 1, previews)
+        cache = OnlineGalleryMemoryCache()
+        cache.put_preview_page("ehentai", preview_page)
+
+        class Provider:
+            settings = SimpleNamespace(site="ehentai")
+
+            def __init__(self):
+                self.page_calls = []
+
+            def load_gallery_page_image(self, _gallery, preview):
+                self.page_calls.append(preview.page_index)
+                return image_data
+
+            def load_gallery_preview_page(self, _gallery, _page_number):
+                raise AssertionError("preview page should come from memory")
+
+        provider = Provider()
+        progress = []
+        self.reader.progressChanged.connect(lambda *args: progress.append(args))
+        self.reader.setOnlineGallery(detail, provider, cache, 0)
+        self._wait_for_load()
+
+        self.assertTrue(self.reader.isOnlineGallery)
+        self.assertIsNone(self.reader.currentItem)
+        self.assertEqual(1, self.reader.currentPage)
+        self.assertEqual("第 1 / 4 页", self.reader.pageIndicatorLabel.text())
+        self.assertEqual([0, 1, 2], provider.page_calls)
+        self.assertFalse(progress)
+        self.assertIsNotNone(self.reader._pixmap_item)
+
+        self.reader.nextPage()
+        self.assertEqual(2, self.reader.currentPage)
+        self.assertIsNotNone(cache.get_page_image("ehentai", gallery, 1))
 
     def test_plays_gif_detected_from_content_with_wrong_extension(self):
         disguised_gif = Path(self.temp_directory.name) / "0000000.jpg"

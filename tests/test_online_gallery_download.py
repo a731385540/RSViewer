@@ -1,0 +1,452 @@
+import sqlite3
+import tempfile
+import unittest
+from contextlib import closing
+from pathlib import Path
+from types import SimpleNamespace
+
+from PySide6.QtCore import QByteArray, QBuffer, QIODevice
+from PySide6.QtGui import QColor, QImage
+
+from app.domain.online_download import (
+    ONLINE_DOWNLOAD_COMPLETED,
+    ONLINE_DOWNLOAD_FAILED,
+)
+from app.domain.online_gallery import (
+    OnlineGallery,
+    OnlineGalleryComment,
+    OnlineGalleryDetail,
+    OnlineGalleryPreview,
+)
+from app.repositories.ehviewer_download_repository import EhViewerDownloadRepository
+from app.repositories.user_library_repository import UserLibraryRepository
+from app.services.online_download_builder import build_online_detail_from_local
+from app.services.online_gallery_memory_cache import OnlineGalleryMemoryCache
+from app.sources.ehviewer_source import EhViewerDataSource
+from app.workers.online_gallery_download_worker import OnlineGalleryDownloadWorker
+from app.workers.eh_online_worker import LocalGallerySyncWorker
+
+
+def image_bytes(color):
+    image = QImage(12, 16, QImage.Format_RGB32)
+    image.fill(QColor(color))
+    data = QByteArray()
+    buffer = QBuffer(data)
+    buffer.open(QIODevice.WriteOnly)
+    image.save(buffer, "PNG")
+    return bytes(data)
+
+
+class FakeDownloadProvider:
+    settings = SimpleNamespace(site="exhentai")
+
+    def __init__(self, pages, fail_index=None, before_image=None):
+        self.pages = pages
+        self.fail_index = fail_index
+        self.before_image = before_image
+        self.page_calls = []
+        self.cancel_calls = 0
+
+    def cancel_pending_requests(self):
+        self.cancel_calls += 1
+
+    def load_thumbnail(self, _url):
+        return image_bytes("gray")
+
+    def load_gallery_page_image(self, _gallery, preview):
+        if self.before_image is not None:
+            self.before_image()
+            self.before_image = None
+        self.page_calls.append(preview.page_index)
+        if preview.page_index == self.fail_index:
+            raise ConnectionError("network disconnected")
+        return self.pages[preview.page_index]
+
+    def load_gallery_preview_page(self, _gallery, _page_number):
+        raise AssertionError("first preview page is already in detail")
+
+
+class FakeSyncProvider:
+    settings = SimpleNamespace(site="exhentai")
+
+    def __init__(self, detail):
+        self.detail = detail
+
+    def load_gallery_detail(self, _gallery):
+        return self.detail
+
+
+class OnlineGalleryDownloadTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_directory.name)
+        self.download_root = self.root / "downloads"
+        self.download_root.mkdir()
+        self.external_db = self.root / "eh.db"
+        self.user_repository = UserLibraryRepository(self.root / "rsviewer.db")
+        self._create_external_database()
+        gallery = OnlineGallery(
+            4120989,
+            "gallerytoken",
+            "https://exhentai.org/g/4120989/gallerytoken/",
+            "Download title",
+            "Manga",
+            "https://a.hath.network/cover.webp",
+            "2026-08-15 12:00",
+            3,
+            ("artist:someone", "language:chinese", "female:tag one"),
+            "uploader",
+            4.5,
+        )
+        previews = tuple(
+            OnlineGalleryPreview(
+                page_index=index,
+                page_url=(
+                    f"https://exhentai.org/s/{index + 1:010x}/4120989-{index + 1}"
+                ),
+                page_token=f"{index + 1:010x}",
+            )
+            for index in range(3)
+        )
+        self.detail = OnlineGalleryDetail(
+            gallery=gallery,
+            title="Download title",
+            secondary_title="Original title",
+            category="Manga",
+            cover_url=gallery.thumbnail_url,
+            posted=gallery.posted,
+            uploader=gallery.uploader,
+            visible="Yes",
+            language="Chinese",
+            file_size="3 MiB",
+            page_count=3,
+            rating=4.5,
+            rating_count=12,
+            tags=gallery.tags,
+            comments=(
+                OnlineGalleryComment(
+                    "15", "reader", "today", "saved comment", 2, False
+                ),
+            ),
+            previews=previews,
+        )
+        self.cache = OnlineGalleryMemoryCache()
+        self.external_repository = EhViewerDownloadRepository(
+            self.external_db, self.download_root
+        )
+        self.pages = {
+            0: image_bytes("red"),
+            1: image_bytes("green"),
+            2: image_bytes("blue"),
+        }
+
+    def tearDown(self):
+        self.temp_directory.cleanup()
+
+    def _create_external_database(self):
+        tag_columns = ", ".join(
+            f'"{name}" TEXT'
+            for name in (
+                "ROWS", "ARTIST", "COSPLAYER", "CHARACTER", "FEMALE",
+                "GROUP", "LANGUAGE", "MALE", "MISC", "MIXED", "OTHER",
+                "PARODY", "RECLASS",
+            )
+        )
+        with closing(sqlite3.connect(str(self.external_db))) as connection:
+            connection.executescript(
+                f"""
+                CREATE TABLE DOWNLOADS (
+                    GID INTEGER PRIMARY KEY NOT NULL,
+                    TOKEN TEXT, TITLE TEXT, TITLE_JPN TEXT, THUMB TEXT,
+                    CATEGORY INTEGER NOT NULL, POSTED TEXT, UPLOADER TEXT,
+                    RATING REAL NOT NULL, SIMPLE_LANGUAGE TEXT,
+                    STATE INTEGER NOT NULL, LEGACY INTEGER NOT NULL,
+                    TIME INTEGER NOT NULL, LABEL TEXT, ARCHIVE_URI TEXT
+                );
+                CREATE TABLE DOWNLOAD_DIRNAME (
+                    GID INTEGER PRIMARY KEY NOT NULL, DIRNAME TEXT
+                );
+                CREATE TABLE Gallery_Tags (
+                    GID INTEGER PRIMARY KEY NOT NULL, {tag_columns},
+                    CREATE_TIME INTEGER, UPDATE_TIME INTEGER
+                );
+                PRAGMA user_version = 7;
+                """
+            )
+
+    def _worker(self, provider):
+        return OnlineGalleryDownloadWorker(
+            provider=provider,
+            detail=self.detail,
+            cover_data=image_bytes("gray"),
+            gallery_cache=self.cache,
+            ehviewer_repository=self.external_repository,
+            user_repository=self.user_repository,
+            site="exhentai",
+            retry_count=1,
+        )
+
+    def test_failed_download_resumes_missing_pages_and_keeps_ehviewer_format(self):
+        schema_before = self._external_schema()
+
+        def assert_metadata_precedes_images():
+            with closing(sqlite3.connect(str(self.external_db))) as connection:
+                state = connection.execute(
+                    "SELECT STATE FROM DOWNLOADS WHERE GID = 4120989"
+                ).fetchone()[0]
+            comments = self.user_repository.online_gallery_comments(4120989)
+            self.assertEqual(2, state)
+            self.assertEqual("saved comment", comments[0].text)
+
+        first_provider = FakeDownloadProvider(
+            self.pages,
+            fail_index=1,
+            before_image=assert_metadata_precedes_images,
+        )
+        failures = []
+        first_worker = self._worker(first_provider)
+        first_worker.signals.failed.connect(lambda _gid, message: failures.append(message))
+        first_worker.run()
+
+        record = self.user_repository.online_gallery_download(4120989)
+        self.assertEqual(ONLINE_DOWNLOAD_FAILED, record.state)
+        self.assertEqual(1, record.completed_pages)
+        self.assertEqual([0, 1], first_provider.page_calls)
+        self.assertIn("network disconnected", failures[0])
+        folder = self.download_root / record.dirname
+        self.assertTrue((folder / "00000001.png").is_file())
+        self.assertFalse((folder / "00000002.png").exists())
+        self.assertTrue((folder / ".thumb").is_file())
+        (folder / "00000002.jpg").write_bytes(b"broken")
+        with closing(sqlite3.connect(str(self.external_db))) as connection:
+            connection.execute(
+                """
+                UPDATE DOWNLOADS
+                SET LABEL = 'keep-label', TIME = 123, ARCHIVE_URI = 'keep-uri'
+                WHERE GID = 4120989
+                """
+            )
+            connection.commit()
+
+        second_provider = FakeDownloadProvider(self.pages)
+        completed = []
+        second_worker = self._worker(second_provider)
+        second_worker.signals.completed.connect(
+            lambda gid, path: completed.append((gid, path))
+        )
+        second_worker.run()
+
+        record = self.user_repository.online_gallery_download(4120989)
+        self.assertEqual(ONLINE_DOWNLOAD_COMPLETED, record.state)
+        self.assertEqual(3, record.completed_pages)
+        self.assertEqual([1, 2], second_provider.page_calls)
+        self.assertEqual(1, len(completed))
+        self.assertFalse((folder / "00000002.jpg").exists())
+        self.assertTrue((folder / "00000002.png").is_file())
+        self.assertTrue((folder / "00000003.png").is_file())
+        self.assertFalse(any(folder.glob("*.part")))
+
+        sidecar = (folder / ".ehviewer").read_text(encoding="ascii").splitlines()
+        self.assertEqual(
+            [
+                "VERSION2", "00000000", "4120989", "gallerytoken",
+                "1", "1", "20", "3", "0 0000000001",
+                "1 0000000002", "2 0000000003",
+            ],
+            sidecar,
+        )
+        comments = self.user_repository.online_gallery_comments(4120989)
+        self.assertEqual(1, len(comments))
+        self.assertEqual("saved comment", comments[0].text)
+        self.assertEqual("3 MiB", record.metadata["file_size"])
+
+        with closing(sqlite3.connect(str(self.external_db))) as connection:
+            download = connection.execute(
+                """
+                SELECT TOKEN, TITLE, TITLE_JPN, CATEGORY, UPLOADER, RATING,
+                       SIMPLE_LANGUAGE, STATE, LEGACY, LABEL, TIME, ARCHIVE_URI
+                FROM DOWNLOADS WHERE GID = 4120989
+                """
+            ).fetchone()
+            dirname = connection.execute(
+                "SELECT DIRNAME FROM DOWNLOAD_DIRNAME WHERE GID = 4120989"
+            ).fetchone()[0]
+            tags = connection.execute(
+                """
+                SELECT ARTIST, FEMALE, LANGUAGE
+                FROM Gallery_Tags WHERE GID = 4120989
+                """
+            ).fetchone()
+            count = connection.execute(
+                "SELECT COUNT(*) FROM DOWNLOADS WHERE GID = 4120989"
+            ).fetchone()[0]
+        self.assertEqual(
+            (
+                "gallerytoken", "Download title", "Original title", 4,
+                "uploader", 4.5, "chinese", 3, 0,
+                "keep-label", 123, "keep-uri",
+            ),
+            download,
+        )
+        self.assertEqual(record.dirname, dirname)
+        self.assertEqual(("someone", "tag one", "chinese"), tags)
+        self.assertEqual(1, count)
+        self.assertEqual(schema_before, self._external_schema())
+        with closing(sqlite3.connect(str(self.external_db))) as connection:
+            self.assertEqual(7, connection.execute("PRAGMA user_version").fetchone()[0])
+
+    def test_startup_marks_interrupted_download_as_paused(self):
+        provider = FakeDownloadProvider(self.pages, fail_index=0)
+        worker = self._worker(provider)
+        worker.run()
+        with closing(
+            sqlite3.connect(str(self.user_repository.database_path))
+        ) as connection:
+            connection.execute(
+                """
+                UPDATE online_gallery_downloads
+                SET state = 'downloading', error = '' WHERE gid = 4120989
+                """
+            )
+            connection.commit()
+        self.user_repository.mark_interrupted_online_downloads()
+        record = self.user_repository.online_gallery_download(4120989)
+        self.assertEqual("paused", record.state)
+        self.assertIn("中断", record.error)
+
+    def test_worker_cancel_notifies_provider_to_abort_active_response(self):
+        provider = FakeDownloadProvider(self.pages)
+        worker = self._worker(provider)
+
+        worker.cancel()
+
+        self.assertTrue(worker.cancelled)
+        self.assertEqual(1, provider.cancel_calls)
+
+    def test_metadata_sync_preserves_download_state_and_saves_version_info(self):
+        self.external_repository.prepare_download(self.detail)
+        with closing(sqlite3.connect(str(self.external_db))) as connection:
+            connection.execute(
+                "UPDATE DOWNLOADS SET STATE = 3, LEGACY = 7 WHERE GID = 4120989"
+            )
+            connection.commit()
+        synced_detail = OnlineGalleryDetail(
+            **{
+                **self.detail.__dict__,
+                "title": "Synced title",
+                "tags": ("artist:updated", "language:japanese"),
+                "newer_gallery_urls": (
+                    "https://exhentai.org/g/4120990/newtoken/",
+                ),
+            }
+        )
+        worker = LocalGallerySyncWorker(
+            FakeSyncProvider(synced_detail),
+            synced_detail.gallery,
+            self.external_repository,
+            self.user_repository,
+        )
+        loaded = []
+        worker.signals.loaded.connect(loaded.append)
+
+        worker.run()
+
+        self.assertEqual([synced_detail], loaded)
+        with closing(sqlite3.connect(str(self.external_db))) as connection:
+            row = connection.execute(
+                "SELECT TITLE, STATE, LEGACY FROM DOWNLOADS WHERE GID = 4120989"
+            ).fetchone()
+            tags = connection.execute(
+                "SELECT ARTIST, LANGUAGE FROM Gallery_Tags WHERE GID = 4120989"
+            ).fetchone()
+        self.assertEqual(("Synced title", 3, 7), row)
+        self.assertEqual(("updated", "japanese"), tags)
+        sync_record = self.user_repository.gallery_sync_record(4120989)
+        self.assertEqual("exhentai", sync_record.site)
+        self.assertEqual(
+            ["https://exhentai.org/g/4120990/newtoken/"],
+            sync_record.metadata["newer_gallery_urls"],
+        )
+        self.assertEqual(
+            "saved comment",
+            self.user_repository.online_gallery_comments(4120989)[0].text,
+        )
+
+    def test_metadata_sync_resolves_gallery_in_worker_before_request(self):
+        self.external_repository.prepare_download(self.detail)
+        resolved = []
+        worker = LocalGallerySyncWorker(
+            FakeSyncProvider(self.detail),
+            None,
+            self.external_repository,
+            self.user_repository,
+            gallery_loader=lambda: resolved.append(True) or self.detail.gallery,
+        )
+        loaded = []
+        worker.signals.loaded.connect(loaded.append)
+
+        worker.run()
+
+        self.assertEqual([True], resolved)
+        self.assertEqual([self.detail], loaded)
+        self.assertEqual(self.detail.gallery, worker.gallery)
+
+    def test_local_repair_ignores_finished_database_state_and_fills_missing_page(self):
+        first_provider = FakeDownloadProvider(self.pages)
+        self._worker(first_provider).run()
+        record = self.user_repository.online_gallery_download(4120989)
+        folder = self.download_root / record.dirname
+        (folder / "00000002.png").unlink()
+
+        source = EhViewerDataSource(self.external_db, self.download_root)
+        item = source.load_pages(source.list_local_manga()[0])
+        self.assertEqual(3, item.page_count)
+        self.assertEqual(2, item.downloaded_page_count)
+        self.assertFalse(item.download_complete)
+        with closing(sqlite3.connect(str(self.external_db))) as connection:
+            self.assertEqual(
+                3,
+                connection.execute(
+                    "SELECT STATE FROM DOWNLOADS WHERE GID = 4120989"
+                ).fetchone()[0],
+            )
+
+        local_detail = build_online_detail_from_local(
+            item,
+            record,
+            self.user_repository.online_gallery_comments(4120989),
+        )
+        repair_provider = FakeDownloadProvider(self.pages)
+        worker = OnlineGalleryDownloadWorker(
+            provider=repair_provider,
+            detail=local_detail,
+            cover_data=b"",
+            gallery_cache=self.cache,
+            ehviewer_repository=self.external_repository,
+            user_repository=self.user_repository,
+            site="exhentai",
+            retry_count=1,
+        )
+        worker.run()
+
+        self.assertEqual([1], repair_provider.page_calls)
+        self.assertTrue((folder / "00000002.png").is_file())
+        repaired = source.load_pages(source.list_local_manga()[0])
+        self.assertTrue(repaired.download_complete)
+        self.assertEqual(3, repaired.downloaded_page_count)
+
+    def _external_schema(self):
+        with closing(sqlite3.connect(str(self.external_db))) as connection:
+            return tuple(
+                connection.execute(
+                    """
+                    SELECT type, name, sql FROM sqlite_master
+                    WHERE name NOT LIKE 'sqlite_%'
+                    ORDER BY type, name
+                    """
+                )
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

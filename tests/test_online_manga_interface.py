@@ -1,3 +1,4 @@
+import base64
 import os
 import time
 import unittest
@@ -53,6 +54,51 @@ class _FakeOnlineProvider:
 
     def set_display_mode(self, mode):
         self.__class__.display_modes.append((self.settings.site, mode))
+
+
+class _CoverOnlineProvider(_FakeOnlineProvider):
+    cover_calls = 0
+    cover_data = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+
+    def search(self, query):
+        self.__class__.queries.append((self.settings.site, query))
+        return OnlineGalleryPage(
+            (
+                OnlineGallery(
+                    123,
+                    "token",
+                    "https://e-hentai.org/g/123/token/",
+                    "Cover memory",
+                    "Manga",
+                    "https://ehgt.org/cover-memory.png",
+                    tags=("artist:tester",),
+                    source_mode="Extended",
+                ),
+            )
+        )
+
+    def load_thumbnail(self, _url):
+        self.__class__.cover_calls += 1
+        return self.cover_data
+
+
+class _MemoryThumbnailCache:
+    def __init__(self):
+        self.data = {}
+        self.get_calls = 0
+
+    def get(self, site, url, _max_age_hours):
+        self.get_calls += 1
+        return self.data.get((site, url))
+
+    def put(self, site, url, data):
+        self.data[(site, url)] = data
+        return True
+
+    def discard(self, site, url):
+        self.data.pop((site, url), None)
 
 
 class OnlineMangaInterfaceTests(unittest.TestCase):
@@ -170,6 +216,83 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
             interface.close()
             interface.deleteLater()
 
+    def test_downloaded_badge_uses_local_gids_in_both_view_modes(self):
+        interface = OnlineMangaInterface(
+            provider_factory=_FakeOnlineProvider,
+            auto_load_on_show=False,
+        )
+        items = (
+            OnlineGallery(
+                1,
+                "one",
+                "https://e-hentai.org/g/1/one/",
+                "Downloaded",
+            ),
+            OnlineGallery(
+                2,
+                "two",
+                "https://e-hentai.org/g/2/two/",
+                "Online only",
+            ),
+        )
+        interface.setDownloadedGids({1})
+        interface._setItems(items)
+
+        self.assertIsInstance(interface._cards[0], OnlineGalleryCard)
+        self.assertFalse(interface._cards[0].downloadedBadge.isHidden())
+        self.assertTrue(interface._cards[1].downloadedBadge.isHidden())
+        self.assertEqual((16, 16), (
+            interface._cards[0].downloadedBadge.x(),
+            interface._cards[0].downloadedBadge.y(),
+        ))
+        icon = interface._cards[0].downloadedBadge.pixmap().toImage()
+        self.assertTrue(
+            any(
+                icon.pixelColor(x, y).alpha()
+                and icon.pixelColor(x, y).green()
+                > icon.pixelColor(x, y).red() + 20
+                for y in range(icon.height())
+                for x in range(icon.width())
+            )
+        )
+
+        cfg.set(cfg.onlineEhViewMode, "extended")
+        interface._setItems(items)
+        self.assertIsInstance(interface._cards[0], OnlineGalleryExtendedCard)
+        self.assertFalse(interface._cards[0].downloadedBadge.isHidden())
+        self.assertTrue(interface._cards[1].downloadedBadge.isHidden())
+
+        cards = tuple(interface._cards)
+        interface.setDownloadedGids({2})
+        self.assertEqual(cards, tuple(interface._cards))
+        self.assertTrue(interface._cards[0].downloadedBadge.isHidden())
+        self.assertFalse(interface._cards[1].downloadedBadge.isHidden())
+        interface.deleteLater()
+
+    def test_card_click_opens_internal_detail_with_current_provider(self):
+        interface = OnlineMangaInterface(
+            provider_factory=_FakeOnlineProvider,
+            auto_load_on_show=False,
+        )
+        activated = []
+        interface.galleryActivated.connect(
+            lambda item, provider, data: activated.append((item, provider, data))
+        )
+        interface.search()
+        self.assertTrue(self._wait_until(lambda: interface._search_worker is None))
+
+        interface._cards[0].clicked.emit()
+
+        self.assertEqual(1, len(activated))
+        item, provider, data = activated[0]
+        self.assertEqual(123, item.gid)
+        self.assertIs(provider, interface._site_providers["ehentai"])
+        self.assertEqual(b"", data)
+        self.assertIn("点击卡片查看详情", interface.resultLabel.text())
+        interface.cancelLoad()
+        interface.searchThreadPool.waitForDone(1000)
+        interface.deleteLater()
+
     def test_site_switch_uses_independent_memory_state_and_refreshes_current_page(self):
         interface = OnlineMangaInterface(
             provider_factory=_FakeOnlineProvider,
@@ -258,7 +381,7 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
         self.assertEqual(2, interface.coverThreadPool.maxThreadCount())
         interface.deleteLater()
 
-    def test_view_switch_reuses_page_and_persists_default_mode(self):
+    def test_view_button_reuses_page_and_persists_default_mode(self):
         interface = OnlineMangaInterface(
             provider_factory=_FakeOnlineProvider,
             auto_load_on_show=False,
@@ -266,12 +389,20 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
         interface.search()
         self.assertTrue(self._wait_until(lambda: interface._search_worker is None))
         request_count = len(_FakeOnlineProvider.queries)
+        card_icon = interface.viewModeButton.icon().pixmap(16, 16).toImage()
+        self.assertEqual(
+            "extended", interface.viewModeButton.property("targetViewMode")
+        )
 
-        interface.setViewMode("extended")
+        interface.viewModeButton.click()
         self.assertTrue(self._wait_until(lambda: interface._search_worker is None))
 
         self.assertEqual("extended", cfg.get(cfg.onlineEhViewMode))
-        self.assertEqual("extended", interface.viewSwitch.currentRouteKey())
+        self.assertEqual("card", interface.viewModeButton.property("targetViewMode"))
+        self.assertNotEqual(
+            card_icon,
+            interface.viewModeButton.icon().pixmap(16, 16).toImage(),
+        )
         self.assertIsInstance(interface._cards[0], OnlineGalleryExtendedCard)
         self.assertEqual(2, len(interface._cards[0].tagLabels))
         self.assertEqual(request_count + 1, len(_FakeOnlineProvider.queries))
@@ -279,7 +410,13 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
 
         cfg.set(cfg.onlineEhViewMode, "card")
         self.assertTrue(self._wait_until(lambda: interface._search_worker is None))
-        self.assertEqual("card", interface.viewSwitch.currentRouteKey())
+        self.assertEqual(
+            "extended", interface.viewModeButton.property("targetViewMode")
+        )
+        self.assertEqual(
+            card_icon,
+            interface.viewModeButton.icon().pixmap(16, 16).toImage(),
+        )
         self.assertIsInstance(interface._cards[0], OnlineGalleryCard)
         self.assertEqual(request_count + 2, len(_FakeOnlineProvider.queries))
         self.assertEqual(
@@ -288,6 +425,66 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
         )
         interface.cancelLoad()
         interface.coverThreadPool.waitForDone(1000)
+        interface.deleteLater()
+
+    def test_view_button_reuses_loaded_cover_without_another_cover_task(self):
+        cache = _MemoryThumbnailCache()
+        _CoverOnlineProvider.cover_calls = 0
+        interface = OnlineMangaInterface(
+            provider_factory=_CoverOnlineProvider,
+            thumbnail_cache=cache,
+            auto_load_on_show=False,
+        )
+        interface.resize(900, 700)
+        interface.show()
+        self.app.processEvents()
+        interface.search()
+        self.assertTrue(
+            self._wait_until(
+                lambda: interface._search_worker is None
+                and not interface._cover_workers
+                and interface._cards
+                and not interface._cards[0].coverLabel.pixmap().isNull()
+            )
+        )
+        self.assertEqual(1, cache.get_calls)
+        self.assertEqual(1, _CoverOnlineProvider.cover_calls)
+        card = interface._cards[0]
+        self.assertEqual(
+            min(card.coverLabel.width(), card.coverLabel.height()),
+            card.coverLabel.pixmap().width(),
+        )
+
+        interface.viewModeButton.click()
+        self.assertTrue(self._wait_until(lambda: interface._search_worker is None))
+
+        self.assertIsInstance(interface._cards[0], OnlineGalleryExtendedCard)
+        self.assertFalse(interface._cards[0].coverLabel.pixmap().isNull())
+        extended_card = interface._cards[0]
+        self.assertEqual(
+            min(
+                extended_card.coverLabel.width(),
+                extended_card.coverLabel.height(),
+            ),
+            extended_card.coverLabel.pixmap().width(),
+        )
+        self.assertEqual(1, cache.get_calls)
+        self.assertEqual(1, _CoverOnlineProvider.cover_calls)
+        self.assertFalse(interface._cover_workers)
+
+        interface.viewModeButton.click()
+        self.assertTrue(self._wait_until(lambda: interface._search_worker is None))
+        self.assertIsInstance(interface._cards[0], OnlineGalleryCard)
+        card = interface._cards[0]
+        self.assertEqual(
+            min(card.coverLabel.width(), card.coverLabel.height()),
+            card.coverLabel.pixmap().width(),
+        )
+        self.assertEqual(1, cache.get_calls)
+        self.assertEqual(1, _CoverOnlineProvider.cover_calls)
+        interface.cancelLoad()
+        interface.searchThreadPool.waitForDone(1000)
+        interface.close()
         interface.deleteLater()
 
     def test_extended_view_explains_missing_minimal_labels(self):
@@ -319,6 +516,7 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
             auto_load_on_show=False,
         )
         interface.resize(900, 700)
+        interface.setDownloadedGids({1})
         interface._setItems(
             (
                 OnlineGallery(
@@ -334,14 +532,27 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
             setTheme(Theme.DARK)
             self.app.processEvents()
             dark_color = interface._cards[0].coverLabel.grab().toImage().pixelColor(5, 5)
+            dark_badge = (
+                interface._cards[0]
+                .downloadedBadge.grab()
+                .toImage()
+                .pixelColor(2, 2)
+            )
 
             setTheme(Theme.LIGHT)
             self.app.processEvents()
             light_color = interface._cards[0].coverLabel.grab().toImage().pixelColor(5, 5)
+            light_badge = (
+                interface._cards[0]
+                .downloadedBadge.grab()
+                .toImage()
+                .pixelColor(2, 2)
+            )
 
             self.assertEqual("onlineMangaScrollArea", interface.scrollArea.objectName())
             self.assertEqual("onlineMangaScrollWidget", interface.scrollWidget.objectName())
             self.assertLess(dark_color.lightness(), light_color.lightness())
+            self.assertLess(dark_badge.lightness(), light_badge.lightness())
         finally:
             setTheme(original_theme)
             interface.close()

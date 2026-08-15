@@ -21,6 +21,66 @@ class OnlineGallery:
 
 
 @dataclass(frozen=True)
+class OnlineGalleryComment:
+    """One read-only comment parsed from a gallery HTML page."""
+
+    comment_id: str
+    author: str
+    posted: str
+    text: str
+    score: Optional[int] = None
+    is_uploader: bool = False
+
+
+@dataclass(frozen=True)
+class OnlineGalleryPreview:
+    """One thumbnail and its same-site image-page URL."""
+
+    page_index: int
+    page_url: str
+    thumbnail_url: str = ""
+    title: str = ""
+    thumbnail_width: int = 0
+    thumbnail_height: int = 0
+    thumbnail_x: int = 0
+    thumbnail_y: int = 0
+    page_token: str = ""
+
+
+@dataclass(frozen=True)
+class OnlineGalleryPreviewPage:
+    gallery: OnlineGallery
+    page_number: int
+    page_count: int
+    items: Tuple[OnlineGalleryPreview, ...] = ()
+
+
+@dataclass(frozen=True)
+class OnlineGalleryDetail:
+    """Gallery metadata and comments parsed from the site's gallery page."""
+
+    gallery: OnlineGallery
+    title: str
+    secondary_title: str = ""
+    category: str = ""
+    cover_url: str = ""
+    posted: str = ""
+    uploader: str = ""
+    visible: str = ""
+    language: str = ""
+    file_size: str = ""
+    page_count: int = 0
+    favorited: str = ""
+    parent_gallery: str = ""
+    newer_gallery_urls: Tuple[str, ...] = ()
+    rating: Optional[float] = None
+    rating_count: int = 0
+    tags: Tuple[str, ...] = ()
+    comments: Tuple[OnlineGalleryComment, ...] = ()
+    previews: Tuple[OnlineGalleryPreview, ...] = ()
+
+
+@dataclass(frozen=True)
 class OnlineGalleryPage:
     items: Tuple[OnlineGallery, ...]
     next_cursor: str = ""

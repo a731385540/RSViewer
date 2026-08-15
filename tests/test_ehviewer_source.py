@@ -211,6 +211,22 @@ class EhViewerDataSourceTests(unittest.TestCase):
         self.assertEqual(3, loaded.page_count)
         self.assertEqual("1.webp", loaded.cover_path.name)
 
+    def test_sidecar_total_pages_detects_partial_download_even_if_db_says_finished(self):
+        folder = self.manga_root / "42-sample"
+        tokens = "".join(f"{index} {index + 1:010x}\n" for index in range(12))
+        (folder / ".ehviewer").write_text(
+            "VERSION2\n00000000\n42\ngallerytoken\n1\n1\n20\n12\n" + tokens,
+            encoding="ascii",
+        )
+        source = EhViewerDataSource(self.database, self.manga_root)
+        loaded = source.load_pages(source.list_local_manga()[0])
+
+        self.assertEqual(12, loaded.page_count)
+        self.assertEqual(3, loaded.downloaded_page_count)
+        self.assertFalse(loaded.download_complete)
+        self.assertEqual("gallerytoken", loaded.gallery_token)
+        self.assertEqual(12, len(loaded.page_tokens))
+
     def test_missing_configuration_has_actionable_error(self):
         with self.assertRaisesRegex(ValueError, "EhViewer 数据库"):
             EhViewerDataSource("", "").list_local_manga()

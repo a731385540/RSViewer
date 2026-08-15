@@ -3,7 +3,7 @@ import re
 import sqlite3
 import time
 from contextlib import closing
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -39,6 +39,17 @@ TAG_COLUMNS = (
 )
 
 IMAGE_SUFFIXES = {".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".webp"}
+
+
+@dataclass(frozen=True)
+class EhViewerSpiderInfo:
+    start_page_index: int
+    gid: int
+    gallery_token: str
+    preview_page_count: int
+    previews_per_page: int
+    page_count: int
+    page_tokens: Tuple[str, ...]
 
 
 def natural_page_key(path: Path) -> Tuple[int, object]:
@@ -112,12 +123,83 @@ class EhViewerDataSource:
                 key=natural_page_key,
             )
         )
+        spider_info = self.read_spider_info(item)
+        if spider_info is None:
+            downloaded_count = len(pages)
+            total_count = len(pages)
+            complete = None
+            gallery_token = item.gallery_token
+            page_tokens = item.page_tokens
+        else:
+            downloaded_indexes = {
+                int(path.stem) - 1
+                for path in pages
+                if path.stem.isdigit()
+                and 1 <= int(path.stem) <= spider_info.page_count
+            }
+            downloaded_count = len(downloaded_indexes)
+            total_count = spider_info.page_count
+            complete = downloaded_indexes == set(range(total_count))
+            gallery_token = spider_info.gallery_token
+            page_tokens = spider_info.page_tokens
         return replace(
             item,
             cover_path=pages[0] if pages else item.cover_path,
             thumbnail_path=self._find_thumbnail(item.folder),
             page_paths=pages,
-            page_count=len(pages),
+            page_count=total_count,
+            downloaded_page_count=downloaded_count,
+            download_complete=complete,
+            gallery_token=gallery_token,
+            page_tokens=page_tokens,
+        )
+
+    @staticmethod
+    def read_spider_info(item: MangaItem) -> Optional[EhViewerSpiderInfo]:
+        sidecar = item.folder / ".ehviewer"
+        try:
+            lines = sidecar.read_text(encoding="ascii").splitlines()
+            if len(lines) < 8 or lines[0] != "VERSION2":
+                return None
+            start_page_index = int(lines[1], 16)
+            gid = int(lines[2])
+            gallery_token = lines[3].strip()
+            preview_page_count = int(lines[5])
+            previews_per_page = int(lines[6])
+            page_count = int(lines[7])
+        except (OSError, UnicodeError, ValueError):
+            return None
+        if (
+            gid != int(item.gid)
+            or not gallery_token
+            or page_count <= 0
+            or preview_page_count <= 0
+            or previews_per_page <= 0
+        ):
+            return None
+        page_tokens = [""] * page_count
+        try:
+            for line in lines[8:]:
+                index_text, token = line.split(maxsplit=1)
+                index = int(index_text)
+                token = token.strip()
+                if not 0 <= index < page_count or not re.fullmatch(
+                    r"[0-9a-fA-F]+", token
+                ):
+                    return None
+                page_tokens[index] = token
+        except (TypeError, ValueError):
+            return None
+        if not all(page_tokens):
+            return None
+        return EhViewerSpiderInfo(
+            start_page_index=max(0, start_page_index),
+            gid=gid,
+            gallery_token=gallery_token,
+            preview_page_count=preview_page_count,
+            previews_per_page=previews_per_page,
+            page_count=page_count,
+            page_tokens=tuple(page_tokens),
         )
 
     @staticmethod

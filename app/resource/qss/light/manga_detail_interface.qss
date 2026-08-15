@@ -14,6 +14,15 @@ QLabel#mangaTagEmptyLabel {
     color: rgba(0, 0, 0, 115);
 }
 
+QLabel#galleryVersionStatus[versionState="outdated"] {
+    color: #b54708;
+    font-weight: 600;
+}
+
+QLabel#galleryVersionStatus[versionState="current"] {
+    color: #2f7d32;
+}
+
 QLabel#mangaTagChip {
     min-height: 24px;
     padding: 1px 9px;
@@ -58,4 +67,42 @@ QLabel#mangaTagChip[tagTone="mixed"] {
     border-color: #f3d19e;
     background: #fdf6ec;
     color: #b88230;
+}
+
+QWidget#onlineCommentsList,
+QWidget#onlineCommentRow {
+    background: transparent;
+}
+
+QLabel#onlineCommentAuthor {
+    color: #1f2329;
+    font-weight: 600;
+}
+
+QLabel#onlineCommentsCount,
+QLabel#onlineCommentMeta,
+QLabel#onlineCommentsStatus {
+    color: rgba(0, 0, 0, 125);
+}
+
+QLabel#onlineCommentUploaderBadge {
+    padding: 1px 6px;
+    border: 1px solid #95d475;
+    border-radius: 4px;
+    background: #f0f9eb;
+    color: #3f8f27;
+}
+
+QLabel#onlineCommentScore[scoreTone="positive"] {
+    color: #2f8f46;
+}
+
+QLabel#onlineCommentScore[scoreTone="negative"] {
+    color: #c45656;
+}
+
+QFrame#onlineCommentSeparator {
+    color: #e4e7ed;
+    background: #e4e7ed;
+    max-height: 1px;
 }

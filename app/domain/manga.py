@@ -21,6 +21,22 @@ class MangaItem:
     page_paths: Tuple[Path, ...]
     page_count: int
     added_time: int = 0
+    downloaded_page_count: int = 0
+    download_complete: Optional[bool] = None
+    gallery_token: str = ""
+    page_tokens: Tuple[str, ...] = ()
+    source_site: str = ""
+    posted: str = ""
+    uploader: str = ""
+    rating: Optional[float] = None
+    language: str = ""
+    file_size: str = ""
+    rating_count: int = 0
+    visible: str = ""
+    favorited: str = ""
+    parent_gallery: str = ""
+    newer_gallery_urls: Tuple[str, ...] = ()
+    metadata_synced: bool = False
     progress_page_index: Optional[int] = None
     taxonomy_label_ids: Tuple[int, ...] = ()
     taxonomy_labels: Tuple[str, ...] = ()

@@ -543,12 +543,23 @@ class MangaLoadWorker(QRunnable):
             progress = self.user_repository.progress_for_mangas(
                 [item.gid for item in items]
             )
+            online_downloads = self.user_repository.online_gallery_downloads_for_mangas(
+                [item.gid for item in items]
+            )
+            sync_records = self.user_repository.gallery_sync_records_for_mangas(
+                [item.gid for item in items]
+            )
             favorite_gids = set(
                 self.user_repository.favorite_gids([item.gid for item in items])
             )
             items = [
                 replace(
                     item,
+                    **self._onlineMetadata(
+                        item,
+                        online_downloads.get(item.gid),
+                        sync_records.get(item.gid),
+                    ),
                     multiple_labels=assignments.get(item.gid, ()),
                     progress_page_index=progress.get(item.gid),
                     is_favorite=item.gid in favorite_gids,
@@ -585,6 +596,41 @@ class MangaLoadWorker(QRunnable):
                     self.signals.failed.emit(str(error))
                 except RuntimeError:
                     pass
+
+    @staticmethod
+    def _onlineMetadata(item, record, sync_record=None):
+        if record is None and sync_record is None:
+            return {}
+        metadata = dict(record.metadata or {}) if record is not None else {}
+        if sync_record is not None:
+            metadata.update(dict(sync_record.metadata or {}))
+        values = {
+            "source_site": str(
+                (sync_record.site if sync_record else "")
+                or (record.site if record else "")
+            ),
+            "gallery_token": str(
+                (sync_record.token if sync_record else "")
+                or (record.token if record else "")
+                or item.gallery_token
+            ),
+            "posted": str(metadata.get("posted") or item.posted),
+            "uploader": str(metadata.get("uploader") or item.uploader),
+            "language": str(metadata.get("language") or item.language),
+            "file_size": str(metadata.get("file_size") or ""),
+            "rating_count": max(0, int(metadata.get("rating_count") or 0)),
+            "visible": str(metadata.get("visible") or ""),
+            "favorited": str(metadata.get("favorited") or ""),
+            "parent_gallery": str(metadata.get("parent_gallery") or ""),
+            "newer_gallery_urls": tuple(metadata.get("newer_gallery_urls") or ()),
+            "metadata_synced": sync_record is not None,
+        }
+        rating = metadata.get("rating")
+        if rating is not None:
+            values["rating"] = float(rating)
+        if record is not None and record.state == "completed":
+            values["page_count"] = max(0, int(record.page_count))
+        return values
 
 
 class LabelMutationSignals(QObject):
@@ -901,6 +947,7 @@ class LocalMangaInterface(QWidget):
     playlistPlayRequested = Signal(int, object, int, bool)
     libraryLoaded = Signal(object)
     favoriteChanged = Signal(object, bool)
+    metadataSyncRequested = Signal(object)
 
     def __init__(
         self,
@@ -946,6 +993,7 @@ class LocalMangaInterface(QWidget):
         self._page_size = cfg.get(cfg.mangaPageSize)
         self._last_columns = 0
         self._load_worker = None
+        self._pending_reveal_gid = None
         self._cover_worker = None
         self._cover_cache = OrderedDict()
         self._similar_search_worker: Optional[SimilarMangaWorker] = None
@@ -1005,6 +1053,11 @@ class LocalMangaInterface(QWidget):
         self.multiSelectCheckBox.setText(self.tr("复选"))
         self.selectionCountLabel = CaptionLabel(self.tr("已选 0 项"), self)
         self.selectionCountLabel.hide()
+        self.selectAllButton = ToolButton(FIF.CHECKBOX, self)
+        self.selectAllButton.setFixedSize(36, 36)
+        self.selectAllButton.setToolTip(self.tr("全选当前筛选结果"))
+        self.selectAllButton.setAccessibleName(self.tr("全选当前筛选结果"))
+        self.selectAllButton.hide()
         self.playlistContinueButton = PushButton(
             FIF.HISTORY, self.tr("继续上一次"), self
         )
@@ -1041,6 +1094,7 @@ class LocalMangaInterface(QWidget):
         header_layout.addWidget(self.titleLabel)
         header_layout.addStretch(1)
         header_layout.addWidget(self.selectionCountLabel)
+        header_layout.addWidget(self.selectAllButton)
         header_layout.addWidget(self.multiSelectCheckBox)
         header_layout.addWidget(self.playlistContinueButton)
         header_layout.addWidget(self.playlistPlayButton)
@@ -1250,6 +1304,7 @@ class LocalMangaInterface(QWidget):
         )
         self.playlistOrderButton.clicked.connect(self._editPlaylistOrder)
         self.multiSelectCheckBox.toggled.connect(self._onSelectionModeChanged)
+        self.selectAllButton.clicked.connect(self._toggleSelectAll)
         self.sortCombo.currentIndexChanged.connect(self._onSortOrderChanged)
         self.pageSizeCombo.currentIndexChanged.connect(self._onPageSizeChanged)
         self.pageSpinBox.valueChanged.connect(self._onPageChanged)
@@ -1312,21 +1367,32 @@ class LocalMangaInterface(QWidget):
             self._cover_worker.cancelled = True
             self._cover_worker = None
 
-    def reload(self):
+    def reload(self, reveal_gid=None):
         self.cancelLoad()
+        self._pending_reveal_gid = (
+            int(reveal_gid) if reveal_gid is not None else None
+        )
         self._clearSimilarSearch(clear_query=True)
         self._selected_gids.clear()
         self._updateSelectionState()
         self._cover_cache.clear()
         self.resultLabel.setText(self.tr("正在读取本地漫画…"))
         worker = MangaLoadWorker(self.source, self.userRepository)
-        worker.signals.loaded.connect(self._onLoaded)
-        worker.signals.failed.connect(self._onLoadFailed)
+        worker.signals.loaded.connect(
+            lambda payload: self._onLoaded(payload, worker)
+        )
+        worker.signals.failed.connect(
+            lambda message: self._onLoadFailed(message, worker)
+        )
         self._load_worker = worker
         QThreadPool.globalInstance().start(worker)
 
-    def _onLoaded(self, payload):
+    def _onLoaded(self, payload, worker=None):
+        if worker is not None and self._load_worker is not worker:
+            return
         self._load_worker = None
+        reveal_gid = self._pending_reveal_gid
+        self._pending_reveal_gid = None
         if len(payload) == 3:
             self._all_items, primary_labels, playlists = payload
             taxonomy_labels = []
@@ -1346,11 +1412,27 @@ class LocalMangaInterface(QWidget):
         self._populatePlaylists(self._playlists)
         self._populateTaxonomy(self._taxonomy_labels)
         self._setTagMode(self.TAG_CATEGORY, reset_page=False)
+        if reveal_gid is not None and any(
+            item.gid == reveal_gid for item in self._all_items
+        ):
+            self.searchTimer.stop()
+            self.searchEdit.blockSignals(True)
+            self.searchEdit.clear()
+            self.searchEdit.blockSignals(False)
+            self._show_all_manga = True
         self.applyFilters(reset_page=True)
+        if reveal_gid is not None:
+            for index, item in enumerate(self._filtered_items):
+                if item.gid == reveal_gid:
+                    self.setPage(index // self._page_size + 1)
+                    break
         self.libraryLoaded.emit(tuple(self._all_items))
 
-    def _onLoadFailed(self, message: str):
+    def _onLoadFailed(self, message: str, worker=None):
+        if worker is not None and self._load_worker is not worker:
+            return
         self._load_worker = None
+        self._pending_reveal_gid = None
         self._all_items = []
         self._filtered_items = []
         self.resultLabel.setText(self.tr("读取失败：{}").format(message))
@@ -1748,6 +1830,13 @@ class LocalMangaInterface(QWidget):
         )
         menu.addAction(favorite_action)
         if self._collection_kind is None:
+            sync_action = QAction(self.tr("同步在线信息"), menu)
+            sync_action.triggered.connect(
+                lambda _checked=False, items=tuple(target_items): (
+                    self.metadataSyncRequested.emit(items)
+                )
+            )
+            menu.addAction(sync_action)
             similar_action = QAction(self.tr("搜索相似画廊"), menu)
             similar_action.triggered.connect(
                 lambda _checked=False, reference=item: self._searchSimilarGalleries(
@@ -1971,11 +2060,37 @@ class LocalMangaInterface(QWidget):
             self._selected_gids.discard(int(gid))
         self._updateSelectionState()
 
+    def _toggleSelectAll(self):
+        scope_gids = {item.gid for item in self._filtered_items}
+        if not scope_gids:
+            return
+        if scope_gids.issubset(self._selected_gids):
+            self._selected_gids.difference_update(scope_gids)
+        else:
+            self._selected_gids.update(scope_gids)
+        self._updateSelectionState()
+
     def _updateSelectionState(self):
         self.selectionCountLabel.setVisible(self._selection_mode)
         self.selectionCountLabel.setText(
             self.tr("已选 {} 项").format(len(self._selected_gids))
         )
+        scope_gids = {item.gid for item in self._filtered_items}
+        all_selected = bool(scope_gids) and scope_gids.issubset(
+            self._selected_gids
+        )
+        self.selectAllButton.setVisible(self._selection_mode)
+        self.selectAllButton.setEnabled(bool(scope_gids))
+        self.selectAllButton.setIcon(
+            FIF.CLEAR_SELECTION if all_selected else FIF.CHECKBOX
+        )
+        tooltip = (
+            self.tr("取消全选")
+            if all_selected
+            else self.tr("全选当前筛选结果")
+        )
+        self.selectAllButton.setToolTip(tooltip)
+        self.selectAllButton.setAccessibleName(tooltip)
         for card in self._cards:
             card.setSelectionState(
                 self._selection_mode,
@@ -2322,6 +2437,10 @@ class LocalMangaInterface(QWidget):
         self._renderCards()
 
     def _renderCards(self):
+        self._selected_gids.intersection_update(
+            item.gid for item in self._filtered_items
+        )
+        self._updateSelectionState()
         self._clearContentLayout()
         self._cards = []
         self._empty_label = None

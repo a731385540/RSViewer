@@ -40,8 +40,12 @@ class EhTagSearchLineEdit(SearchLineEdit):
         self._tag_completer.setCaseSensitivity(Qt.CaseInsensitive)
         self._tag_completer.setWrapAround(False)
         self._tag_completer.setMaxVisibleItems(8)
+        self._suggestion_popup_requested = False
+        self._suggestion_timer = QTimer(self)
+        self._suggestion_timer.setSingleShot(True)
+        self._suggestion_timer.timeout.connect(self._showCompleterMenu)
         self.setCompleter(self._tag_completer)
-        self.textEdited.connect(self.refreshTagSuggestions)
+        self.textEdited.connect(self._onTextEdited)
         self.searchSignal.connect(self.recordCurrentSearch)
         self.returnPressed.connect(self.recordCurrentSearch)
         self._tag_completer.activated[QModelIndex].connect(
@@ -55,6 +59,10 @@ class EhTagSearchLineEdit(SearchLineEdit):
     def setTagSearchIndex(self, tag_search_index):
         self._tag_search_index = tag_search_index or EhTagSearchIndex()
         self._hideSuggestions()
+
+    def _onTextEdited(self, *_args):
+        self._suggestion_popup_requested = True
+        self.refreshTagSuggestions()
 
     def refreshTagSuggestions(self, *_args):
         text = self.text()
@@ -86,7 +94,7 @@ class EhTagSearchLineEdit(SearchLineEdit):
             self._completion_model.appendRow(item)
             self._suggestions[display_text] = suggestion
         self._tag_completer.setCompletionPrefix("")
-        QTimer.singleShot(0, self._showCompleterMenu)
+        self._suggestion_timer.start(0)
 
     def recordCurrentSearch(self, text=None):
         if self._search_history_service is None:
@@ -111,12 +119,20 @@ class EhTagSearchLineEdit(SearchLineEdit):
     def _showCompleterMenu(self):
         """Show QFluentWidgets' themed menu instead of Qt's native popup."""
 
+        menu_visible = bool(self._completerMenu and self._completerMenu.isVisible())
+        if not self._suggestion_popup_requested or (
+            not self.hasFocus() and not menu_visible
+        ):
+            return
         if not self._completion_model.rowCount():
             self._hideSuggestions()
             return
         if not self._completerMenu:
             self.setCompleterMenu(CompleterMenu(self))
             self._completerMenu.setItemHeight(48)
+            self._completerMenu.aboutToHide.connect(
+                self._onCompleterMenuAboutToHide
+            )
         changed = self._completerMenu.setCompletion(self._completion_model, 0)
         self._completerMenu.setMaxVisibleItems(
             self._tag_completer.maxVisibleItems()
@@ -148,8 +164,20 @@ class EhTagSearchLineEdit(SearchLineEdit):
 
     def focusInEvent(self, event):
         super().focusInEvent(event)
+        if event.reason() == Qt.PopupFocusReason:
+            return
         if self._search_history_service is not None:
+            self._suggestion_popup_requested = True
             self.refreshTagSuggestions()
+
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        if event.reason() != Qt.PopupFocusReason:
+            self._hideSuggestions()
+
+    def _onCompleterMenuAboutToHide(self):
+        self._suggestion_popup_requested = False
+        self._suggestion_timer.stop()
 
     def _onSuggestionActivated(self, index):
         self._applyCompletionIndex(index)
@@ -166,6 +194,8 @@ class EhTagSearchLineEdit(SearchLineEdit):
         self._hideSuggestions()
 
     def _hideSuggestions(self):
+        self._suggestion_popup_requested = False
+        self._suggestion_timer.stop()
         if self._completerMenu:
             self._completerMenu.close()
         self._completion_model.clear()

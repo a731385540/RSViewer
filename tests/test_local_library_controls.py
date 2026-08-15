@@ -13,6 +13,10 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog
 
 from app.common.config import cfg
+from app.domain.online_download import (
+    ONLINE_DOWNLOAD_COMPLETED,
+    OnlineGalleryDownloadRecord,
+)
 from app.domain.manga import MangaItem
 from app.repositories.user_library_repository import UserLibraryRepository
 from app.view.local_manga_interface import (
@@ -29,9 +33,10 @@ class EmptySource:
         self.primary_updates = []
         self.primary_deletes = []
         self.primary_clears = []
+        self.items = []
 
     def list_local_manga(self):
-        return []
+        return list(self.items)
 
     def list_primary_labels(self):
         return ["分类 A", "分类 B"]
@@ -120,6 +125,78 @@ class LocalLibraryControlsTests(unittest.TestCase):
         self.assertEqual(
             [1, 3, 2],
             [item.gid for item in self.interface._filtered_items],
+        )
+
+    def test_download_refresh_reveals_new_gallery_and_ignores_old_filters(self):
+        downloaded = replace(
+            make_item(self.root, 99, 40),
+            english_title="Updated downloaded title",
+            primary_label="分类 B",
+        )
+        self.source.items = [*self.items, downloaded]
+        self.repository.save_online_gallery_download(
+            OnlineGalleryDownloadRecord(
+                gid=downloaded.gid,
+                site="exhentai",
+                token="token",
+                title=downloaded.english_title,
+                dirname=downloaded.folder.name,
+                page_count=24,
+                completed_pages=24,
+                state=ONLINE_DOWNLOAD_COMPLETED,
+                metadata={
+                    "uploader": "download-uploader",
+                    "posted": "2026-08-15 12:00",
+                    "rating": 4.75,
+                    "language": "Chinese",
+                    "file_size": "18 MiB",
+                },
+            )
+        )
+        self.interface.searchEdit.setText("does not match")
+        self.interface._primary_label_filter = "分类 A"
+
+        loaded = []
+        self.interface.libraryLoaded.connect(loaded.append)
+        self.interface.reload(reveal_gid=downloaded.gid)
+        QThreadPool.globalInstance().waitForDone(3000)
+        QApplication.processEvents()
+
+        self.assertEqual("", self.interface.searchEdit.text())
+        self.assertTrue(self.interface._show_all_manga)
+        self.assertIn(downloaded.gid, [item.gid for item in self.interface._filtered_items])
+        refreshed = next(
+            item for item in self.interface.allItems() if item.gid == downloaded.gid
+        )
+        self.assertEqual("Updated downloaded title", refreshed.english_title)
+        self.assertEqual(24, refreshed.page_count)
+        self.assertEqual("download-uploader", refreshed.uploader)
+        self.assertEqual("18 MiB", refreshed.file_size)
+        self.assertEqual(downloaded.gid, loaded[-1][-1].gid)
+
+    def test_regular_refresh_preserves_selected_category_filter(self):
+        categorized_items = [
+            replace(self.items[0], primary_label="分类 A"),
+            replace(self.items[1], primary_label="分类 B"),
+            self.items[2],
+        ]
+        self.source.items = categorized_items
+        self.interface.primaryLabelTree.setCurrentItem(
+            self.interface.primaryLabelTree.topLevelItem(1)
+        )
+        QApplication.processEvents()
+
+        self.interface.reload()
+        QThreadPool.globalInstance().waitForDone(3000)
+        QApplication.processEvents()
+
+        self.assertFalse(self.interface._show_all_manga)
+        self.assertEqual("分类 A", self.interface._primary_label_filter)
+        self.assertEqual(
+            "分类 A", self.interface.primaryLabelTree.currentItem().text(0)
+        )
+        self.assertEqual(
+            [1], [item.gid for item in self.interface._filtered_items]
         )
 
     def test_category_defaults_to_unclassified_and_remembers_selection(self):
@@ -235,6 +312,7 @@ class LocalLibraryControlsTests(unittest.TestCase):
         self.assertEqual(
             [
                 "添加到收藏",
+                "同步在线信息",
                 "搜索相似画廊",
                 "选择分类…",
                 "选择播放列表…",
@@ -606,7 +684,6 @@ class LocalLibraryControlsTests(unittest.TestCase):
             {2: ("批量列表",), 3: ("批量列表",)},
             self.repository.labels_for_manga([1, 2, 3]),
         )
-
         self.interface._setMangaPrimaryLabel((2, 3), "")
         QThreadPool.globalInstance().waitForDone(3000)
         QApplication.processEvents()
@@ -622,6 +699,56 @@ class LocalLibraryControlsTests(unittest.TestCase):
         QThreadPool.globalInstance().waitForDone(3000)
         QApplication.processEvents()
         self.assertEqual({}, self.repository.labels_for_manga([2, 3]))
+
+    def test_select_all_uses_all_pages_in_current_filter_and_syncs_batch(self):
+        items = [
+            replace(make_item(self.root, gid, gid), primary_label=label)
+            for gid, label in (
+                (10, "分类 A"),
+                (11, "分类 A"),
+                (12, "分类 A"),
+                (13, "分类 B"),
+            )
+        ]
+        self.interface._page_size = 2
+        self.interface._onLoaded((items, ["分类 A", "分类 B"], []))
+        self.interface.primaryLabelTree.setCurrentItem(
+            self.interface.primaryLabelTree.topLevelItem(1)
+        )
+        self.interface.multiSelectCheckBox.setChecked(True)
+        QApplication.processEvents()
+
+        self.assertFalse(self.interface.selectAllButton.isHidden())
+        self.interface.selectAllButton.click()
+
+        self.assertEqual({10, 11, 12}, self.interface._selected_gids)
+        self.assertEqual("已选 3 项", self.interface.selectionCountLabel.text())
+        self.assertEqual("取消全选", self.interface.selectAllButton.toolTip())
+        self.interface.setPage(2)
+        self.assertEqual(1, len(self.interface._cards))
+        self.assertTrue(self.interface._cards[0].selectionCheckBox.isChecked())
+
+        requested = []
+        self.interface.metadataSyncRequested.connect(requested.append)
+        menu = self.interface._buildLabelMenu(
+            self.interface._cards[0].item,
+            self.interface._selected_gids,
+        )
+        next(
+            action
+            for action in menu.menuActions()
+            if action.text() == "同步在线信息"
+        ).trigger()
+        self.assertEqual(
+            [(10, 11, 12)],
+            [tuple(item.gid for item in batch) for batch in requested],
+        )
+
+        self.interface.selectAllButton.click()
+        self.assertEqual(set(), self.interface._selected_gids)
+        self.assertEqual(
+            "全选当前筛选结果", self.interface.selectAllButton.toolTip()
+        )
 
     def test_playlist_order_and_play_actions_use_the_selected_playlist(self):
         playlist_id = self.repository.create_playlist("顺序测试")

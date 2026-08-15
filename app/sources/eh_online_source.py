@@ -1,14 +1,23 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, replace
+import re
+import socket
+from threading import Lock
 from typing import Dict, Iterable
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from urllib.request import getproxies
+
+from bs4 import BeautifulSoup
 
 from eh_tool_refactored import EhData
 
 from app.domain.online_gallery import (
     OnlineGallery,
+    OnlineGalleryComment,
+    OnlineGalleryDetail,
     OnlineGalleryPage,
+    OnlineGalleryPreview,
+    OnlineGalleryPreviewPage,
     OnlineGalleryQuery,
 )
 
@@ -96,7 +105,53 @@ class EhOnlineSettings:
             return {}
         if self.proxy_mode == "manual":
             return {"http": self.manual_proxy, "https": self.manual_proxy}
-        return dict(getproxies())
+        return self._system_proxy_mapping(getproxies())
+
+    @staticmethod
+    def _system_proxy_mapping(proxies) -> Dict[str, str]:
+        """Adapt OS proxy discovery to requests' proxy URL semantics.
+
+        On Windows, urllib expands one scheme-less system proxy endpoint into
+        ``http://host`` and ``https://host``.  The latter tells requests to use
+        TLS *to the proxy*, although Windows intends the same HTTP CONNECT
+        proxy for HTTPS destinations.
+        """
+
+        mapping = {
+            str(key).casefold(): str(value).strip()
+            for key, value in dict(proxies or {}).items()
+            if value
+        }
+        http_proxy = mapping.get("http", "")
+        https_proxy = mapping.get("https", "")
+
+        if http_proxy and not https_proxy:
+            mapping["https"] = http_proxy
+            return mapping
+
+        if not http_proxy or not https_proxy:
+            return mapping
+
+        http_url = urlparse(http_proxy)
+        https_url = urlparse(https_proxy)
+        try:
+            same_endpoint = bool(
+                http_url.hostname
+                and http_url.hostname == https_url.hostname
+                and http_url.port == https_url.port
+                and http_url.username == https_url.username
+                and http_url.password == https_url.password
+            )
+        except ValueError:
+            same_endpoint = False
+        if (
+            same_endpoint
+            and http_url.scheme.casefold() == "http"
+            and https_url.scheme.casefold() == "https"
+        ):
+            mapping["https"] = http_proxy
+
+        return mapping
 
 
 class EhOnlineProvider(ABC):
@@ -131,10 +186,31 @@ class EhOnlineProvider(ABC):
 
         return items
 
-    def load_thumbnail(self, url: str) -> bytes:
+    def load_thumbnail(self, url: str, should_cancel=None) -> bytes:
         """Optionally return encoded thumbnail bytes for a gallery card."""
 
         return b""
+
+    def load_gallery_detail(self, gallery: OnlineGallery) -> OnlineGalleryDetail:
+        """Load one gallery page without using a site API."""
+
+        raise EhOnlineError("当前在线 provider 不支持读取画廊详情")
+
+    def load_gallery_preview_page(
+        self, gallery: OnlineGallery, page_number: int, should_cancel=None
+    ) -> OnlineGalleryPreviewPage:
+        raise EhOnlineError("当前在线 provider 不支持读取画廊预览")
+
+    def load_preview_thumbnail(self, preview: OnlineGalleryPreview) -> bytes:
+        return b""
+
+    def load_gallery_page_image(
+        self,
+        gallery: OnlineGallery,
+        preview: OnlineGalleryPreview,
+        should_cancel=None,
+    ) -> bytes:
+        raise EhOnlineError("当前在线 provider 不支持在线阅读")
 
     def set_display_mode(self, mode: str):
         """Update the account/session list mode through the site's own page control."""
@@ -174,6 +250,9 @@ class RefactoredEhOnlineProvider(EhOnlineProvider):
             timeout=settings.timeout_seconds,
             trust_env=settings.proxy_mode == "system",
         )
+        self._request_lock = Lock()
+        self._active_responses = {}
+        self._cancel_requested = False
 
     def fetch_page(self, query: OnlineGalleryQuery) -> OnlineGalleryPage:
         if query.cursor:
@@ -199,14 +278,212 @@ class RefactoredEhOnlineProvider(EhOnlineProvider):
             previous_cursor=str(result.get("prev_url") or ""),
         )
 
-    def load_thumbnail(self, url: str) -> bytes:
+    def load_thumbnail(self, url: str, should_cancel=None) -> bytes:
         if not url:
             return b""
         self._validate_thumbnail_url(url)
+        if should_cancel is not None:
+            data, _status = self._request_bytes_cancellable(url, should_cancel)
+            return data
         response = self._crawler.req.get(url)
         if response is None or not getattr(response, "ok", False):
             return b""
         return bytes(response.content or b"")
+
+    def load_gallery_detail(self, gallery: OnlineGallery) -> OnlineGalleryDetail:
+        self._validate_gallery_url(gallery)
+        response = self._crawler.req.get(gallery.url)
+        if response is None or not getattr(response, "ok", False):
+            status = getattr(response, "status_code", "未知")
+            raise EhOnlineError(f"画廊详情请求失败（HTTP {status}）")
+        content = getattr(response, "content", b"") or getattr(response, "text", "")
+        soup = BeautifulSoup(content, "lxml")
+        if soup.select_one("#gn") is None or soup.select_one("#gdd") is None:
+            raise EhOnlineError("站点返回的页面不是可识别的画廊详情")
+        return self._parse_gallery_detail(gallery, soup)
+
+    def load_gallery_preview_page(self, gallery, page_number, should_cancel=None):
+        self._validate_gallery_url(gallery)
+        page_number = int(page_number)
+        page_count = max(1, (int(gallery.page_count) + 19) // 20)
+        if not 1 <= page_number <= page_count:
+            raise EhOnlineError("画廊预览页码超出范围")
+        url = gallery.url if page_number == 1 else f"{gallery.url}?p={page_number - 1}"
+        if should_cancel is None:
+            response = self._crawler.req.get(url)
+            content = (
+                getattr(response, "content", b"")
+                or getattr(response, "text", "")
+                if response is not None else b""
+            )
+            status = getattr(response, "status_code", "未知")
+            ok = response is not None and getattr(response, "ok", False)
+        else:
+            content, status = self._request_bytes_cancellable(
+                url, should_cancel
+            )
+            ok = bool(content)
+        if not ok:
+            raise EhOnlineError(f"画廊预览请求失败（HTTP {status}）")
+        soup = BeautifulSoup(content, "lxml")
+        items = self._parse_gallery_previews(gallery, soup)
+        if not items and gallery.page_count:
+            raise EhOnlineError("站点返回的画廊预览为空")
+        return OnlineGalleryPreviewPage(
+            gallery=gallery,
+            page_number=page_number,
+            page_count=page_count,
+            items=items,
+        )
+
+    def load_preview_thumbnail(self, preview):
+        if not preview.thumbnail_url:
+            return b""
+        self._validate_online_image_url(preview.thumbnail_url)
+        return self._request_image(preview.thumbnail_url)
+
+    def load_gallery_page_image(self, gallery, preview, should_cancel=None):
+        self._validate_gallery_page_url(gallery, preview)
+        if should_cancel is None:
+            response = self._crawler.req.get(preview.page_url)
+            content = (
+                getattr(response, "content", b"")
+                or getattr(response, "text", "")
+                if response is not None else b""
+            )
+            status = getattr(response, "status_code", "未知")
+            ok = response is not None and getattr(response, "ok", False)
+        else:
+            content, status = self._request_bytes_cancellable(
+                preview.page_url, should_cancel
+            )
+            ok = bool(content)
+        if not ok:
+            raise EhOnlineError(f"单图页面请求失败（HTTP {status}）")
+        soup = BeautifulSoup(content, "lxml")
+        image = soup.select_one("#img[src]")
+        if image is None:
+            raise EhOnlineError("站点返回的单图页面缺少图片地址")
+        image_url = str(image.get("src") or "")
+        self._validate_online_image_url(image_url)
+        data = self._request_image(image_url, should_cancel)
+        if not data:
+            raise EhOnlineError("在线图片请求失败")
+        return data
+
+    def _request_image(self, url, should_cancel=None):
+        if should_cancel is not None:
+            data, _status = self._request_bytes_cancellable(url, should_cancel)
+            return data
+        response = self._crawler.req.get(url)
+        if response is None or not getattr(response, "ok", False):
+            return b""
+        return bytes(response.content or b"")
+
+    def cancel_pending_requests(self):
+        with self._request_lock:
+            self._cancel_requested = True
+            responses = tuple(self._active_responses.values())
+        for response in responses:
+            self._abort_response(response, close_response=False)
+
+    def _request_bytes_cancellable(self, url, should_cancel):
+        self._raise_if_request_cancelled(should_cancel)
+        try:
+            response = self._crawler.req.get(url, stream=True)
+        except TypeError:
+            # Small provider test doubles and third-party adapters may not
+            # expose requests' streaming keyword.
+            response = self._crawler.req.get(url)
+        if response is None:
+            return b"", "未知"
+        response_key = id(response)
+        with self._request_lock:
+            if self._cancel_requested:
+                self._abort_response(response)
+                raise EhOnlineError("请求已取消")
+            self._active_responses[response_key] = response
+        try:
+            status = getattr(response, "status_code", "未知")
+            if not getattr(response, "ok", False):
+                return b"", status
+            iterator = getattr(response, "iter_content", None)
+            if iterator is None:
+                self._raise_if_request_cancelled(should_cancel)
+                return bytes(getattr(response, "content", b"") or b""), status
+            chunks = []
+            for chunk in iterator(chunk_size=64 * 1024):
+                self._raise_if_request_cancelled(should_cancel)
+                if chunk:
+                    chunks.append(bytes(chunk))
+            self._raise_if_request_cancelled(should_cancel)
+            return b"".join(chunks), status
+        finally:
+            with self._request_lock:
+                self._active_responses.pop(response_key, None)
+            close = getattr(response, "close", None)
+            if close is not None:
+                close()
+
+    def _raise_if_request_cancelled(self, should_cancel):
+        if self._cancel_requested or (should_cancel and should_cancel()):
+            raise EhOnlineError("请求已取消")
+
+    @staticmethod
+    def _abort_response(response, close_response=True):
+        raw = getattr(response, "raw", None)
+        raw_shutdown = getattr(raw, "_sock_shutdown", None)
+        if raw_shutdown is not None:
+            try:
+                raw_shutdown(socket.SHUT_RDWR)
+            except (OSError, ValueError):
+                pass
+        sockets = []
+        connection = getattr(raw, "_connection", None)
+        if connection is not None:
+            sockets.append(getattr(connection, "sock", None))
+        original_response = getattr(raw, "_fp", None)
+        stream = getattr(original_response, "fp", None)
+        buffered_raw = getattr(stream, "raw", None)
+        sockets.extend(
+            (
+                getattr(buffered_raw, "_sock", None),
+                getattr(stream, "_sock", None),
+            )
+        )
+        closed_handles = set()
+        for active_socket in sockets:
+            if active_socket is None:
+                continue
+            try:
+                socket_handle = active_socket.fileno()
+            except (OSError, ValueError):
+                socket_handle = -1
+            if socket_handle >= 0 and socket_handle not in closed_handles:
+                closed_handles.add(socket_handle)
+                interrupt_socket = None
+                try:
+                    interrupt_socket = socket.socket(fileno=socket_handle)
+                    interrupt_socket.shutdown(socket.SHUT_RDWR)
+                except (OSError, ValueError):
+                    pass
+                finally:
+                    if interrupt_socket is not None:
+                        try:
+                            interrupt_socket.detach()
+                        except (OSError, ValueError):
+                            pass
+                try:
+                    socket.close(socket_handle)
+                except (OSError, ValueError):
+                    pass
+        if close_response:
+            close = getattr(response, "close", None)
+            if close is not None:
+                try:
+                    close()
+                except Exception:
+                    pass
 
     def set_display_mode(self, mode: str):
         result = self._crawler.setDisplayMode(mode)
@@ -221,6 +498,39 @@ class RefactoredEhOnlineProvider(EhOnlineProvider):
         if parsed.scheme != "https" or parsed.hostname != expected_host:
             raise EhOnlineError("拒绝访问站点列表页之外的翻页地址")
 
+    def _validate_gallery_url(self, gallery: OnlineGallery):
+        parsed = urlparse(gallery.url)
+        expected_host = urlparse(self.settings.base_url).hostname
+        match = re.fullmatch(r"/g/(\d+)/([0-9A-Za-z]+)/?", parsed.path)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != expected_host
+            or parsed.query
+            or parsed.fragment
+            or match is None
+            or int(match.group(1)) != int(gallery.gid)
+            or match.group(2) != gallery.token
+        ):
+            raise EhOnlineError("拒绝访问当前站点画廊之外的详情地址")
+
+    def _validate_gallery_page_url(self, gallery, preview):
+        parsed = urlparse(preview.page_url)
+        expected_host = urlparse(self.settings.base_url).hostname
+        match = re.fullmatch(
+            r"/s/([0-9A-Za-z]+)/(\d+)-(\d+)/?", parsed.path
+        )
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != expected_host
+            or parsed.query
+            or parsed.fragment
+            or match is None
+            or (preview.page_token and match.group(1) != preview.page_token)
+            or int(match.group(2)) != int(gallery.gid)
+            or int(match.group(3)) != int(preview.page_index) + 1
+        ):
+            raise EhOnlineError("拒绝访问当前画廊之外的单图页面")
+
     @staticmethod
     def _validate_thumbnail_url(url: str):
         parsed = urlparse(url)
@@ -233,6 +543,203 @@ class RefactoredEhOnlineProvider(EhOnlineProvider):
         )
         if parsed.scheme != "https" or not allowed:
             raise EhOnlineError("拒绝加载未知站点的缩略图")
+
+    @staticmethod
+    def _validate_online_image_url(url: str):
+        parsed = urlparse(url)
+        hostname = (parsed.hostname or "").casefold()
+        allowed = (
+            hostname in {"e-hentai.org", "exhentai.org", "ehgt.org", "hath.network"}
+            or hostname.endswith(".e-hentai.org")
+            or hostname.endswith(".exhentai.org")
+            or hostname.endswith(".ehgt.org")
+            or hostname.endswith(".hath.network")
+        )
+        if parsed.scheme != "https" or not allowed:
+            raise EhOnlineError("拒绝加载未知站点的在线图片")
+
+    @classmethod
+    def _parse_gallery_detail(cls, gallery, soup):
+        metadata = {}
+        for row in soup.select("#gdd tr"):
+            cells = row.find_all("td", recursive=False)
+            if len(cells) < 2:
+                continue
+            key = cells[0].get_text(" ", strip=True).rstrip(":").casefold()
+            metadata[key] = cells[1].get_text(" ", strip=True)
+
+        tags = []
+        for row in soup.select("#taglist tr"):
+            namespace_cell = row.select_one("td.tc")
+            namespace = (
+                namespace_cell.get_text(" ", strip=True).rstrip(":").casefold()
+                if namespace_cell is not None
+                else ""
+            )
+            for anchor in row.select("a[id^='ta_']"):
+                value = anchor.get_text(" ", strip=True)
+                if not value:
+                    continue
+                tag = f"{namespace}:{value}" if namespace else value
+                if tag not in tags:
+                    tags.append(tag)
+
+        comments = tuple(
+            comment
+            for comment in (
+                cls._parse_comment(node) for node in soup.select("#cdiv .c1")
+            )
+            if comment is not None
+        )
+        rating = cls._first_number(cls._node_text(soup, "#rating_label"))
+        rating_count = cls._first_integer(cls._node_text(soup, "#rating_count"))
+        page_count = cls._first_integer(metadata.get("length", ""))
+
+        cover_url = ""
+        cover = soup.select_one("#gd1 div[style]")
+        if cover is not None:
+            match = re.search(r"url\((['\"]?)(https://[^)'\"]+)\1\)", cover.get("style", ""))
+            if match:
+                cover_url = match.group(2)
+
+        title = cls._node_text(soup, "#gn") or gallery.title
+        secondary_title = cls._node_text(soup, "#gj")
+        category = cls._node_text(soup, "#gdc") or gallery.category
+        posted = metadata.get("posted", gallery.posted)
+        uploader = cls._node_text(soup, "#gdn") or gallery.uploader
+        resolved_page_count = page_count or gallery.page_count
+        resolved_rating = rating if rating is not None else gallery.rating
+        resolved_tags = tuple(tags) or gallery.tags
+        newer_gallery_urls = []
+        for anchor in soup.select("#gnd a[href]"):
+            candidate = urljoin(gallery.url, str(anchor.get("href") or ""))
+            parsed = urlparse(candidate)
+            if (
+                parsed.scheme != "https"
+                or parsed.hostname != urlparse(gallery.url).hostname
+                or not re.fullmatch(r"/g/\d+/[0-9a-fA-F]+/?", parsed.path)
+                or candidate.rstrip("/") == gallery.url.rstrip("/")
+                or candidate in newer_gallery_urls
+            ):
+                continue
+            newer_gallery_urls.append(candidate)
+        enriched_gallery = replace(
+            gallery,
+            title=title,
+            category=category,
+            posted=posted,
+            page_count=resolved_page_count,
+            tags=resolved_tags,
+            uploader=uploader,
+            rating=resolved_rating,
+        )
+
+        return OnlineGalleryDetail(
+            gallery=enriched_gallery,
+            title=title,
+            secondary_title=secondary_title,
+            category=category,
+            cover_url=cover_url or gallery.thumbnail_url,
+            posted=posted,
+            uploader=uploader,
+            visible=metadata.get("visible", ""),
+            language=metadata.get("language", ""),
+            file_size=metadata.get("file size", ""),
+            page_count=resolved_page_count,
+            favorited=metadata.get("favorited", ""),
+            parent_gallery=metadata.get("parent", ""),
+            newer_gallery_urls=tuple(newer_gallery_urls),
+            rating=resolved_rating,
+            rating_count=rating_count,
+            tags=resolved_tags,
+            comments=comments,
+            previews=cls._parse_gallery_previews(enriched_gallery, soup),
+        )
+
+    @classmethod
+    def _parse_gallery_previews(cls, gallery, soup):
+        previews = []
+        for anchor in soup.select("#gdt a[href]"):
+            page_url = str(anchor.get("href") or "")
+            parsed = urlparse(page_url)
+            match = re.fullmatch(
+                r"/s/([0-9A-Za-z]+)/(\d+)-(\d+)/?", parsed.path
+            )
+            if match is None or int(match.group(2)) != int(gallery.gid):
+                continue
+            page_index = int(match.group(3)) - 1
+            node = anchor.select_one("div[style]")
+            style = node.get("style", "") if node is not None else ""
+            image_match = re.search(
+                r"url\((['\"]?)(https://[^)'\"]+)\1\)", style
+            )
+            width_match = re.search(r"(?:^|;)\s*width\s*:\s*(\d+)px", style)
+            height_match = re.search(r"(?:^|;)\s*height\s*:\s*(\d+)px", style)
+            position_match = None
+            if image_match is not None:
+                position_match = re.search(
+                    r"(-?\d+)(?:px)?\s+(-?\d+)(?:px)?",
+                    style[image_match.end():],
+                )
+            css_x = int(position_match.group(1)) if position_match else 0
+            css_y = int(position_match.group(2)) if position_match else 0
+            title = node.get("title", "") if node is not None else ""
+            previews.append(
+                OnlineGalleryPreview(
+                    page_index=page_index,
+                    page_url=page_url,
+                    thumbnail_url=image_match.group(2) if image_match else "",
+                    title=str(title),
+                    thumbnail_width=int(width_match.group(1)) if width_match else 0,
+                    thumbnail_height=int(height_match.group(1)) if height_match else 0,
+                    thumbnail_x=max(0, -css_x),
+                    thumbnail_y=max(0, -css_y),
+                    page_token=match.group(1),
+                )
+            )
+        return tuple(previews)
+
+    @staticmethod
+    def _parse_comment(node):
+        body = node.select_one(".c6[id^='comment_']")
+        header = node.select_one(".c3")
+        if body is None or header is None:
+            return None
+        comment_id = body.get("id", "").removeprefix("comment_")
+        author_link = header.find("a")
+        author = author_link.get_text(" ", strip=True) if author_link else ""
+        header_text = header.get_text(" ", strip=True)
+        posted_match = re.match(r"Posted on\s+(.+?)\s+by:\s*", header_text, re.IGNORECASE)
+        posted = posted_match.group(1).strip() if posted_match else header_text
+        score_text = RefactoredEhOnlineProvider._node_text(node, ".c5")
+        score_match = re.search(r"Score\s*([+-]?\d+)", score_text, re.IGNORECASE)
+        score = int(score_match.group(1)) if score_match else None
+        text = body.get_text("\n", strip=True)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        uploader_marker = RefactoredEhOnlineProvider._node_text(node, ".c4")
+        return OnlineGalleryComment(
+            comment_id=comment_id,
+            author=author,
+            posted=posted,
+            text=text,
+            score=score,
+            is_uploader="Uploader Comment" in uploader_marker,
+        )
+
+    @staticmethod
+    def _node_text(node, selector):
+        selected = node.select_one(selector)
+        return selected.get_text(" ", strip=True) if selected is not None else ""
+
+    @staticmethod
+    def _first_integer(value):
+        match = re.search(r"[\d,]+", value or "")
+        return int(match.group(0).replace(",", "")) if match else 0
+
+    @staticmethod
+    def _first_number(value):
+        match = re.search(r"(?<!\d)([0-5](?:\.\d+)?)(?!\d)", value or "")
+        return float(match.group(1)) if match else None
 
     @staticmethod
     def _to_gallery(raw):
