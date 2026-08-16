@@ -181,7 +181,9 @@ class ReadingProgressTests(unittest.TestCase):
         QTest.mouseClick(detail._preview_tiles[2], Qt.LeftButton)
 
         self.assertEqual([(item.gid, 2)], requested)
-        self.assertIn("第 3 / 4 页", detail.metadataLabel.text())
+        self.assertNotIn("阅读进度：", detail.metadataLabel.text())
+        self.assertTrue(detail.detailMetadataLabel.isHidden())
+        self.assertIn("第 3 / 4 页", detail.detailMetadataLabel.text())
         detail.cancelLoads()
         detail.close()
         detail.deleteLater()
@@ -223,6 +225,11 @@ class ReadingProgressTests(unittest.TestCase):
             rating=4.75,
             language="Chinese",
             file_size="18 MiB",
+            visible="Yes",
+            multiple_labels=("稍后阅读",),
+            taxonomy_labels=("单行本",),
+            downloaded_page_count=1,
+            download_complete=True,
         )
         detail = MangaDetailInterface(
             EhViewerDataSource(self.root / "unused.db", self.root),
@@ -246,6 +253,7 @@ class ReadingProgressTests(unittest.TestCase):
             detail.originalTitleLabel,
             detail.englishTitleLabel,
             detail.metadataLabel,
+            detail.detailMetadataLabel,
             *chips,
         ):
             self.assertEqual(
@@ -265,7 +273,27 @@ class ReadingProgressTests(unittest.TestCase):
         self.assertIn("上传者：download-uploader", detail.metadataLabel.text())
         self.assertIn("评分：4.75", detail.metadataLabel.text())
         self.assertIn("语言：Chinese", detail.metadataLabel.text())
-        self.assertIn("文件大小：18 MiB", detail.metadataLabel.text())
+        for field in (
+            "播放列表：",
+            "归类：",
+            "页数：",
+            "阅读进度：",
+            "已下载：",
+            "文件大小：",
+            "可见性：",
+        ):
+            self.assertNotIn(field, detail.metadataLabel.text())
+        self.assertTrue(detail.detailMetadataLabel.isHidden())
+        self.assertEqual("查看详细", detail.detailMetadataButton.text())
+        QTest.mouseClick(detail.detailMetadataButton, Qt.LeftButton)
+        self.assertFalse(detail.detailMetadataLabel.isHidden())
+        self.assertEqual("收起详细", detail.detailMetadataButton.text())
+        self.assertIn("播放列表：稍后阅读", detail.detailMetadataLabel.text())
+        self.assertIn("归类：单行本", detail.detailMetadataLabel.text())
+        self.assertIn("页数：1", detail.detailMetadataLabel.text())
+        self.assertIn("已下载：1 / 1 页", detail.detailMetadataLabel.text())
+        self.assertIn("文件大小：18 MiB", detail.detailMetadataLabel.text())
+        self.assertIn("可见性：Yes", detail.detailMetadataLabel.text())
         self.assertIn("mangaTagChip", detail.styleSheet())
         detail.cancelLoads()
         detail.close()
@@ -327,6 +355,8 @@ class ReadingProgressTests(unittest.TestCase):
             gallery=gallery,
             title="Full online title",
             language="Chinese",
+            file_size="42 MiB",
+            visible="Yes",
             page_count=20,
             tags=("artist:someone", "language:chinese"),
             comments=(
@@ -357,6 +387,14 @@ class ReadingProgressTests(unittest.TestCase):
             comment_bodies[0].textInteractionFlags() & selectable,
         )
         self.assertIn("语言：Chinese", detail_widget.metadataLabel.text())
+        self.assertNotIn("页数：", detail_widget.metadataLabel.text())
+        self.assertNotIn("文件大小：", detail_widget.metadataLabel.text())
+        self.assertNotIn("可见性：", detail_widget.metadataLabel.text())
+        self.assertTrue(detail_widget.detailMetadataLabel.isHidden())
+        QTest.mouseClick(detail_widget.detailMetadataButton, Qt.LeftButton)
+        self.assertIn("页数：20", detail_widget.detailMetadataLabel.text())
+        self.assertIn("文件大小：42 MiB", detail_widget.detailMetadataLabel.text())
+        self.assertIn("可见性：Yes", detail_widget.detailMetadataLabel.text())
         self.assertEqual([0, 1], [tile.pageIndex for tile in detail_widget._preview_tiles])
         self.assertTrue(
             all(not tile.imageLabel.pixmap().isNull() for tile in detail_widget._preview_tiles)
@@ -413,7 +451,9 @@ class ReadingProgressTests(unittest.TestCase):
         source = EhViewerDataSource(self.root / "unused.db", self.root)
         detail_widget = MangaDetailInterface(source, self.repository)
         requested = []
+        update_requested = []
         detail_widget.localMetadataSyncRequested.connect(requested.append)
+        detail_widget.galleryUpdateRequested.connect(update_requested.append)
         detail_widget.setManga(item)
 
         QTest.mouseClick(detail_widget.syncButton, Qt.LeftButton)
@@ -456,6 +496,9 @@ class ReadingProgressTests(unittest.TestCase):
             "outdated",
             detail_widget.galleryVersionLabel.property("versionState"),
         )
+        self.assertFalse(detail_widget.updateButton.isHidden())
+        QTest.mouseClick(detail_widget.updateButton, Qt.LeftButton)
+        self.assertEqual([resolved], update_requested)
         detail_widget.resize(560, 700)
         detail_widget.show()
         QApplication.processEvents()
@@ -467,6 +510,121 @@ class ReadingProgressTests(unittest.TestCase):
             detail_widget.readButton.geometry().right(),
             detail_widget.operationCard.contentsRect().right(),
         )
+        detail_widget.cancelLoads()
+        detail_widget.close()
+        detail_widget.deleteLater()
+        QApplication.processEvents()
+
+    def test_local_detail_adds_resumed_download_page_to_preview(self):
+        first_page, second_page = self._create_pages(2)
+        item = replace(
+            make_item(self.root, (first_page,)),
+            page_count=2,
+            downloaded_page_count=1,
+            download_complete=False,
+        )
+        source = EhViewerDataSource(self.root / "unused.db", self.root)
+        detail_widget = MangaDetailInterface(source, self.repository)
+        detail_widget.setManga(item)
+
+        updated = detail_widget.addDownloadedPage(
+            item.gid, 1, second_page, 2, 2
+        )
+        detail_widget._refreshLocalPreviewAfterDownload()
+        QThreadPool.globalInstance().waitForDone(3000)
+        QApplication.processEvents()
+
+        self.assertEqual((first_page, second_page), updated.page_paths)
+        self.assertEqual(2, detail_widget.currentItem.downloaded_page_count)
+        self.assertTrue(detail_widget.currentItem.download_complete)
+        self.assertEqual(2, len(detail_widget._preview_tiles))
+        self.assertIn("共 2 页", detail_widget.previewTitle.text())
+        detail_widget.cancelLoads()
+        detail_widget.close()
+        detail_widget.deleteLater()
+        QApplication.processEvents()
+
+    def test_incomplete_sidecar_uses_online_thumbnail_and_patches_one_tile(self):
+        pages = self._create_pages(3)
+        item = replace(
+            make_item(self.root, (pages[0], pages[2])),
+            page_count=3,
+            downloaded_page_count=2,
+            download_complete=False,
+            gallery_token="gallery-token",
+            page_tokens=("page-1", "page-2", "page-3"),
+        )
+        gallery = OnlineGallery(
+            item.gid,
+            item.gallery_token,
+            f"https://e-hentai.org/g/{item.gid}/{item.gallery_token}/",
+            item.display_title,
+            page_count=3,
+        )
+        previews = tuple(
+            OnlineGalleryPreview(
+                index,
+                f"https://e-hentai.org/s/page-{index + 1}/{item.gid}-{index + 1}",
+                f"https://a.hath.network/thumb-{index}.png",
+                page_token=f"page-{index + 1}",
+            )
+            for index in range(3)
+        )
+        online_detail = OnlineGalleryDetail(
+            gallery=gallery,
+            title=item.display_title,
+            page_count=3,
+            previews=previews,
+        )
+        thumbnail_data = QByteArray()
+        thumbnail_buffer = QBuffer(thumbnail_data)
+        self.assertTrue(thumbnail_buffer.open(QIODevice.WriteOnly))
+        thumbnail = QImage(20, 30, QImage.Format_RGB32)
+        thumbnail.fill(QColor("yellow"))
+        self.assertTrue(thumbnail.save(thumbnail_buffer, "PNG"))
+
+        class Provider:
+            settings = SimpleNamespace(site="ehentai")
+
+            def load_gallery_preview_page(self, _gallery, _page_number):
+                from app.domain.online_gallery import OnlineGalleryPreviewPage
+                return OnlineGalleryPreviewPage(gallery, 1, 1, previews)
+
+            def load_preview_thumbnail(self, _preview):
+                return bytes(thumbnail_data)
+
+        detail_widget = MangaDetailInterface(
+            EhViewerDataSource(self.root / "unused.db", self.root),
+            self.repository,
+        )
+        requested = []
+        detail_widget.readRequested.connect(
+            lambda current_item, index: requested.append((current_item, index))
+        )
+        detail_widget.setManga(item)
+        detail_widget.setLocalOnlineContext(
+            online_detail, Provider(), OnlineGalleryMemoryCache()
+        )
+        for _ in range(3):
+            detail_widget.waitForOnlineLoads(3000)
+            QThreadPool.globalInstance().waitForDone(3000)
+            QApplication.processEvents()
+
+        self.assertEqual([0, 1, 2], [tile.pageIndex for tile in detail_widget._preview_tiles])
+        self.assertFalse(detail_widget._preview_tiles[1].imageLabel.pixmap().isNull())
+        tile_ids = tuple(id(tile) for tile in detail_widget._preview_tiles)
+        metadata_before = detail_widget.detailMetadataLabel.text()
+
+        detail_widget.addDownloadedPage(item.gid, 1, pages[1], 3, 3)
+        QThreadPool.globalInstance().waitForDone(3000)
+        QApplication.processEvents()
+
+        self.assertEqual(tile_ids, tuple(id(tile) for tile in detail_widget._preview_tiles))
+        self.assertEqual(metadata_before, detail_widget.detailMetadataLabel.text())
+        self.assertFalse(detail_widget._preview_tiles[1].imageLabel.pixmap().isNull())
+        QTest.mouseClick(detail_widget._preview_tiles[1], Qt.LeftButton)
+        self.assertEqual(1, requested[-1][1])
+        self.assertIn(pages[1], requested[-1][0].page_paths)
         detail_widget.cancelLoads()
         detail_widget.close()
         detail_widget.deleteLater()

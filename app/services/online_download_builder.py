@@ -22,8 +22,8 @@ CATEGORY_NAMES = {
 }
 
 
-def online_detail_metadata(detail):
-    return {
+def online_detail_metadata(detail, download_label=None):
+    metadata = {
         "url": detail.gallery.url,
         "secondary_title": detail.secondary_title,
         "category": detail.category,
@@ -40,6 +40,44 @@ def online_detail_metadata(detail):
         "rating_count": detail.rating_count,
         "tags": list(detail.tags),
     }
+    if download_label is not None:
+        metadata["download_label"] = str(download_label or "")
+    return metadata
+
+
+def build_online_gallery_from_download_record(record):
+    """Rebuild the canonical gallery request needed to resume an early task."""
+    site = str(record.site or "")
+    if site not in SITE_BASE_URLS:
+        raise ValueError("下载记录中的画廊站点无效")
+    token = str(record.token or "").strip()
+    if not token:
+        raise ValueError("下载记录缺少 gallery token，无法从源站恢复")
+
+    metadata = dict(record.metadata or {})
+    raw_tags = metadata.get("tags") or ()
+    if isinstance(raw_tags, str):
+        raw_tags = (raw_tags,)
+    rating = metadata.get("rating")
+    try:
+        rating = float(rating) if rating is not None else None
+    except (TypeError, ValueError):
+        rating = None
+
+    gid = int(record.gid)
+    return OnlineGallery(
+        gid=gid,
+        token=token,
+        url=f"{SITE_BASE_URLS[site]}g/{gid}/{token}/",
+        title=str(record.title or ""),
+        category=str(metadata.get("category") or ""),
+        thumbnail_url=str(metadata.get("cover_url") or ""),
+        posted=str(metadata.get("posted") or ""),
+        page_count=max(0, int(record.page_count)),
+        tags=tuple(str(tag) for tag in raw_tags if str(tag)),
+        uploader=str(metadata.get("uploader") or ""),
+        rating=rating,
+    )
 
 
 def build_online_gallery_from_local(

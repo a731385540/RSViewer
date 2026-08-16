@@ -1,5 +1,6 @@
 from qfluentwidgets import (
     ColorSettingCard,
+    ComboBox,
     CustomColorSettingCard,
     ExpandLayout,
     FolderListSettingCard,
@@ -97,6 +98,58 @@ class TextConfigSettingCard(SettingCard):
         value = str(value or "")
         if self.lineEdit.text() != value:
             self.lineEdit.setText(value)
+
+
+class OnlineDownloadLabelSettingCard(SettingCard):
+    """Select the primary EhViewer label assigned to new online downloads."""
+
+    def __init__(self, parent=None):
+        super().__init__(
+            FIF.TAG,
+            self.tr("默认下载分类"),
+            self.tr("新下载的在线画廊写入此分类；已有画廊保留原分类"),
+            parent,
+        )
+        self.configItem = cfg.onlineEhDownloadLabel
+        self.comboBox = ComboBox(self)
+        self.comboBox.setMinimumWidth(180)
+        self.comboBox.setMaximumWidth(280)
+        self.hBoxLayout.addWidget(self.comboBox)
+        self.hBoxLayout.addSpacing(16)
+        self.comboBox.currentIndexChanged.connect(self._saveCurrentLabel)
+        self.configItem.valueChanged.connect(self._syncCurrentLabel)
+        current = str(cfg.get(self.configItem) or "")
+        self._populate((current,) if current else (), current)
+
+    def setLabels(self, labels):
+        labels = tuple(
+            dict.fromkeys(
+                str(label).strip() for label in labels if str(label).strip()
+            )
+        )
+        current = str(cfg.get(self.configItem) or "")
+        if current and current not in labels:
+            current = ""
+            cfg.set(self.configItem, current)
+        self._populate(labels, current)
+
+    def _populate(self, labels, current):
+        self.comboBox.blockSignals(True)
+        self.comboBox.clear()
+        self.comboBox.addItem(self.tr("未分类"), userData="")
+        for label in labels:
+            self.comboBox.addItem(label, userData=label)
+        index = self.comboBox.findData(current)
+        self.comboBox.setCurrentIndex(max(0, index))
+        self.comboBox.blockSignals(False)
+
+    def _saveCurrentLabel(self, _index):
+        cfg.set(self.configItem, str(self.comboBox.currentData() or ""))
+
+    def _syncCurrentLabel(self, value):
+        index = self.comboBox.findData(str(value or ""))
+        if index >= 0 and index != self.comboBox.currentIndex():
+            self.comboBox.setCurrentIndex(index)
 
 
 class ShortcutCaptureButton(PushButton):
@@ -343,6 +396,9 @@ class SettingInterface(ScrollArea):
             ],
             parent=self.onlineGroup,
         )
+        self.onlineDownloadLabelCard = OnlineDownloadLabelSettingCard(
+            self.onlineGroup
+        )
         self.onlineThumbnailCacheHoursCard = OptionsSettingCard(
             cfg.onlineEhThumbnailCacheHours,
             FIF.HISTORY,
@@ -494,6 +550,7 @@ class SettingInterface(ScrollArea):
         self.onlineGroup.addSettingCard(self.onlineViewModeCard)
         self.onlineGroup.addSettingCard(self.onlineThumbnailConcurrencyCard)
         self.onlineGroup.addSettingCard(self.onlineDownloadConcurrencyCard)
+        self.onlineGroup.addSettingCard(self.onlineDownloadLabelCard)
         self.onlineGroup.addSettingCard(self.onlineThumbnailCacheHoursCard)
         self.personalGroup.addSettingCard(self.themeCard)
         self.personalGroup.addSettingCard(self.themeColorCard)
@@ -538,3 +595,6 @@ class SettingInterface(ScrollArea):
 
     def _updateManualProxyEnabled(self, mode):
         self.onlineManualProxyCard.setEnabled(mode == "manual")
+
+    def setOnlineDownloadLabels(self, labels):
+        self.onlineDownloadLabelCard.setLabels(labels)

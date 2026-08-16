@@ -3,6 +3,53 @@ from pathlib import Path
 from typing import Optional, Sequence, Tuple
 
 
+def merge_downloaded_page_path(page_paths, page_index, page_path):
+    """Replace one numbered page path and keep the local reading order stable."""
+    target_number = int(page_index) + 1
+    resolved_path = Path(page_path)
+    merged = []
+    for path in page_paths:
+        path = Path(path)
+        if path.stem.isdigit() and int(path.stem) == target_number:
+            continue
+        merged.append(path)
+    merged.append(resolved_path)
+
+    def page_key(path):
+        try:
+            return 0, int(path.stem)
+        except ValueError:
+            return 1, path.name.casefold()
+
+    return tuple(sorted(merged, key=page_key))
+
+
+def local_page_path_map(page_paths):
+    """Map zero-based page numbers to paths without collapsing EhViewer gaps."""
+    paths = tuple(Path(path) for path in page_paths)
+    numbered = {}
+    for path in paths:
+        if not path.stem.isdigit() or int(path.stem) <= 0:
+            return {index: path for index, path in enumerate(paths)}
+        page_index = int(path.stem) - 1
+        if page_index in numbered:
+            return {index: path for index, path in enumerate(paths)}
+        numbered[page_index] = path
+    return numbered
+
+
+def local_page_slot_count(item):
+    """Return local preview/reader slots, including sidecar-declared missing pages."""
+    actual_count = len(item.page_paths)
+    sidecar_count = int(item.page_count or 0)
+    has_complete_sidecar = (
+        sidecar_count > 0
+        and len(item.page_tokens) == sidecar_count
+        and all(item.page_tokens)
+    )
+    return max(actual_count, sidecar_count if has_complete_sidecar else 0)
+
+
 @dataclass(frozen=True)
 class MangaItem:
     """来自外部漫画数据源的只读本地漫画条目。"""

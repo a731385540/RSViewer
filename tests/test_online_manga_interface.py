@@ -2,10 +2,11 @@ import base64
 import os
 import time
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QCoreApplication, QEvent
+from PySide6.QtCore import QCoreApplication, QEvent, QPoint
 from PySide6.QtWidgets import QApplication
 from qfluentwidgets import Theme, qconfig, setTheme
 
@@ -116,6 +117,7 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
         self.old_timeout = cfg.get(cfg.onlineEhRequestTimeout)
         self.old_view_mode = cfg.get(cfg.onlineEhViewMode)
         self.old_cover_concurrency = cfg.get(cfg.onlineEhThumbnailConcurrency)
+        self.old_download_label = cfg.get(cfg.onlineEhDownloadLabel)
         self.old_cache_hours = cfg.get(cfg.onlineEhThumbnailCacheHours)
         cfg.set(cfg.onlineEhSite, "ehentai")
         cfg.set(cfg.onlineEhCookie, "token")
@@ -124,6 +126,7 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
         cfg.set(cfg.onlineEhRequestTimeout, 30)
         cfg.set(cfg.onlineEhViewMode, "card")
         cfg.set(cfg.onlineEhThumbnailConcurrency, 6)
+        cfg.set(cfg.onlineEhDownloadLabel, "")
         cfg.set(cfg.onlineEhThumbnailCacheHours, 168)
         _FakeOnlineProvider.instances.clear()
         _FakeOnlineProvider.queries.clear()
@@ -137,6 +140,7 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
         cfg.set(cfg.onlineEhRequestTimeout, self.old_timeout)
         cfg.set(cfg.onlineEhViewMode, self.old_view_mode)
         cfg.set(cfg.onlineEhThumbnailConcurrency, self.old_cover_concurrency)
+        cfg.set(cfg.onlineEhDownloadLabel, self.old_download_label)
         cfg.set(cfg.onlineEhThumbnailCacheHours, self.old_cache_hours)
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
         self.app.processEvents()
@@ -267,6 +271,10 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
         self.assertEqual(cards, tuple(interface._cards))
         self.assertTrue(interface._cards[0].downloadedBadge.isHidden())
         self.assertFalse(interface._cards[1].downloadedBadge.isHidden())
+        interface.setGalleryDownloaded(1)
+        self.assertFalse(interface._cards[0].downloadedBadge.isHidden())
+        interface.setGalleryDownloaded(2, False)
+        self.assertTrue(interface._cards[1].downloadedBadge.isHidden())
         interface.deleteLater()
 
     def test_card_click_opens_internal_detail_with_current_provider(self):
@@ -368,7 +376,52 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
             cfg.onlineEhThumbnailCacheHours,
             settings.onlineThumbnailCacheHoursCard.configItem,
         )
+        settings.setOnlineDownloadLabels(("稍后阅读", "自动下载"))
+        self.assertEqual(0, settings.onlineDownloadLabelCard.comboBox.currentIndex())
+        settings.onlineDownloadLabelCard.comboBox.setCurrentIndex(2)
+        self.assertEqual("自动下载", cfg.get(cfg.onlineEhDownloadLabel))
+        settings.setOnlineDownloadLabels(("稍后阅读",))
+        self.assertEqual("", cfg.get(cfg.onlineEhDownloadLabel))
         settings.deleteLater()
+
+    def test_online_card_context_menu_requests_download_without_opening_detail(self):
+        interface = OnlineMangaInterface(
+            provider_factory=_FakeOnlineProvider,
+            auto_load_on_show=False,
+        )
+        provider = interface._makeProvider("ehentai")
+        interface._site_providers["ehentai"] = provider
+        interface._rendered_site = "ehentai"
+        item = provider.search(
+            type("Query", (), {"keyword": "", "cursor": ""})()
+        ).items[0]
+        interface._setItems((item,))
+        requested = []
+        interface.galleryDownloadRequested.connect(
+            lambda gallery, current_provider, cover: requested.append(
+                (gallery, current_provider, cover)
+            )
+        )
+
+        class ContextEvent:
+            accepted = False
+
+            def globalPos(self):
+                return QPoint(10, 10)
+
+            def accept(self):
+                self.accepted = True
+
+        event = ContextEvent()
+        with patch(
+            "app.view.online_manga_interface.RoundMenu.exec",
+            lambda menu, _position: menu.actions()[0].trigger(),
+        ):
+            interface._cards[0].contextMenuEvent(event)
+
+        self.assertTrue(event.accepted)
+        self.assertEqual([(item, provider, b"")], requested)
+        interface.deleteLater()
 
     def test_cover_pool_concurrency_updates_immediately(self):
         interface = OnlineMangaInterface(

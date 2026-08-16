@@ -4,7 +4,7 @@ from functools import partial
 from typing import List, Optional, Tuple
 
 from PySide6.QtCore import QThreadPool, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
+from PySide6.QtGui import QAction, QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
@@ -19,6 +19,7 @@ from qfluentwidgets import (
     CardWidget,
     FlowLayout,
     PushButton,
+    RoundMenu,
     ScrollArea,
     SegmentedWidget,
     ToolButton,
@@ -202,9 +203,16 @@ class OnlineCoverLabel(QLabel):
 
 
 class _OnlineGalleryCardBase(CardWidget):
-    def __init__(self, item, parent=None, open_callback=None):
+    def __init__(
+        self,
+        item,
+        parent=None,
+        open_callback=None,
+        download_callback=None,
+    ):
         super().__init__(parent)
         self.item = item
+        self.downloadCallback = download_callback
         self.setCursor(Qt.PointingHandCursor)
         if open_callback is not None:
             self.clicked.connect(lambda: open_callback(item))
@@ -228,10 +236,33 @@ class _OnlineGalleryCardBase(CardWidget):
     def setCoverData(self, data: bytes):
         self.coverLabel.setCoverData(data)
 
+    def contextMenuEvent(self, event):
+        menu = RoundMenu(self.tr("在线画廊"), self)
+        download_action = QAction(
+            FIF.DOWNLOAD.icon(),
+            self.tr("下载"),
+            menu,
+        )
+        download_action.setEnabled(self.downloadCallback is not None)
+        if self.downloadCallback is not None:
+            download_action.triggered.connect(
+                lambda _checked=False: self.downloadCallback(self.item)
+            )
+        menu.addAction(download_action)
+        menu.exec(event.globalPos())
+        event.accept()
+
 
 class OnlineGalleryCard(_OnlineGalleryCardBase):
-    def __init__(self, item, parent=None, is_downloaded=False, open_callback=None):
-        super().__init__(item, parent, open_callback)
+    def __init__(
+        self,
+        item,
+        parent=None,
+        is_downloaded=False,
+        open_callback=None,
+        download_callback=None,
+    ):
+        super().__init__(item, parent, open_callback, download_callback)
         self.setObjectName("onlineGalleryCard")
         self.setFixedWidth(254)
         self.setMinimumHeight(408)
@@ -297,8 +328,15 @@ class OnlineGalleryCard(_OnlineGalleryCardBase):
 
 
 class OnlineGalleryExtendedCard(_OnlineGalleryCardBase):
-    def __init__(self, item, parent=None, is_downloaded=False, open_callback=None):
-        super().__init__(item, parent, open_callback)
+    def __init__(
+        self,
+        item,
+        parent=None,
+        is_downloaded=False,
+        open_callback=None,
+        download_callback=None,
+    ):
+        super().__init__(item, parent, open_callback, download_callback)
         self.setObjectName("onlineGalleryExtendedCard")
         self.setMinimumWidth(520)
         self.setMinimumHeight(188)
@@ -384,6 +422,7 @@ class OnlineMangaInterface(QWidget):
     """Online EH/EX browser whose gallery cards open the shared detail page."""
 
     galleryActivated = Signal(object, object, bytes)
+    galleryDownloadRequested = Signal(object, object, bytes)
 
     def __init__(
         self,
@@ -651,6 +690,14 @@ class OnlineMangaInterface(QWidget):
         for card in self._cards:
             card.setDownloaded(card.item.gid in downloaded_gids)
 
+    def setGalleryDownloaded(self, gid, downloaded=True):
+        downloaded_gids = set(self._downloaded_gids)
+        if downloaded:
+            downloaded_gids.add(int(gid))
+        else:
+            downloaded_gids.discard(int(gid))
+        self.setDownloadedGids(downloaded_gids)
+
     def _makeProvider(self, site=None):
         site = site or self._current_site
         settings = EhOnlineSettings.create(
@@ -822,6 +869,7 @@ class OnlineMangaInterface(QWidget):
                 self.scrollWidget,
                 is_downloaded=item.gid in self._downloaded_gids,
                 open_callback=self._openGallery,
+                download_callback=self._downloadGallery,
             )
             for item in items
         ]
@@ -847,6 +895,19 @@ class OnlineMangaInterface(QWidget):
             self._site_providers[site] = provider
         cover_data = self._cover_data.get(self._coverMemoryKey(site, item), b"")
         self.galleryActivated.emit(item, provider, cover_data)
+
+    def _downloadGallery(self, item):
+        site = self._rendered_site or self._current_site
+        provider = self._site_providers.get(site)
+        if provider is None:
+            try:
+                provider = self._makeProvider(site)
+            except EhOnlineError as error:
+                self._showError(str(error))
+                return
+            self._site_providers[site] = provider
+        cover_data = self._cover_data.get(self._coverMemoryKey(site, item), b"")
+        self.galleryDownloadRequested.emit(item, provider, cover_data)
 
     def _startCoverLoads(self, site, provider, items):
         self._cancelCoverLoads()

@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from app.domain.gallery_update import GalleryUpdateRecord
 from app.domain.online_download import GallerySyncRecord, OnlineGalleryDownloadRecord
 from app.domain.online_gallery import OnlineGalleryComment
 
@@ -12,7 +13,7 @@ from app.domain.online_gallery import OnlineGalleryComment
 class UserLibraryRepository:
     """RSViewer 自有数据库；绝不在外部 EhViewer 库中建表。"""
 
-    SCHEMA_VERSION = 9
+    SCHEMA_VERSION = 10
 
     def __init__(self, database_path: Path):
         self.database_path = Path(database_path).resolve()
@@ -297,6 +298,33 @@ class UserLibraryRepository:
                     """
                 )
                 connection.execute("PRAGMA user_version = 9")
+            if version < 10:
+                connection.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS gallery_update_tasks (
+                        source_gid INTEGER PRIMARY KEY,
+                        source_token TEXT NOT NULL,
+                        site TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        folder TEXT NOT NULL,
+                        latest_url TEXT NOT NULL,
+                        target_gid INTEGER NOT NULL DEFAULT 0,
+                        target_token TEXT NOT NULL DEFAULT '',
+                        status INTEGER NOT NULL DEFAULT 0,
+                        state TEXT NOT NULL,
+                        completed_pages INTEGER NOT NULL DEFAULT 0,
+                        page_count INTEGER NOT NULL DEFAULT 0,
+                        metadata_json TEXT NOT NULL DEFAULT '{}',
+                        error TEXT NOT NULL DEFAULT '',
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_gallery_updates_state
+                        ON gallery_update_tasks(state, updated_at DESC);
+                    """
+                )
+                connection.execute("PRAGMA user_version = 10")
 
     def list_labels(self) -> List[Tuple[int, str, int]]:
         self.initialize()
@@ -987,6 +1015,200 @@ class UserLibraryRepository:
                 comments,
             )
 
+    def save_gallery_update(self, record: GalleryUpdateRecord):
+        self.initialize()
+        now = time.time_ns()
+        metadata_json = json.dumps(
+            dict(record.metadata or {}),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO gallery_update_tasks(
+                    source_gid, source_token, site, title, folder, latest_url,
+                    target_gid, target_token, status, state, completed_pages,
+                    page_count, metadata_json, error, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_gid) DO UPDATE SET
+                    source_token = excluded.source_token,
+                    site = excluded.site,
+                    title = excluded.title,
+                    folder = excluded.folder,
+                    latest_url = excluded.latest_url,
+                    target_gid = excluded.target_gid,
+                    target_token = excluded.target_token,
+                    status = excluded.status,
+                    state = excluded.state,
+                    completed_pages = excluded.completed_pages,
+                    page_count = excluded.page_count,
+                    metadata_json = excluded.metadata_json,
+                    error = excluded.error,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    int(record.source_gid),
+                    str(record.source_token),
+                    str(record.site),
+                    str(record.title),
+                    str(record.folder),
+                    str(record.latest_url),
+                    max(0, int(record.target_gid)),
+                    str(record.target_token),
+                    max(0, min(6, int(record.status))),
+                    str(record.state),
+                    max(0, int(record.completed_pages)),
+                    max(0, int(record.page_count)),
+                    metadata_json,
+                    str(record.error or ""),
+                    int(record.created_at or now),
+                    int(record.updated_at or now),
+                ),
+            )
+
+    def gallery_update(self, source_gid: int) -> Optional[GalleryUpdateRecord]:
+        self.initialize()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT source_gid, source_token, site, title, folder, latest_url,
+                       target_gid, target_token, status, state, completed_pages,
+                       page_count, metadata_json, error, created_at, updated_at
+                FROM gallery_update_tasks WHERE source_gid = ?
+                """,
+                (int(source_gid),),
+            ).fetchone()
+        return self._gallery_update_from_row(row) if row is not None else None
+
+    def gallery_updates(self, include_completed=False):
+        self.initialize()
+        query = """
+            SELECT source_gid, source_token, site, title, folder, latest_url,
+                   target_gid, target_token, status, state, completed_pages,
+                   page_count, metadata_json, error, created_at, updated_at
+            FROM gallery_update_tasks
+        """
+        if not include_completed:
+            query += " WHERE state != 'completed'"
+        query += " ORDER BY updated_at DESC"
+        with self._connect() as connection:
+            rows = connection.execute(query).fetchall()
+        return tuple(self._gallery_update_from_row(row) for row in rows)
+
+    def update_gallery_update_state(
+        self,
+        source_gid,
+        state,
+        status=None,
+        completed_pages=None,
+        page_count=None,
+        error="",
+    ):
+        self.initialize()
+        assignments = ["state = ?", "error = ?", "updated_at = ?"]
+        values = [str(state), str(error or ""), time.time_ns()]
+        if status is not None:
+            assignments.append("status = ?")
+            values.append(max(0, min(6, int(status))))
+        if completed_pages is not None:
+            assignments.append("completed_pages = ?")
+            values.append(max(0, int(completed_pages)))
+        if page_count is not None:
+            assignments.append("page_count = ?")
+            values.append(max(0, int(page_count)))
+        values.append(int(source_gid))
+        with self._connect() as connection:
+            connection.execute(
+                f"UPDATE gallery_update_tasks SET {', '.join(assignments)} "
+                "WHERE source_gid = ?",
+                tuple(values),
+            )
+
+    def mark_interrupted_gallery_updates(self):
+        self.initialize()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE gallery_update_tasks
+                SET state = 'paused',
+                    error = CASE
+                        WHEN error = '' THEN '上次更新已中断，可继续执行'
+                        ELSE error
+                    END,
+                    updated_at = ?
+                WHERE state IN ('queued', 'updating')
+                """,
+                (time.time_ns(),),
+            )
+
+    def promote_gallery_gid(self, source_gid, target_gid, progress_page_index=None):
+        """Move user-owned associations after the external GID is promoted."""
+        self.initialize()
+        source_gid = int(source_gid)
+        target_gid = int(target_gid)
+        if source_gid == target_gid:
+            return
+        with self._connect() as connection:
+            for table, extra_columns in (
+                ("manga_multi_labels", "label_id, sort_order, added_at"),
+                ("manga_taxonomy_labels", "label_id"),
+            ):
+                columns = "gid, " + extra_columns
+                connection.execute(
+                    f"INSERT OR IGNORE INTO {table}({columns}) "
+                    f"SELECT ?, {extra_columns} FROM {table} WHERE gid = ?",
+                    (target_gid, source_gid),
+                )
+                connection.execute(
+                    f"DELETE FROM {table} WHERE gid = ?", (source_gid,)
+                )
+            connection.execute(
+                "UPDATE multi_labels SET last_gid = ? WHERE last_gid = ?",
+                (target_gid, source_gid),
+            )
+            for table, value_column, combine in (
+                ("manga_primary_labels", "label, updated_at", "REPLACE"),
+                ("manga_favorites", "created_at", "IGNORE"),
+                ("manga_browsing_history", "viewed_at", "REPLACE"),
+            ):
+                columns = "gid, " + value_column
+                connection.execute(
+                    f"INSERT OR {combine} INTO {table}({columns}) "
+                    f"SELECT ?, {value_column} FROM {table} WHERE gid = ?",
+                    (target_gid, source_gid),
+                )
+                connection.execute(
+                    f"DELETE FROM {table} WHERE gid = ?", (source_gid,)
+                )
+            if progress_page_index is None:
+                row = connection.execute(
+                    "SELECT page_index FROM manga_reading_progress WHERE gid = ?",
+                    (source_gid,),
+                ).fetchone()
+                progress_page_index = int(row[0]) if row is not None else None
+            if progress_page_index is not None:
+                connection.execute(
+                    """
+                    INSERT INTO manga_reading_progress(gid, page_index, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(gid) DO UPDATE SET
+                        page_index = excluded.page_index,
+                        updated_at = excluded.updated_at
+                    """,
+                    (target_gid, max(0, int(progress_page_index)), time.time_ns()),
+                )
+            connection.execute(
+                "DELETE FROM manga_reading_progress WHERE gid = ?", (source_gid,)
+            )
+            connection.execute(
+                "DELETE FROM online_gallery_downloads WHERE gid = ?", (source_gid,)
+            )
+            connection.execute(
+                "DELETE FROM gallery_sync_records WHERE gid = ?", (source_gid,)
+            )
+
     def update_online_download(
         self,
         gid: int,
@@ -1209,6 +1431,33 @@ class UserLibraryRepository:
             error=str(row[9] or ""),
             created_at=int(row[10]),
             updated_at=int(row[11]),
+        )
+
+    @staticmethod
+    def _gallery_update_from_row(row) -> GalleryUpdateRecord:
+        try:
+            metadata = json.loads(str(row[12] or "{}"))
+        except (TypeError, ValueError):
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        return GalleryUpdateRecord(
+            source_gid=int(row[0]),
+            source_token=str(row[1]),
+            site=str(row[2]),
+            title=str(row[3]),
+            folder=str(row[4]),
+            latest_url=str(row[5]),
+            target_gid=int(row[6]),
+            target_token=str(row[7]),
+            status=int(row[8]),
+            state=str(row[9]),
+            completed_pages=int(row[10]),
+            page_count=int(row[11]),
+            metadata=metadata,
+            error=str(row[13] or ""),
+            created_at=int(row[14]),
+            updated_at=int(row[15]),
         )
 
     @contextmanager

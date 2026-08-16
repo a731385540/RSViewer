@@ -61,11 +61,10 @@ class EhViewerDownloadRepository:
         self.database_path = Path(str(database_path)).expanduser()
         self.manga_root = Path(str(manga_root)).expanduser()
 
-    def prepare_download(self, detail):
+    def prepare_download(self, detail, default_label=""):
         self._validate_targets()
         dirname = self._resolve_dirname(detail)
         folder = self._safe_folder(dirname)
-        folder.mkdir(parents=False, exist_ok=True)
         now = int(time.time() * 1000)
         with closing(sqlite3.connect(str(self.database_path), timeout=30)) as connection:
             self._validate_schema(connection)
@@ -73,7 +72,12 @@ class EhViewerDownloadRepository:
                 "SELECT LABEL, TIME, ARCHIVE_URI FROM DOWNLOADS WHERE GID = ?",
                 (int(detail.gallery.gid),),
             ).fetchone()
-            label = str(existing[0] or "") if existing else ""
+            label = (
+                str(existing[0] or "")
+                if existing
+                else self._validated_download_label(connection, default_label)
+            )
+            folder.mkdir(parents=False, exist_ok=True)
             added_time = int(existing[1]) if existing else now
             archive_uri = existing[2] if existing else None
             values = self._download_values(
@@ -117,6 +121,22 @@ class EhViewerDownloadRepository:
             connection.commit()
         return dirname, folder
 
+    @staticmethod
+    def _validated_download_label(connection, label):
+        label = str(label or "").strip()
+        if not label:
+            return ""
+        try:
+            row = connection.execute(
+                "SELECT LABEL FROM DOWNLOAD_LABELS WHERE LABEL = ? LIMIT 1",
+                (label,),
+            ).fetchone()
+        except sqlite3.DatabaseError as error:
+            raise ValueError("EhViewer 数据库缺少可用的分类标签表") from error
+        if row is None:
+            raise ValueError(f"默认下载分类不存在：{label}")
+        return str(row[0] or "")
+
     def sync_metadata(self, detail):
         """Refresh an existing local row without changing its download state."""
         self._validate_targets()
@@ -155,6 +175,139 @@ class EhViewerDownloadRepository:
                 tuple(values[1:]) + (gid,),
             )
             self._upsert_tags(connection, detail, now)
+            connection.commit()
+
+    def validate_update_target(self, source_gid, target_gid, folder):
+        """Reject GID/folder collisions before any update filename is changed."""
+        self._validate_targets()
+        source_gid = int(source_gid)
+        target_gid = int(target_gid)
+        folder = Path(folder).resolve()
+        with closing(sqlite3.connect(str(self.database_path), timeout=30)) as connection:
+            self._validate_schema(connection)
+            source = connection.execute(
+                "SELECT DIRNAME FROM DOWNLOAD_DIRNAME WHERE GID = ?",
+                (source_gid,),
+            ).fetchone()
+            target = connection.execute(
+                "SELECT DIRNAME FROM DOWNLOAD_DIRNAME WHERE GID = ?",
+                (target_gid,),
+            ).fetchone()
+        if source is None and target is None:
+            raise ValueError("EhViewer 数据库中找不到更新源画廊")
+        if source is not None:
+            expected = (self.manga_root / str(source[0])).resolve()
+            if expected != folder:
+                raise ValueError("更新目录与 EhViewer 数据库记录不一致")
+        if target_gid != source_gid and target is not None:
+            target_folder = (self.manga_root / str(target[0])).resolve()
+            if source is not None or target_folder != folder:
+                raise ValueError("最新画廊 GID 已存在于另一个本地目录，拒绝覆盖")
+
+    def promote_update(self, source_gid, detail, folder):
+        """Atomically replace the external old GID row with the latest gallery."""
+        self._validate_targets()
+        source_gid = int(source_gid)
+        target_gid = int(detail.gallery.gid)
+        folder = Path(folder).resolve()
+        now = int(time.time() * 1000)
+        with closing(sqlite3.connect(str(self.database_path), timeout=30)) as connection:
+            self._validate_schema(connection)
+            source = connection.execute(
+                """
+                SELECT STATE, LEGACY, TIME, LABEL, ARCHIVE_URI
+                FROM DOWNLOADS WHERE GID = ?
+                """,
+                (source_gid,),
+            ).fetchone()
+            source_dir = connection.execute(
+                "SELECT DIRNAME FROM DOWNLOAD_DIRNAME WHERE GID = ?",
+                (source_gid,),
+            ).fetchone()
+            target = connection.execute(
+                "SELECT STATE, LEGACY, TIME, LABEL, ARCHIVE_URI FROM DOWNLOADS WHERE GID = ?",
+                (target_gid,),
+            ).fetchone()
+            target_dir = connection.execute(
+                "SELECT DIRNAME FROM DOWNLOAD_DIRNAME WHERE GID = ?",
+                (target_gid,),
+            ).fetchone()
+
+            if source is None:
+                if target is None or target_dir is None:
+                    raise ValueError("更新源记录已丢失且最新 GID 尚未建立")
+                if (self.manga_root / str(target_dir[0])).resolve() != folder:
+                    raise ValueError("最新 GID 指向其他目录，拒绝覆盖")
+                values = list(
+                    self._download_values(
+                        detail,
+                        EH_STATE_FINISHED,
+                        str(target[3] or ""),
+                        int(target[2]),
+                        target[4],
+                    )
+                )
+                values[11] = int(target[1])
+                connection.execute(
+                    """
+                    UPDATE DOWNLOADS SET
+                        TOKEN = ?, TITLE = ?, TITLE_JPN = ?, THUMB = ?,
+                        CATEGORY = ?, POSTED = ?, UPLOADER = ?, RATING = ?,
+                        SIMPLE_LANGUAGE = ?, STATE = ?, LEGACY = ?, TIME = ?,
+                        LABEL = ?, ARCHIVE_URI = ? WHERE GID = ?
+                    """,
+                    tuple(values[1:]) + (target_gid,),
+                )
+                self._upsert_tags(connection, detail, now)
+                connection.commit()
+                return
+
+            if source_dir is None or (self.manga_root / str(source_dir[0])).resolve() != folder:
+                raise ValueError("更新源目录与 EhViewer 数据库记录不一致")
+            if target_gid != source_gid and target is not None:
+                raise ValueError("最新画廊 GID 已存在，拒绝覆盖")
+
+            values = list(
+                self._download_values(
+                    detail,
+                    EH_STATE_FINISHED,
+                    str(source[3] or ""),
+                    int(source[2]),
+                    source[4],
+                )
+            )
+            values[11] = int(source[1])
+            if target_gid == source_gid:
+                connection.execute(
+                    """
+                    UPDATE DOWNLOADS SET
+                        TOKEN = ?, TITLE = ?, TITLE_JPN = ?, THUMB = ?,
+                        CATEGORY = ?, POSTED = ?, UPLOADER = ?, RATING = ?,
+                        SIMPLE_LANGUAGE = ?, STATE = ?, LEGACY = ?, TIME = ?,
+                        LABEL = ?, ARCHIVE_URI = ? WHERE GID = ?
+                    """,
+                    tuple(values[1:]) + (source_gid,),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO DOWNLOADS(
+                        GID, TOKEN, TITLE, TITLE_JPN, THUMB, CATEGORY,
+                        POSTED, UPLOADER, RATING, SIMPLE_LANGUAGE, STATE,
+                        LEGACY, TIME, LABEL, ARCHIVE_URI
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    tuple(values),
+                )
+                connection.execute(
+                    "INSERT INTO DOWNLOAD_DIRNAME(GID, DIRNAME) VALUES (?, ?)",
+                    (target_gid, str(source_dir[0])),
+                )
+            self._upsert_tags(connection, detail, now)
+            if target_gid != source_gid:
+                connection.execute("DELETE FROM Gallery_Tags WHERE GID = ?", (source_gid,))
+                connection.execute("DELETE FROM DOWNLOAD_DIRNAME WHERE GID = ?", (source_gid,))
+                connection.execute("DELETE FROM DOWNLOADS WHERE GID = ?", (source_gid,))
             connection.commit()
 
     def mark_state(self, gid, state):

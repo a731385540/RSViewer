@@ -1,6 +1,7 @@
 import math
 import inspect
 import time
+from threading import Lock
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 from PySide6.QtGui import QImage, QImageReader
@@ -23,6 +24,10 @@ from app.services.online_download_builder import online_detail_metadata
 class OnlineGalleryDownloadSignals(QObject):
     stageChanged = Signal(str)
     progressChanged = Signal(int, int)
+    speedChanged = Signal(float)
+    galleryRegistered = Signal(int, str)
+    sidecarReady = Signal(int, str)
+    pageSaved = Signal(int, int, str, int, int)
     completed = Signal(int, str)
     failed = Signal(int, str)
     paused = Signal(int)
@@ -44,6 +49,7 @@ class OnlineGalleryDownloadWorker(QRunnable):
         ehviewer_repository,
         user_repository,
         site,
+        target_label="",
         retry_count=3,
     ):
         super().__init__()
@@ -54,8 +60,12 @@ class OnlineGalleryDownloadWorker(QRunnable):
         self.ehviewer_repository = ehviewer_repository
         self.user_repository = user_repository
         self.site = str(site)
+        self.target_label = str(target_label or "").strip()
         self.retry_count = max(1, int(retry_count))
         self.cancelled = False
+        self._smoothed_speed = 0.0
+        self._available_page_indexes = set()
+        self._available_page_lock = Lock()
         self.signals = OnlineGalleryDownloadSignals()
 
     def cancel(self):
@@ -64,15 +74,25 @@ class OnlineGalleryDownloadWorker(QRunnable):
         if cancel_requests is not None:
             cancel_requests()
 
+    def markPageAvailable(self, page_index):
+        with self._available_page_lock:
+            self._available_page_indexes.add(int(page_index))
+
+    def _pageWasMadeAvailable(self, page_index):
+        with self._available_page_lock:
+            return int(page_index) in self._available_page_indexes
+
     def run(self):
         gid = int(self.detail.gallery.gid)
         folder = None
         completed_pages = 0
-        record_saved = False
         try:
             self._check_cancelled()
             self.signals.stageChanged.emit("正在保存画廊信息与评论…")
-            dirname, folder = self.ehviewer_repository.prepare_download(self.detail)
+            dirname, folder = self.ehviewer_repository.prepare_download(
+                self.detail,
+                self.target_label,
+            )
             completed_indexes = self._existing_page_indexes(folder)
             completed_pages = len(completed_indexes)
             record = OnlineGalleryDownloadRecord(
@@ -84,18 +104,21 @@ class OnlineGalleryDownloadWorker(QRunnable):
                 page_count=int(self.detail.page_count),
                 completed_pages=completed_pages,
                 state=ONLINE_DOWNLOAD_DOWNLOADING,
-                metadata=online_detail_metadata(self.detail),
+                metadata=online_detail_metadata(
+                    self.detail,
+                    self.target_label,
+                ),
             )
             self.user_repository.save_online_gallery_download(
                 record,
                 self.detail.comments,
             )
-            record_saved = True
             self.signals.progressChanged.emit(
                 completed_pages, int(self.detail.page_count)
             )
 
             self._save_thumbnail(folder)
+            self.signals.galleryRegistered.emit(gid, str(folder))
             self.signals.stageChanged.emit("正在获取全部页面 ID…")
             previews = self._load_all_previews()
             page_tokens = {
@@ -104,23 +127,34 @@ class OnlineGalleryDownloadWorker(QRunnable):
             self.ehviewer_repository.write_spider_info(
                 folder, self.detail, page_tokens
             )
+            self.signals.sidecarReady.emit(gid, str(folder))
 
             total = int(self.detail.page_count)
             for index in range(total):
                 self._check_cancelled()
-                if index in completed_indexes:
+                if index in completed_indexes or self._pageWasMadeAvailable(index):
+                    completed_indexes.add(index)
                     continue
                 self.signals.stageChanged.emit(
                     f"正在下载第 {index + 1} / {total} 页…"
                 )
+                started_at = time.monotonic()
                 data = self._retry(
                     lambda preview=previews[index], current=index: self._download_page(
                         preview, current
                     ),
                     f"第 {index + 1} 页",
                 )
+                elapsed = max(0.001, time.monotonic() - started_at)
+                current_speed = len(data) / elapsed
+                self._smoothed_speed = (
+                    current_speed
+                    if self._smoothed_speed <= 0
+                    else self._smoothed_speed * 0.65 + current_speed * 0.35
+                )
+                self.signals.speedChanged.emit(self._smoothed_speed)
                 extension = _image_extension(data)
-                self.ehviewer_repository.write_page(
+                page_path = self.ehviewer_repository.write_page(
                     folder, index, extension, data
                 )
                 completed_indexes.add(index)
@@ -129,6 +163,13 @@ class OnlineGalleryDownloadWorker(QRunnable):
                     gid,
                     completed_pages,
                     ONLINE_DOWNLOAD_DOWNLOADING,
+                )
+                self.signals.pageSaved.emit(
+                    gid,
+                    index,
+                    str(page_path),
+                    completed_pages,
+                    total,
                 )
                 self.signals.progressChanged.emit(completed_pages, total)
 
@@ -143,20 +184,22 @@ class OnlineGalleryDownloadWorker(QRunnable):
             self.signals.completed.emit(gid, str(folder))
         except _DownloadCancelled:
             self.ehviewer_repository.mark_state(gid, EH_STATE_FAILED)
-            if record_saved:
+            record = self.user_repository.online_gallery_download(gid)
+            if record is not None:
                 self.user_repository.update_online_download(
                     gid,
-                    completed_pages,
+                    max(completed_pages, int(record.completed_pages)),
                     ONLINE_DOWNLOAD_PAUSED,
                 )
             self.signals.paused.emit(gid)
         except Exception as error:
             message = str(error) or error.__class__.__name__
             self.ehviewer_repository.mark_state(gid, EH_STATE_FAILED)
-            if record_saved:
+            record = self.user_repository.online_gallery_download(gid)
+            if record is not None:
                 self.user_repository.update_online_download(
                     gid,
-                    completed_pages,
+                    max(completed_pages, int(record.completed_pages)),
                     ONLINE_DOWNLOAD_FAILED,
                     message,
                 )
@@ -291,3 +334,109 @@ def _image_extension(data):
     if len(data) >= 12 and data[4:12] in {b"ftypavif", b"ftypavis"}:
         return ".avif"
     return ".jpg"
+
+
+class LocalGalleryPageDownloadSignals(QObject):
+    speedChanged = Signal(float)
+    saved = Signal(int, int, str, int, int)
+    failed = Signal(int, int, str)
+
+
+class LocalGalleryPageDownloadWorker(QRunnable):
+    """Download exactly one missing page into an existing EhViewer gallery."""
+
+    def __init__(
+        self,
+        provider,
+        detail,
+        page_index,
+        folder,
+        gallery_cache,
+        ehviewer_repository,
+        site,
+    ):
+        super().__init__()
+        self.provider = provider
+        self.detail = detail
+        self.page_index = int(page_index)
+        self.folder = folder
+        self.gallery_cache = gallery_cache
+        self.ehviewer_repository = ehviewer_repository
+        self.site = str(site)
+        self.cancelled = False
+        self.signals = LocalGalleryPageDownloadSignals()
+
+    def cancel(self):
+        self.cancelled = True
+        cancel_requests = getattr(self.provider, "cancel_pending_requests", None)
+        if cancel_requests is not None:
+            cancel_requests()
+
+    def run(self):
+        gid = int(self.detail.gallery.gid)
+        try:
+            if self.cancelled:
+                return
+            preview = next(
+                (
+                    current
+                    for current in self.detail.previews
+                    if int(current.page_index) == self.page_index
+                    and current.page_token
+                ),
+                None,
+            )
+            if preview is None:
+                page_number = self.page_index // 20 + 1
+                preview_page = self.gallery_cache.get_preview_page(
+                    self.site, self.detail.gallery, page_number
+                )
+                if preview_page is None:
+                    preview_page = self.provider.load_gallery_preview_page(
+                        self.detail.gallery, page_number
+                    )
+                    self.gallery_cache.put_preview_page(self.site, preview_page)
+                preview = next(
+                    current
+                    for current in preview_page.items
+                    if int(current.page_index) == self.page_index
+                )
+            started_at = time.monotonic()
+            data = self.provider.load_gallery_page_image(
+                self.detail.gallery, preview
+            )
+            elapsed = max(0.001, time.monotonic() - started_at)
+            if self.cancelled:
+                return
+            if not data or QImage.fromData(data).isNull():
+                raise ValueError(f"第 {self.page_index + 1} 页不是有效图片")
+            self.signals.speedChanged.emit(len(data) / elapsed)
+            self.gallery_cache.put_page_image(
+                self.site, self.detail.gallery, self.page_index, data
+            )
+            page_path = self.ehviewer_repository.write_page(
+                self.folder,
+                self.page_index,
+                _image_extension(data),
+                data,
+            )
+            total = int(self.detail.page_count)
+            completed = sum(
+                self.ehviewer_repository.find_page_file(self.folder, index)
+                is not None
+                for index in range(total)
+            )
+            self.signals.saved.emit(
+                gid,
+                self.page_index,
+                str(page_path),
+                completed,
+                total,
+            )
+        except Exception as error:
+            if not self.cancelled:
+                self.signals.failed.emit(
+                    gid,
+                    self.page_index,
+                    str(error) or error.__class__.__name__,
+                )

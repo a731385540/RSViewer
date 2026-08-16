@@ -199,6 +199,38 @@ class LocalLibraryControlsTests(unittest.TestCase):
             [1], [item.gid for item in self.interface._filtered_items]
         )
 
+    def test_regular_refresh_preserves_playlist_mode_show_all_and_page(self):
+        playlist_id = self.repository.create_playlist("阅读中")
+        self.repository.assign_label_to_mangas((1, 2), playlist_id)
+        self.source.items = list(self.items)
+        self.interface._refreshTagData()
+        self.interface._setTagMode(self.interface.TAG_PLAYLIST)
+        self.interface.playlistTree.setCurrentItem(
+            self.interface._playlist_items[playlist_id]
+        )
+        self.interface._page_size = 1
+        self.interface.applyFilters(reset_page=True)
+        self.interface.setPage(2)
+        self.interface._selected_gids = {1}
+
+        self.interface.reload()
+        QThreadPool.globalInstance().waitForDone(3000)
+        QApplication.processEvents()
+
+        self.assertEqual(self.interface.TAG_PLAYLIST, self.interface._tag_mode)
+        self.assertEqual(playlist_id, self.interface._playlist_filter_id)
+        self.assertEqual({1, 2}, {item.gid for item in self.interface._filtered_items})
+        self.assertEqual(2, self.interface._page)
+        self.assertEqual({1}, self.interface._selected_gids)
+
+        self.interface._showAllManga()
+        self.interface.reload()
+        QThreadPool.globalInstance().waitForDone(3000)
+        QApplication.processEvents()
+
+        self.assertTrue(self.interface._show_all_manga)
+        self.assertEqual({1, 2, 3}, {item.gid for item in self.interface._filtered_items})
+
     def test_category_defaults_to_unclassified_and_remembers_selection(self):
         self.assertEqual("未分类", self.interface.primaryLabelTree.currentItem().text(0))
         self.assertNotIn(

@@ -127,6 +127,73 @@ class MangaReaderInterfaceTests(unittest.TestCase):
         self.assertEqual("第 2 / 4 页", self.reader.pageIndicatorLabel.text())
         self.assertIsNotNone(self.reader._pixmap_item)
 
+    def test_reader_accepts_page_from_resumed_download(self):
+        self.reader.setManga(self.item, len(self.item.page_paths) - 1)
+        self._wait_for_load()
+        new_page = self.item.folder / "00000005.png"
+        image = QImage(96, 140, QImage.Format_RGB32)
+        image.fill(QColor("green"))
+        self.assertTrue(image.save(str(new_page)))
+
+        updated = self.reader.addDownloadedPage(
+            self.item.gid,
+            4,
+            new_page,
+            5,
+            5,
+        )
+
+        self.assertEqual(5, len(updated.page_paths))
+        self.assertEqual(5, self.reader.pageSpinBox.maximum())
+        self.assertTrue(self.reader.nextButton.isEnabled())
+        self.reader.nextPage()
+        self.assertEqual(5, self.reader.currentPage)
+
+    def test_incomplete_sidecar_keeps_missing_page_slot_and_requests_it(self):
+        incomplete = replace(
+            self.item,
+            page_paths=(self.item.page_paths[0], self.item.page_paths[2]),
+            page_count=3,
+            downloaded_page_count=2,
+            download_complete=False,
+            page_tokens=("token-1", "token-2", "token-3"),
+        )
+        requested = []
+        self.reader.localPageDownloadRequested.connect(
+            lambda item, index: requested.append((item.gid, index))
+        )
+
+        self.reader.setManga(incomplete, 1)
+        QApplication.processEvents()
+
+        self.assertEqual(3, self.reader.pageSpinBox.maximum())
+        self.assertEqual(2, self.reader.currentPage)
+        self.assertEqual([(incomplete.gid, 1)], requested)
+
+        updated = self.reader.addDownloadedPage(
+            incomplete.gid,
+            1,
+            self.item.page_paths[1],
+            3,
+            3,
+        )
+        self._wait_for_load()
+
+        self.assertEqual(2, self.reader.currentPage)
+        self.assertEqual(3, len(updated.page_paths))
+        self.assertIsNotNone(self.reader._pixmap_item)
+
+    def test_reader_download_status_shows_progress_and_speed(self):
+        self.reader.setManga(self.item)
+        self.reader.setDownloadState(
+            self.item.gid, "downloading", 2, 4, 2.5 * 1024 * 1024
+        )
+
+        self.assertFalse(self.reader.downloadStatusWidget.isHidden())
+        self.assertEqual(50, self.reader.downloadStatusProgress.value())
+        self.assertIn("2 / 4", self.reader.downloadStatusLabel.text())
+        self.assertIn("2.5 MiB/s", self.reader.downloadStatusLabel.text())
+
     def test_online_reader_reuses_controls_and_preloads_through_memory_cache(self):
         image_data = base64.b64decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="

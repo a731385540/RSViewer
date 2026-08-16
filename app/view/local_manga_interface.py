@@ -1324,6 +1324,7 @@ class LocalMangaInterface(QWidget):
     def setSource(self, source: EhViewerDataSource):
         self.source = source
         if not self._collection_kind:
+            self._cover_cache.clear()
             self.reload()
 
     def setCollectionItems(self, items, ordered_gids):
@@ -1373,9 +1374,9 @@ class LocalMangaInterface(QWidget):
             int(reveal_gid) if reveal_gid is not None else None
         )
         self._clearSimilarSearch(clear_query=True)
-        self._selected_gids.clear()
+        if reveal_gid is not None:
+            self._selected_gids.clear()
         self._updateSelectionState()
-        self._cover_cache.clear()
         self.resultLabel.setText(self.tr("正在读取本地漫画…"))
         worker = MangaLoadWorker(self.source, self.userRepository)
         worker.signals.loaded.connect(
@@ -1398,6 +1399,13 @@ class LocalMangaInterface(QWidget):
             taxonomy_labels = []
         else:
             self._all_items, primary_labels, playlists, taxonomy_labels = payload
+        tag_mode = self._tag_mode
+        show_all_manga = self._show_all_manga
+        valid_gids = {item.gid for item in self._all_items}
+        self._selected_gids.intersection_update(valid_gids)
+        for gid in tuple(self._cover_cache):
+            if gid not in valid_gids:
+                self._cover_cache.pop(gid, None)
         self._primary_labels = list(
             dict.fromkeys(
                 [
@@ -1411,7 +1419,7 @@ class LocalMangaInterface(QWidget):
         self._populatePrimaryLabels(self._primary_labels)
         self._populatePlaylists(self._playlists)
         self._populateTaxonomy(self._taxonomy_labels)
-        self._setTagMode(self.TAG_CATEGORY, reset_page=False)
+        self._setTagMode(tag_mode, reset_page=False)
         if reveal_gid is not None and any(
             item.gid == reveal_gid for item in self._all_items
         ):
@@ -1420,7 +1428,9 @@ class LocalMangaInterface(QWidget):
             self.searchEdit.clear()
             self.searchEdit.blockSignals(False)
             self._show_all_manga = True
-        self.applyFilters(reset_page=True)
+        else:
+            self._show_all_manga = show_all_manga
+        self.applyFilters(reset_page=reveal_gid is not None)
         if reveal_gid is not None:
             for index, item in enumerate(self._filtered_items):
                 if item.gid == reveal_gid:

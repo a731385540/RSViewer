@@ -33,11 +33,17 @@ from qfluentwidgets import (
     SubtitleLabel,
     ToolButton,
     TransparentToolButton,
+    ProgressBar,
 )
 from qfluentwidgets import FluentIcon as FIF
 
 from app.common.config import cfg
-from app.domain.manga import MangaItem
+from app.domain.manga import (
+    MangaItem,
+    local_page_path_map,
+    local_page_slot_count,
+    merge_downloaded_page_path,
+)
 from app.domain.online_gallery import OnlineGalleryDetail
 from app.view.reader_setting_dialog import ReaderSettingDialog
 from app.workers.eh_online_worker import OnlineReaderLoadWorker
@@ -65,12 +71,26 @@ def _has_gif_signature(path) -> bool:
         return False
 
 
+def _format_download_speed(bytes_per_second):
+    speed = max(0.0, float(bytes_per_second or 0))
+    if speed <= 0:
+        return ""
+    units = ("B/s", "KiB/s", "MiB/s", "GiB/s")
+    unit = units[0]
+    for unit in units:
+        if speed < 1024 or unit == units[-1]:
+            break
+        speed /= 1024
+    precision = 0 if unit == "B/s" else 1
+    return f"{speed:.{precision}f} {unit}"
+
+
 class ReaderLoadWorker(QRunnable):
     """Decode the current page first, then preload nearby pages."""
 
-    def __init__(self, page_paths, indexes):
+    def __init__(self, page_paths_by_index, indexes):
         super().__init__()
-        self.page_paths = tuple(page_paths)
+        self.page_paths_by_index = dict(page_paths_by_index)
         self.indexes = tuple(indexes)
         self.cancelled = False
         self.signals = ReaderLoadSignals()
@@ -79,7 +99,7 @@ class ReaderLoadWorker(QRunnable):
         for index in self.indexes:
             if self.cancelled:
                 return
-            path = self.page_paths[index]
+            path = self.page_paths_by_index[index]
             is_gif = _has_gif_signature(path)
             reader = QImageReader(str(path))
             if is_gif:
@@ -107,6 +127,7 @@ class MangaReaderInterface(QWidget):
     progressChanged = Signal(int, int, int)
     nextMangaRequested = Signal()
     previousMangaRequested = Signal()
+    localPageDownloadRequested = Signal(object, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -116,6 +137,7 @@ class MangaReaderInterface(QWidget):
         self._online_detail: Optional[OnlineGalleryDetail] = None
         self._online_provider = None
         self._online_cache = None
+        self._pending_local_page_index = None
         self._page_index = 0
         self._image_cache = OrderedDict()
         self._load_worker: Optional[ReaderLoadWorker] = None
@@ -166,6 +188,19 @@ class MangaReaderInterface(QWidget):
         toolbar.setSpacing(8)
         toolbar.addWidget(self.backButton)
         toolbar.addWidget(self.titleLabel, 1)
+        self.downloadStatusWidget = QWidget(self.toolbarWidget)
+        download_status_layout = QVBoxLayout(self.downloadStatusWidget)
+        download_status_layout.setContentsMargins(0, 0, 0, 0)
+        download_status_layout.setSpacing(2)
+        self.downloadStatusLabel = CaptionLabel("", self.downloadStatusWidget)
+        self.downloadStatusLabel.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.downloadStatusProgress = ProgressBar(self.downloadStatusWidget)
+        self.downloadStatusProgress.setRange(0, 100)
+        self.downloadStatusProgress.setFixedWidth(150)
+        download_status_layout.addWidget(self.downloadStatusLabel)
+        download_status_layout.addWidget(self.downloadStatusProgress)
+        self.downloadStatusWidget.hide()
+        toolbar.addWidget(self.downloadStatusWidget)
         toolbar.addWidget(self.zoomOutButton)
         toolbar.addWidget(self.actualSizeButton)
         toolbar.addWidget(self.fitButton)
@@ -289,9 +324,11 @@ class MangaReaderInterface(QWidget):
         self._online_detail = None
         self._online_provider = None
         self._online_cache = None
+        self._pending_local_page_index = None
         self._image_cache.clear()
+        self.downloadStatusWidget.hide()
         self.titleLabel.setText(item.display_title)
-        page_count = len(item.page_paths)
+        page_count = local_page_slot_count(item)
         self.pageSpinBox.blockSignals(True)
         self.pageSpinBox.setRange(1, max(1, page_count))
         self.pageSpinBox.setValue(1 if not page_count else page_index + 1)
@@ -315,7 +352,9 @@ class MangaReaderInterface(QWidget):
         self._online_detail = detail
         self._online_provider = provider
         self._online_cache = cache
+        self._pending_local_page_index = None
         self._image_cache.clear()
+        self.downloadStatusWidget.hide()
         self.titleLabel.setText(detail.title)
         page_count = int(detail.page_count)
         self.pageSpinBox.blockSignals(True)
@@ -332,6 +371,48 @@ class MangaReaderInterface(QWidget):
             self._updateAutoPageTimer()
             return
         self.showPage(min(max(0, int(page_index)), page_count - 1))
+
+    def addDownloadedPage(
+        self,
+        gid: int,
+        page_index: int,
+        page_path,
+        completed_pages: int,
+        page_count: int,
+    ):
+        if (
+            self._item is None
+            or self._online_detail is not None
+            or int(self._item.gid) != int(gid)
+        ):
+            return None
+        old_paths = tuple(self._item.page_paths)
+        paths = merge_downloaded_page_path(old_paths, page_index, page_path)
+        total = max(int(page_count or 0), self._item.page_count)
+        completed = max(0, int(completed_pages or 0))
+        self._item = replace(
+            self._item,
+            page_paths=paths,
+            page_count=total,
+            downloaded_page_count=completed,
+            download_complete=bool(total and completed >= total),
+        )
+        slot_count = local_page_slot_count(self._item)
+        current_index = min(self._page_index, max(0, slot_count - 1))
+        self._image_cache.pop(int(page_index), None)
+        if int(page_index) == current_index:
+            self._pending_local_page_index = None
+            self._stopMovie()
+            self._preloadAround(current_index, include_current=True)
+        self.pageSpinBox.blockSignals(True)
+        self.pageSpinBox.setRange(1, max(1, slot_count))
+        self.pageSpinBox.setValue(current_index + 1 if slot_count else 1)
+        self.pageSpinBox.blockSignals(False)
+        self._page_index = current_index
+        self._updatePageIndicator(slot_count)
+        self._updateControls()
+        self._updateAutoPageTimer()
+        return self._item
 
     def showPage(self, index: int):
         page_count = self._pageCount()
@@ -362,6 +443,51 @@ class MangaReaderInterface(QWidget):
         self.scene.addText(self.tr("正在读取第 {} 页…").format(index + 1))
         self._pixmap_item = None
         self._preloadAround(index, include_current=True)
+
+    def setDownloadState(
+        self, gid: int, state: str, completed=0, total=0, speed=0.0, message=""
+    ):
+        current_gid = None
+        if self._item is not None:
+            current_gid = int(self._item.gid)
+        elif self._online_detail is not None:
+            current_gid = int(self._online_detail.gallery.gid)
+        if current_gid != int(gid):
+            return
+        state = str(state or "")
+        visible = state in {"queued", "downloading", "paused", "failed"}
+        self.downloadStatusWidget.setVisible(visible)
+        if not visible:
+            return
+        completed = max(0, int(completed or 0))
+        total = max(0, int(total or 0))
+        percent = round(completed * 100 / total) if total else 0
+        self.downloadStatusProgress.setValue(max(0, min(100, percent)))
+        speed_text = _format_download_speed(speed)
+        state_text = {
+            "queued": self.tr("等待下载"),
+            "downloading": self.tr("正在下载"),
+            "paused": self.tr("已暂停"),
+            "failed": self.tr("下载失败"),
+        }.get(state, state)
+        progress_text = f"{completed} / {total}" if total else str(completed)
+        parts = [state_text, progress_text]
+        if speed_text:
+            parts.append(speed_text)
+        self.downloadStatusLabel.setText("  ·  ".join(parts))
+        self.downloadStatusLabel.setToolTip(str(message or ""))
+
+    def setLocalPageDownloadFailed(self, gid: int, page_index: int, message: str):
+        if self._item is None or int(self._item.gid) != int(gid):
+            return
+        if self._pending_local_page_index == int(page_index):
+            self._pending_local_page_index = None
+        if self._page_index == int(page_index):
+            self.scene.clear()
+            self.scene.addText(
+                self.tr("第 {} 页下载失败：{}").format(page_index + 1, message)
+            )
+            self._pixmap_item = None
 
     def nextPage(self):
         if (
@@ -526,7 +652,18 @@ class MangaReaderInterface(QWidget):
                 )
             )
         else:
-            worker = ReaderLoadWorker(self._item.page_paths, indexes)
+            paths_by_index = local_page_path_map(self._item.page_paths)
+            if index not in paths_by_index:
+                if self._pending_local_page_index != index:
+                    self._pending_local_page_index = index
+                    self.localPageDownloadRequested.emit(self._item, index)
+                indexes = [candidate for candidate in indexes if candidate in paths_by_index]
+            else:
+                self._pending_local_page_index = None
+            indexes = [candidate for candidate in indexes if candidate in paths_by_index]
+            if not indexes:
+                return
+            worker = ReaderLoadWorker(paths_by_index, indexes)
         worker.signals.imageReady.connect(
             lambda page_index, image: self._onImageReady(worker, page_index, image)
         )
@@ -813,7 +950,7 @@ class MangaReaderInterface(QWidget):
     def _pageCount(self):
         if self._online_detail is not None:
             return max(0, int(self._online_detail.page_count))
-        return len(self._item.page_paths) if self._item is not None else 0
+        return local_page_slot_count(self._item) if self._item is not None else 0
 
     def eventFilter(self, watched, event):
         if self._fullscreen and event.type() == QEvent.MouseMove:

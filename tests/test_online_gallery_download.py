@@ -2,6 +2,7 @@ import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,6 +12,9 @@ from PySide6.QtGui import QColor, QImage
 from app.domain.online_download import (
     ONLINE_DOWNLOAD_COMPLETED,
     ONLINE_DOWNLOAD_FAILED,
+    ONLINE_DOWNLOAD_PAUSED,
+    ONLINE_DOWNLOAD_QUEUED,
+    OnlineGalleryDownloadRecord,
 )
 from app.domain.online_gallery import (
     OnlineGallery,
@@ -20,10 +24,16 @@ from app.domain.online_gallery import (
 )
 from app.repositories.ehviewer_download_repository import EhViewerDownloadRepository
 from app.repositories.user_library_repository import UserLibraryRepository
-from app.services.online_download_builder import build_online_detail_from_local
+from app.services.online_download_builder import (
+    build_online_detail_from_local,
+    build_online_gallery_from_download_record,
+)
 from app.services.online_gallery_memory_cache import OnlineGalleryMemoryCache
 from app.sources.ehviewer_source import EhViewerDataSource
-from app.workers.online_gallery_download_worker import OnlineGalleryDownloadWorker
+from app.workers.online_gallery_download_worker import (
+    LocalGalleryPageDownloadWorker,
+    OnlineGalleryDownloadWorker,
+)
 from app.workers.eh_online_worker import LocalGallerySyncWorker
 
 
@@ -74,6 +84,17 @@ class FakeSyncProvider:
 
     def load_gallery_detail(self, _gallery):
         return self.detail
+
+
+class FailingDownloadRepository:
+    def __init__(self):
+        self.states = []
+
+    def prepare_download(self, _detail, _default_label=""):
+        raise OSError("cannot create local gallery")
+
+    def mark_state(self, gid, state):
+        self.states.append((gid, state))
 
 
 class OnlineGalleryDownloadTests(unittest.TestCase):
@@ -166,6 +187,13 @@ class OnlineGalleryDownloadTests(unittest.TestCase):
                 CREATE TABLE DOWNLOAD_DIRNAME (
                     GID INTEGER PRIMARY KEY NOT NULL, DIRNAME TEXT
                 );
+                CREATE TABLE DOWNLOAD_LABELS (
+                    _id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    LABEL TEXT NOT NULL,
+                    TIME INTEGER NOT NULL
+                );
+                INSERT INTO DOWNLOAD_LABELS(LABEL, TIME)
+                VALUES ('自动下载', 1), ('其他分类', 2);
                 CREATE TABLE Gallery_Tags (
                     GID INTEGER PRIMARY KEY NOT NULL, {tag_columns},
                     CREATE_TIME INTEGER, UPDATE_TIME INTEGER
@@ -173,6 +201,57 @@ class OnlineGalleryDownloadTests(unittest.TestCase):
                 PRAGMA user_version = 7;
                 """
             )
+
+    def test_new_download_uses_default_label_and_existing_row_keeps_its_label(self):
+        self.external_repository.prepare_download(self.detail, "自动下载")
+        with closing(sqlite3.connect(str(self.external_db))) as connection:
+            label = connection.execute(
+                "SELECT LABEL FROM DOWNLOADS WHERE GID = ?",
+                (self.detail.gallery.gid,),
+            ).fetchone()[0]
+        self.assertEqual("自动下载", label)
+
+        self.external_repository.prepare_download(self.detail, "其他分类")
+        with closing(sqlite3.connect(str(self.external_db))) as connection:
+            label = connection.execute(
+                "SELECT LABEL FROM DOWNLOADS WHERE GID = ?",
+                (self.detail.gallery.gid,),
+            ).fetchone()[0]
+        self.assertEqual("自动下载", label)
+
+        with self.assertRaisesRegex(ValueError, "默认下载分类不存在"):
+            replacement_detail = replace(
+                self.detail,
+                gallery=replace(self.detail.gallery, gid=999999),
+            )
+            self.external_repository.prepare_download(replacement_detail, "不存在")
+
+    def test_single_page_worker_only_downloads_requested_missing_page(self):
+        _dirname, folder = self.external_repository.prepare_download(self.detail)
+        provider = FakeDownloadProvider(self.pages)
+        saved = []
+        speeds = []
+        worker = LocalGalleryPageDownloadWorker(
+            provider,
+            self.detail,
+            1,
+            folder,
+            self.cache,
+            self.external_repository,
+            provider.settings.site,
+        )
+        worker.signals.saved.connect(lambda *values: saved.append(values))
+        worker.signals.speedChanged.connect(speeds.append)
+
+        worker.run()
+
+        self.assertEqual([1], provider.page_calls)
+        self.assertEqual(1, len(saved))
+        self.assertEqual((self.detail.gallery.gid, 1), saved[0][:2])
+        self.assertEqual(1, saved[0][3])
+        self.assertEqual(3, saved[0][4])
+        self.assertTrue(Path(saved[0][2]).is_file())
+        self.assertTrue(speeds and speeds[0] > 0)
 
     def _worker(self, provider):
         return OnlineGalleryDownloadWorker(
@@ -230,17 +309,34 @@ class OnlineGalleryDownloadTests(unittest.TestCase):
 
         second_provider = FakeDownloadProvider(self.pages)
         completed = []
+        saved_pages = []
+        speeds = []
         second_worker = self._worker(second_provider)
         second_worker.signals.completed.connect(
             lambda gid, path: completed.append((gid, path))
         )
+        second_worker.signals.pageSaved.connect(
+            lambda gid, index, path, done, total: saved_pages.append(
+                (gid, index, Path(path).name, done, total)
+            )
+        )
+        second_worker.signals.speedChanged.connect(speeds.append)
         second_worker.run()
 
         record = self.user_repository.online_gallery_download(4120989)
         self.assertEqual(ONLINE_DOWNLOAD_COMPLETED, record.state)
         self.assertEqual(3, record.completed_pages)
         self.assertEqual([1, 2], second_provider.page_calls)
+        self.assertEqual(
+            [
+                (4120989, 1, "00000002.png", 2, 3),
+                (4120989, 2, "00000003.png", 3, 3),
+            ],
+            saved_pages,
+        )
         self.assertEqual(1, len(completed))
+        self.assertTrue(speeds)
+        self.assertTrue(all(speed > 0 for speed in speeds))
         self.assertFalse((folder / "00000002.jpg").exists())
         self.assertTrue((folder / "00000002.png").is_file())
         self.assertTrue((folder / "00000003.png").is_file())
@@ -323,6 +419,71 @@ class OnlineGalleryDownloadTests(unittest.TestCase):
         self.assertTrue(worker.cancelled)
         self.assertEqual(1, provider.cancel_calls)
 
+    def test_worker_reports_local_registration_and_sidecar_readiness(self):
+        events = []
+        worker = self._worker(FakeDownloadProvider(self.pages))
+        worker.signals.galleryRegistered.connect(
+            lambda gid, folder: events.append(
+                (
+                    "registered",
+                    gid,
+                    (Path(folder) / ".thumb").is_file(),
+                    (Path(folder) / ".ehviewer").is_file(),
+                )
+            )
+        )
+        worker.signals.sidecarReady.connect(
+            lambda gid, folder: events.append(
+                (
+                    "sidecar",
+                    gid,
+                    (Path(folder) / ".thumb").is_file(),
+                    (Path(folder) / ".ehviewer").is_file(),
+                )
+            )
+        )
+
+        worker.run()
+
+        self.assertEqual(
+            [
+                ("registered", 4120989, True, False),
+                ("sidecar", 4120989, True, True),
+            ],
+            events,
+        )
+
+    def test_early_pause_and_failure_persist_terminal_task_state(self):
+        queued = OnlineGalleryDownloadRecord(
+            gid=4120989,
+            site="exhentai",
+            token="gallerytoken",
+            title="Download title",
+            dirname="",
+            page_count=3,
+            completed_pages=2,
+            state=ONLINE_DOWNLOAD_QUEUED,
+        )
+        self.user_repository.save_online_gallery_download(queued)
+
+        paused_worker = self._worker(FakeDownloadProvider(self.pages))
+        paused_worker.cancel()
+        paused_worker.run()
+        paused = self.user_repository.online_gallery_download(4120989)
+        self.assertEqual(ONLINE_DOWNLOAD_PAUSED, paused.state)
+        self.assertEqual(2, paused.completed_pages)
+
+        self.user_repository.save_online_gallery_download(queued)
+        failed_repository = FailingDownloadRepository()
+        failed_worker = self._worker(FakeDownloadProvider(self.pages))
+        failed_worker.ehviewer_repository = failed_repository
+        failed_worker.run()
+        failed = self.user_repository.online_gallery_download(4120989)
+        self.assertEqual(ONLINE_DOWNLOAD_FAILED, failed.state)
+        self.assertEqual(2, failed.completed_pages)
+        self.assertIn("cannot create local gallery", failed.error)
+        self.assertTrue(failed_repository.states)
+
     def test_metadata_sync_preserves_download_state_and_saves_version_info(self):
         self.external_repository.prepare_download(self.detail)
         with closing(sqlite3.connect(str(self.external_db))) as connection:
@@ -390,6 +551,40 @@ class OnlineGalleryDownloadTests(unittest.TestCase):
         self.assertEqual([True], resolved)
         self.assertEqual([self.detail], loaded)
         self.assertEqual(self.detail.gallery, worker.gallery)
+
+    def test_interrupted_task_rebuilds_canonical_gallery_without_local_files(self):
+        record = OnlineGalleryDownloadRecord(
+            gid=4120989,
+            site="exhentai",
+            token="gallerytoken",
+            title="Saved task title",
+            dirname="",
+            page_count=3,
+            metadata={
+                "url": "https://example.invalid/not-used",
+                "category": "Manga",
+                "cover_url": "https://a.hath.network/cover.webp",
+                "posted": "2026-08-15 12:00",
+                "uploader": "uploader",
+                "rating": "4.5",
+                "tags": ["artist:someone", "language:chinese"],
+            },
+        )
+
+        gallery = build_online_gallery_from_download_record(record)
+
+        self.assertEqual(4120989, gallery.gid)
+        self.assertEqual("gallerytoken", gallery.token)
+        self.assertEqual(
+            "https://exhentai.org/g/4120989/gallerytoken/",
+            gallery.url,
+        )
+        self.assertEqual(3, gallery.page_count)
+        self.assertEqual(4.5, gallery.rating)
+        self.assertEqual(
+            ("artist:someone", "language:chinese"),
+            gallery.tags,
+        )
 
     def test_local_repair_ignores_finished_database_state_and_fills_missing_page(self):
         first_provider = FakeDownloadProvider(self.pages)

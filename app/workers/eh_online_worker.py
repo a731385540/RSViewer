@@ -97,11 +97,12 @@ class OnlineDetailSignals(QObject):
 
 
 class OnlineDetailWorker(QRunnable):
-    def __init__(self, provider, item, cover_data=b""):
+    def __init__(self, provider, item, cover_data=b"", fetch_cover=True):
         super().__init__()
         self.provider = provider
         self.item = item
         self.cover_data = bytes(cover_data or b"")
+        self.fetch_cover = bool(fetch_cover)
         self.cancelled = False
         self.signals = OnlineDetailSignals()
 
@@ -111,7 +112,7 @@ class OnlineDetailWorker(QRunnable):
             if self.cancelled:
                 return
             cover_data = self.cover_data
-            if not cover_data and detail.cover_url:
+            if self.fetch_cover and not cover_data and detail.cover_url:
                 cover_data = self.provider.load_thumbnail(detail.cover_url)
             if cover_data and QImage.fromData(cover_data).isNull():
                 cover_data = b""

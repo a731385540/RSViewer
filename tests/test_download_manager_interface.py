@@ -6,7 +6,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from app.domain.online_download import OnlineGalleryDownloadRecord
-from app.view.download_manager_interface import DownloadManagerInterface
+from app.view.download_manager_interface import (
+    DownloadManagerInterface,
+    format_download_speed,
+)
 
 
 class DownloadManagerInterfaceTests(unittest.TestCase):
@@ -64,6 +67,52 @@ class DownloadManagerInterfaceTests(unittest.TestCase):
         QApplication.processEvents()
         self.assertEqual({}, self.interface._cards)
         self.assertTrue(self.interface.emptyLabel.isVisible())
+
+    def test_bulk_buttons_follow_active_tasks_and_emit_once(self):
+        start_all = []
+        pause_all = []
+        self.interface.startAllRequested.connect(lambda: start_all.append(True))
+        self.interface.pauseAllRequested.connect(lambda: pause_all.append(True))
+        records = (
+            self._record(gid=42, state="downloading"),
+            self._record(gid=43, state="paused"),
+        )
+
+        self.interface.setRecords(records, (42,))
+        QApplication.processEvents()
+        self.assertTrue(self.interface.startAllButton.isEnabled())
+        self.assertTrue(self.interface.pauseAllButton.isEnabled())
+        self.interface.startAllButton.click()
+        self.interface.pauseAllButton.click()
+        self.assertEqual([True], start_all)
+        self.assertEqual([True], pause_all)
+
+        self.interface.setRecords(records, (42, 43))
+        self.assertFalse(self.interface.startAllButton.isEnabled())
+        self.assertTrue(self.interface.pauseAllButton.isEnabled())
+
+        self.interface.setRecords(records)
+        self.assertTrue(self.interface.startAllButton.isEnabled())
+        self.assertFalse(self.interface.pauseAllButton.isEnabled())
+
+    def test_active_task_and_header_show_download_speed(self):
+        records = (
+            self._record(gid=42, state="downloading"),
+            self._record(gid=43, state="downloading"),
+        )
+        speeds = {42: 2 * 1024 * 1024, 43: 512 * 1024}
+
+        self.interface.setRecords(records, (42, 43), speeds)
+        QApplication.processEvents()
+
+        self.assertIn("2.00 MiB/s", self.interface._cards[42].metaLabel.text())
+        self.assertIn("512.00 KiB/s", self.interface._cards[43].metaLabel.text())
+        self.assertIn("2.50 MiB/s", self.interface.countLabel.text())
+        self.assertEqual("900 B/s", format_download_speed(900))
+
+        self.interface.setRecords(records, (42,), {})
+        self.assertIn("测速中", self.interface._cards[42].metaLabel.text())
+        self.assertNotIn("测速中", self.interface._cards[43].metaLabel.text())
 
 
 if __name__ == "__main__":
