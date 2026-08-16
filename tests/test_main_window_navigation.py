@@ -2,7 +2,7 @@ import os
 import unittest
 from collections import deque
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -14,6 +14,7 @@ from app.common.config import cfg
 from app.domain.gallery_update import GalleryUpdateRecord, UPDATE_QUEUED
 from app.domain.online_download import OnlineGalleryDownloadRecord
 from app.view.main_window import MAX_ONLINE_DOWNLOAD_CONCURRENCY, MainWindow
+from app.workers.gallery_trash_worker import GalleryTrashWorker
 
 
 class FakeSignal:
@@ -155,6 +156,7 @@ class MainWindowNavigationTests(unittest.TestCase):
                 "正在下载",
                 "更新管理",
                 "整理",
+                "回收站",
             ],
             [navigation.widget(route).text() for route in manga_routes],
         )
@@ -171,6 +173,7 @@ class MainWindowNavigationTests(unittest.TestCase):
         bottom_routes = (
             "mangaNavigationMode",
             "videoNavigationMode",
+            "openAdditionalWindow",
             self.window.settingInterface.objectName(),
         )
         self.assertEqual(
@@ -196,6 +199,37 @@ class MainWindowNavigationTests(unittest.TestCase):
         self.assertTrue(all(not navigation.widget(route).isHidden() for route in manga_routes))
         self.assertTrue(navigation.widget(video_route).isHidden())
 
+    def test_permanent_delete_requires_confirmation_but_restore_does_not(self):
+        record = SimpleNamespace(gid=42, dirname="42-gallery")
+        self.window._startGalleryTrashAction = MagicMock()
+
+        button = SimpleNamespace(setText=lambda _text: None)
+        rejected = SimpleNamespace(
+            yesButton=button,
+            cancelButton=button,
+            exec=lambda: False,
+        )
+        with patch("app.view.main_window.MessageBox", return_value=rejected):
+            self.window.permanentlyDeleteTrashedGalleries((record,))
+        self.window._startGalleryTrashAction.assert_not_called()
+
+        self.window.restoreTrashedGalleries((record,))
+        self.window._startGalleryTrashAction.assert_called_once_with(
+            GalleryTrashWorker.RESTORE, (record,)
+        )
+
+        self.window._startGalleryTrashAction.reset_mock()
+        accepted = SimpleNamespace(
+            yesButton=button,
+            cancelButton=button,
+            exec=lambda: True,
+        )
+        with patch("app.view.main_window.MessageBox", return_value=accepted):
+            self.window.permanentlyDeleteTrashedGalleries((record,))
+        self.window._startGalleryTrashAction.assert_called_once_with(
+            GalleryTrashWorker.DELETE, (record,)
+        )
+
     def test_splash_matches_window_size_before_first_show(self):
         window = StartupTestWindow()
         try:
@@ -205,6 +239,37 @@ class MainWindowNavigationTests(unittest.TestCase):
             window.close()
             window.deleteLater()
             QApplication.processEvents()
+
+    def test_open_additional_window_reuses_process_coordinator(self):
+        created = []
+
+        class AdditionalWindow:
+            def __init__(self, coordinator):
+                self.coordinator = coordinator
+                self.shown = False
+                self.raised = False
+                self.activated = False
+                created.append(self)
+
+            def show(self):
+                self.shown = True
+
+            def raise_(self):
+                self.raised = True
+
+            def activateWindow(self):
+                self.activated = True
+
+        coordinator = object()
+        host = SimpleNamespace(windowCoordinator=coordinator)
+        with patch("app.view.main_window.MainWindow", AdditionalWindow):
+            MainWindow.openAdditionalWindow(host)
+
+        self.assertEqual(1, len(created))
+        self.assertIs(coordinator, created[0].coordinator)
+        self.assertTrue(created[0].shown)
+        self.assertTrue(created[0].raised)
+        self.assertTrue(created[0].activated)
 
     def test_back_from_online_detail_returns_to_online_resources(self):
         detail = QWidget(self.window)

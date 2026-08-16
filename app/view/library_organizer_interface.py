@@ -1,6 +1,6 @@
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QPixmap
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from qfluentwidgets import (
     BodyLabel,
@@ -23,7 +23,6 @@ class OrganizerGalleryCard(SimpleCardWidget):
         self.entry = entry
         self.menuCallback = menu_callback
         self.setObjectName("organizerGalleryCard")
-        self.setFixedHeight(132)
 
         self.selectionCheckBox = CheckBox(self)
         self.selectionCheckBox.setChecked(bool(selected))
@@ -31,8 +30,12 @@ class OrganizerGalleryCard(SimpleCardWidget):
             lambda checked: self.selectionChanged.emit(entry.key, checked)
         )
         self.coverLabel = QLabel(self)
-        self.coverLabel.setFixedSize(72, 96)
         self.coverLabel.setAlignment(Qt.AlignCenter)
+        self.coverLabel.setObjectName("organizerGalleryCover")
+        self.coverLabel.setStyleSheet(
+            "QLabel#organizerGalleryCover { background: rgba(127, 127, 127, 0.12); }"
+        )
+        self._coverPixmap = QPixmap()
         self._setCover()
 
         self.titleLabel = BodyLabel(entry.title or entry.dirname, self)
@@ -45,27 +48,22 @@ class OrganizerGalleryCard(SimpleCardWidget):
         )
         state = self.tr("可同步") if entry.syncable else self.tr("仅可删除")
         self.metaLabel = CaptionLabel(f"{gid_text} · {pages} · {state}", self)
-        self.pathLabel = CaptionLabel(str(entry.folder), self)
-        self.pathLabel.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.pathLabel = CaptionLabel(entry.dirname, self)
         self.pathLabel.setToolTip(str(entry.folder))
         self.issueLabel = CaptionLabel(entry.issue or "", self)
         self.issueLabel.setVisible(bool(entry.issue))
 
-        text_layout = QVBoxLayout()
-        text_layout.setContentsMargins(0, 0, 0, 0)
-        text_layout.setSpacing(4)
-        text_layout.addWidget(self.titleLabel)
-        text_layout.addWidget(self.metaLabel)
-        text_layout.addWidget(self.pathLabel)
-        text_layout.addWidget(self.issueLabel)
-        text_layout.addStretch(1)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(14, 10, 14, 10)
-        layout.setSpacing(12)
-        layout.addWidget(self.selectionCheckBox, 0, Qt.AlignVCenter)
-        layout.addWidget(self.coverLabel, 0, Qt.AlignVCenter)
-        layout.addLayout(text_layout, 1)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(5)
+        layout.addWidget(self.coverLabel)
+        layout.addWidget(self.titleLabel)
+        layout.addWidget(self.metaLabel)
+        layout.addWidget(self.pathLabel)
+        layout.addWidget(self.issueLabel)
+        self.selectionCheckBox.move(14, 14)
+        self.selectionCheckBox.raise_()
+        self.setCardWidth(200)
 
     def _setCover(self):
         pixmap = QPixmap()
@@ -73,13 +71,30 @@ class OrganizerGalleryCard(SimpleCardWidget):
             pixmap.load(str(self.entry.cover_path))
         if pixmap.isNull():
             pixmap = FIF.FOLDER.icon().pixmap(QSize(48, 48))
+        self._coverPixmap = pixmap
+        self._refreshCover()
+
+    def _refreshCover(self):
+        if self._coverPixmap.isNull():
+            return
         self.coverLabel.setPixmap(
-            pixmap.scaled(
+            self._coverPixmap.scaled(
                 self.coverLabel.size(),
                 Qt.KeepAspectRatio,
                 Qt.SmoothTransformation,
             )
         )
+
+    def setCardWidth(self, width):
+        width = max(170, int(width))
+        cover_width = width - 20
+        cover_height = round(cover_width * 1.36)
+        self.setFixedWidth(width)
+        self.coverLabel.setFixedSize(cover_width, cover_height)
+        self.titleLabel.setFixedHeight(42)
+        self.setFixedHeight(cover_height + (132 if self.issueLabel.isVisible() else 110))
+        self._refreshCover()
+        self.selectionCheckBox.raise_()
 
     def setSelected(self, selected):
         self.selectionCheckBox.blockSignals(True)
@@ -107,6 +122,8 @@ class LibraryOrganizerInterface(QWidget):
         self._selected = set()
         self._scanned = False
         self._busy = False
+        self._lastColumns = 0
+        self._relayoutPending = False
 
         title = SubtitleLabel(self.tr("整理"), self)
         self.selectAllCheckBox = CheckBox(self.tr("全选"), self)
@@ -127,19 +144,19 @@ class LibraryOrganizerInterface(QWidget):
 
         self.contentWidget = QWidget()
         self.contentWidget.setObjectName("libraryOrganizerContent")
-        self.contentLayout = QVBoxLayout(self.contentWidget)
+        self.contentLayout = QGridLayout(self.contentWidget)
         self.contentLayout.setContentsMargins(36, 0, 36, 28)
-        self.contentLayout.setSpacing(10)
+        self.contentLayout.setSpacing(16)
         self.contentLayout.setAlignment(Qt.AlignTop)
         self.emptyLabel = BodyLabel(self.tr("尚未扫描"), self.contentWidget)
         self.emptyLabel.setAlignment(Qt.AlignCenter)
-        self.contentLayout.addWidget(self.emptyLabel)
+        self.contentLayout.addWidget(self.emptyLabel, 0, 0)
 
-        scroll = ScrollArea(self)
-        scroll.setWidget(self.contentWidget)
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setStyleSheet(
+        self.scrollArea = ScrollArea(self)
+        self.scrollArea.setWidget(self.contentWidget)
+        self.scrollArea.setWidgetResizable(True)
+        self.scrollArea.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scrollArea.setStyleSheet(
             "QScrollArea { border: none; background: transparent; }"
             "QWidget#libraryOrganizerContent { background: transparent; }"
         )
@@ -148,7 +165,7 @@ class LibraryOrganizerInterface(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addLayout(header)
-        layout.addWidget(scroll, 1)
+        layout.addWidget(self.scrollArea, 1)
         self._updateSelectionState()
 
     def setRecords(self, records):
@@ -169,13 +186,13 @@ class LibraryOrganizerInterface(QWidget):
             )
             card.selectionChanged.connect(self._setSelected)
             self._cards[entry.key] = card
-            self.contentLayout.addWidget(card)
         self.emptyLabel.setText(
             self.tr("没有发现未登记的本地资源目录")
             if not records
             else ""
         )
         self.emptyLabel.setVisible(not records)
+        self._scheduleRelayout()
         self._updateSelectionState()
 
     def reset(self):
@@ -188,7 +205,47 @@ class LibraryOrganizerInterface(QWidget):
         self._cards.clear()
         self.emptyLabel.setText(self.tr("尚未扫描"))
         self.emptyLabel.show()
+        self._scheduleRelayout()
         self.setBusy(False)
+
+    def _scheduleRelayout(self):
+        if self._relayoutPending:
+            return
+        self._relayoutPending = True
+        QTimer.singleShot(0, self._relayoutCards)
+
+    def _relayoutCards(self):
+        self._relayoutPending = False
+        while self.contentLayout.count():
+            self.contentLayout.takeAt(0)
+        for column in range(self._lastColumns):
+            self.contentLayout.setColumnStretch(column, 0)
+
+        viewport_width = max(1, self.scrollArea.viewport().width() - 72)
+        spacing = self.contentLayout.horizontalSpacing()
+        minimum_card_width = 188
+        columns = max(
+            1,
+            (viewport_width + spacing) // (minimum_card_width + spacing),
+        )
+        card_width = max(
+            minimum_card_width,
+            (viewport_width - spacing * (columns - 1)) // columns,
+        )
+        self._lastColumns = columns
+        for column in range(columns):
+            self.contentLayout.setColumnStretch(column, 1)
+
+        if not self._cards:
+            self.contentLayout.addWidget(self.emptyLabel, 0, 0, 1, columns)
+            return
+        for index, card in enumerate(self._cards.values()):
+            card.setCardWidth(card_width)
+            self.contentLayout.addWidget(card, index // columns, index % columns)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._scheduleRelayout()
 
     def setBusy(self, busy, message=""):
         self._busy = bool(busy)

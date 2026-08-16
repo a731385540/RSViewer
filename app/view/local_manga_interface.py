@@ -1016,8 +1016,10 @@ class LocalMangaInterface(QWidget):
     playlistMangaActivated = Signal(object, int, object, int)
     playlistPlayRequested = Signal(int, object, int, bool)
     libraryLoaded = Signal(object)
+    libraryMutated = Signal()
     favoriteChanged = Signal(object, bool)
     metadataSyncRequested = Signal(object)
+    trashRequested = Signal(object)
 
     def __init__(
         self,
@@ -1954,6 +1956,16 @@ class LocalMangaInterface(QWidget):
                 )
             )
             menu.addAction(action)
+        menu.addSeparator()
+        trash_action = QAction(
+            FIF.DELETE.icon(), self.tr("移入回收站"), menu
+        )
+        trash_action.triggered.connect(
+            lambda _checked=False, items=tuple(target_items): (
+                self.trashRequested.emit(items)
+            )
+        )
+        menu.addAction(trash_action)
         return menu
 
     def _openLabelSelection(self, mode, target_gids, target_items):
@@ -2114,6 +2126,7 @@ class LocalMangaInterface(QWidget):
     def _finishLabelMutation(self, worker, on_success):
         self._label_workers.discard(worker)
         on_success()
+        self.libraryMutated.emit()
 
     def _failLabelMutation(self, worker, message: str):
         self._label_workers.discard(worker)

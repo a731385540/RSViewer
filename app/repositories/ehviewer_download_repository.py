@@ -1,3 +1,4 @@
+import base64
 import math
 import os
 import re
@@ -268,6 +269,190 @@ class EhViewerDownloadRepository:
             connection.execute("DELETE FROM DOWNLOAD_DIRNAME WHERE GID = ?", (gid,))
             connection.execute("DELETE FROM DOWNLOADS WHERE GID = ?", (gid,))
             connection.commit()
+
+    def capture_gallery_snapshot(self, gid, folder):
+        """Capture exact external rows needed to restore a local gallery."""
+        self._validate_targets()
+        gid = int(gid)
+        folder = self._validated_existing_root_folder(folder)
+        with closing(sqlite3.connect(str(self.database_path), timeout=30)) as connection:
+            self._validate_schema(connection)
+            snapshot = self._gallery_snapshot(connection, gid)
+        download = snapshot.get("DOWNLOADS")
+        dirname = snapshot.get("DOWNLOAD_DIRNAME")
+        if download is None or dirname is None:
+            raise ValueError("EhViewer 数据库中找不到完整的画廊登记")
+        mapped_dirname = self._snapshot_column(dirname, "DIRNAME")
+        if str(mapped_dirname or "").casefold() != folder.name.casefold():
+            raise ValueError("画廊目录与 EhViewer 数据库映射不一致")
+        return snapshot
+
+    def remove_gallery_to_trash(self, gid, folder, expected_snapshot):
+        """Atomically remove exact EhViewer rows while retaining local files."""
+        self._validate_targets()
+        gid = int(gid)
+        folder = self._validated_root_folder(folder, require_exists=False)
+        self._validate_snapshot_identity(expected_snapshot, gid, folder.name)
+        with closing(sqlite3.connect(str(self.database_path), timeout=30)) as connection:
+            self._validate_schema(connection)
+            current = self._gallery_snapshot(connection, gid)
+            if all(current.get(table) is None for table in current):
+                return
+            if current != expected_snapshot:
+                raise ValueError("EhViewer 画廊记录已变化，拒绝移除其他数据")
+            connection.execute("DELETE FROM Gallery_Tags WHERE GID = ?", (gid,))
+            connection.execute("DELETE FROM DOWNLOAD_DIRNAME WHERE GID = ?", (gid,))
+            connection.execute("DELETE FROM DOWNLOADS WHERE GID = ?", (gid,))
+            connection.commit()
+
+    def restore_gallery_from_trash(self, gid, folder, snapshot):
+        """Restore exact EhViewer rows without overwriting a new collision."""
+        self._validate_targets()
+        gid = int(gid)
+        folder = self._validated_existing_root_folder(folder)
+        self._validate_snapshot_identity(snapshot, gid, folder.name)
+        with closing(sqlite3.connect(str(self.database_path), timeout=30)) as connection:
+            self._validate_schema(connection)
+            current = self._gallery_snapshot(connection, gid)
+            if any(current.get(table) is not None for table in current):
+                if current == snapshot:
+                    return
+                if (
+                    current.get("DOWNLOADS") is not None
+                    and current.get("DOWNLOAD_DIRNAME") is not None
+                ):
+                    # Another window/process may already have restored this
+                    # same gallery and then changed mutable metadata. Keep its
+                    # newer rows instead of overwriting them with the snapshot.
+                    self._validate_snapshot_identity(current, gid, folder.name)
+                    return
+                raise ValueError(f"EhViewer 数据库中 GID {gid} 已被其他记录占用")
+            collision = connection.execute(
+                """
+                SELECT GID FROM DOWNLOAD_DIRNAME
+                WHERE DIRNAME = ? COLLATE NOCASE AND GID != ? LIMIT 1
+                """,
+                (folder.name, gid),
+            ).fetchone()
+            if collision is not None:
+                raise ValueError(
+                    f"目录 {folder.name} 已被 GID {int(collision[0])} 占用"
+                )
+            self._insert_table_snapshot(connection, "DOWNLOADS", snapshot["DOWNLOADS"])
+            self._insert_table_snapshot(
+                connection, "DOWNLOAD_DIRNAME", snapshot["DOWNLOAD_DIRNAME"]
+            )
+            if snapshot.get("Gallery_Tags") is not None:
+                self._insert_table_snapshot(
+                    connection, "Gallery_Tags", snapshot["Gallery_Tags"]
+                )
+            connection.commit()
+
+    def _validated_existing_root_folder(self, folder):
+        return self._validated_root_folder(folder, require_exists=True)
+
+    def _validated_root_folder(self, folder, require_exists):
+        folder = Path(folder)
+        if folder.is_symlink():
+            raise ValueError("目标不能是符号链接目录")
+        folder = folder.resolve()
+        root = self.manga_root.resolve()
+        if folder == root or folder.parent != root:
+            raise ValueError("目标不是漫画根目录下的实体子目录")
+        if require_exists and not folder.is_dir():
+            raise FileNotFoundError(f"资源目录不存在：{folder}")
+        return folder
+
+    @classmethod
+    def _gallery_snapshot(cls, connection, gid):
+        return {
+            "DOWNLOADS": cls._table_snapshot(connection, "DOWNLOADS", "GID", gid),
+            "DOWNLOAD_DIRNAME": cls._table_snapshot(
+                connection, "DOWNLOAD_DIRNAME", "GID", gid
+            ),
+            "Gallery_Tags": cls._table_snapshot(
+                connection, "Gallery_Tags", "GID", gid
+            ),
+        }
+
+    @classmethod
+    def _table_snapshot(cls, connection, table, key_column, key_value):
+        cursor = connection.execute(
+            f'SELECT * FROM "{table}" WHERE "{key_column}" = ?',
+            (int(key_value),),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "columns": [str(column[0]) for column in cursor.description],
+            "values": [cls._encode_snapshot_value(value) for value in row],
+        }
+
+    @staticmethod
+    def _encode_snapshot_value(value):
+        if isinstance(value, memoryview):
+            value = bytes(value)
+        if isinstance(value, bytes):
+            return {
+                "__sqlite_bytes__": base64.b64encode(value).decode("ascii")
+            }
+        if value is None or isinstance(value, (str, int, float)):
+            return value
+        return str(value)
+
+    @staticmethod
+    def _decode_snapshot_value(value):
+        if isinstance(value, dict) and set(value) == {"__sqlite_bytes__"}:
+            return base64.b64decode(str(value["__sqlite_bytes__"]).encode("ascii"))
+        return value
+
+    @classmethod
+    def _snapshot_column(cls, table_snapshot, column):
+        columns = [str(value) for value in table_snapshot.get("columns", ())]
+        try:
+            index = columns.index(str(column))
+        except ValueError as error:
+            raise ValueError(f"回收站快照缺少列：{column}") from error
+        values = table_snapshot.get("values", ())
+        if index >= len(values):
+            raise ValueError("回收站快照列和值数量不一致")
+        return cls._decode_snapshot_value(values[index])
+
+    @classmethod
+    def _validate_snapshot_identity(cls, snapshot, gid, dirname):
+        if not isinstance(snapshot, dict):
+            raise ValueError("回收站外部数据库快照无效")
+        download = snapshot.get("DOWNLOADS")
+        mapping = snapshot.get("DOWNLOAD_DIRNAME")
+        if download is None or mapping is None:
+            raise ValueError("回收站快照缺少 EhViewer 画廊或目录记录")
+        if int(cls._snapshot_column(download, "GID")) != int(gid):
+            raise ValueError("回收站画廊 GID 快照不一致")
+        if int(cls._snapshot_column(mapping, "GID")) != int(gid):
+            raise ValueError("回收站目录 GID 快照不一致")
+        if str(cls._snapshot_column(mapping, "DIRNAME") or "").casefold() != str(
+            dirname
+        ).casefold():
+            raise ValueError("回收站目录快照与本地目录不一致")
+
+    @classmethod
+    def _insert_table_snapshot(cls, connection, table, snapshot):
+        columns = [str(value) for value in snapshot.get("columns", ())]
+        values = list(snapshot.get("values", ()))
+        actual_columns = {
+            str(row[1]) for row in connection.execute(f'PRAGMA table_info("{table}")')
+        }
+        if not columns or len(columns) != len(values):
+            raise ValueError(f"回收站 {table} 快照结构无效")
+        if any(column not in actual_columns for column in columns):
+            raise ValueError(f"EhViewer {table} 表结构已变化，无法安全还原")
+        quoted_columns = ", ".join(f'"{column}"' for column in columns)
+        placeholders = ", ".join("?" for _ in columns)
+        connection.execute(
+            f'INSERT INTO "{table}"({quoted_columns}) VALUES ({placeholders})',
+            tuple(cls._decode_snapshot_value(value) for value in values),
+        )
 
     def validate_update_target(self, source_gid, target_gid, folder):
         """Reject GID/folder collisions before any update filename is changed."""

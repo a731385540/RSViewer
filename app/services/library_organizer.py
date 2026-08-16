@@ -129,6 +129,9 @@ def scan_orphan_gallery_folders(
     if not manga_root.is_dir():
         raise FileNotFoundError(f"找不到漫画目录：{manga_root}")
     registered_gids, registered_dirnames = _registered_downloads(database_path)
+    trashed = tuple(user_repository.gallery_trash_records())
+    trashed_gids = {int(record.gid) for record in trashed}
+    trashed_dirnames = {str(record.dirname).casefold() for record in trashed}
     results = []
     with os.scandir(manga_root) as entries:
         folders = sorted(
@@ -136,7 +139,7 @@ def scan_orphan_gallery_folders(
             key=lambda entry: entry.name.casefold(),
         )
     for entry in folders:
-        if entry.name.casefold() in registered_dirnames:
+        if entry.name.casefold() in registered_dirnames or entry.name.casefold() in trashed_dirnames:
             continue
         folder = Path(entry.path)
         prefix = _folder_gid(entry.name)
@@ -147,7 +150,7 @@ def scan_orphan_gallery_folders(
             sidecar = None
             issue = str(error)
         gid = sidecar.gid if sidecar is not None else prefix
-        if gid and gid in registered_gids:
+        if gid and (gid in registered_gids or gid in trashed_gids):
             continue
         download_record = (
             user_repository.online_gallery_download(gid) if gid else None

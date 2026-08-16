@@ -1,6 +1,6 @@
 # RSViewer 项目维护指南
 
-本文档面向未来接手本仓库的 AI 助手和开发者。开始任何工作前，请先完整阅读本文、`README.md` 和 `CHANGELOG.md`，然后执行 `git status --short`。本文描述的是 2026-08-15 的工作区现状；若代码与本文冲突，以代码为准，并在本次修改中同步修正文档。
+本文档面向未来接手本仓库的 AI 助手和开发者。开始任何工作前，请先完整阅读本文、`README.md` 和 `CHANGELOG.md`，然后执行 `git status --short`。本文描述的是 2026-08-16 的工作区现状；若代码与本文冲突，以代码为准，并在本次修改中同步修正文档。
 
 ## 1. 项目背景与边界
 
@@ -54,13 +54,16 @@ RSViewer/
    ├─ domain/online_gallery.py       # 在线画廊与翻页结果模型
    ├─ domain/online_download.py      # 在线下载任务状态模型
    ├─ domain/gallery_update.py       # 本地画廊版本更新任务模型
+   ├─ domain/gallery_trash.py        # 本地画廊回收记录与持久状态
    ├─ repositories/user_library_repository.py # RSViewer 用户标签与阅读进度库
    ├─ repositories/ehviewer_download_repository.py # 外部 eh.db 与下载目录兼容写入
    ├─ repositories/gallery_update_state_repository.py # 目录 new.json 原子 checkpoint
    ├─ services/eh_tag_importer.py    # EH 标签 Markdown 快照解析与校验
    ├─ services/eh_tag_search.py      # 启动加载的内存标签检索表与本地查询解析
    ├─ services/search_history.py     # 本地/在线共享的持久化搜索历史服务
+   ├─ services/multi_window_coordinator.py # 多窗口事件总线、共享线程池与任务所有权
    ├─ services/library_organizer.py  # 未登记本地目录扫描、双库恢复与回收站边界
+   ├─ services/gallery_trash.py      # 画廊软删除、原位还原与永久清理事务
    ├─ services/online_download_builder.py # 从本地 sidecar 重建源站补齐请求
    ├─ services/manga_title_similarity.py # 章节/卷号与元数据噪声剥离、标题相似度匹配
    ├─ services/online_thumbnail_cache.py # 在线封面分站点磁盘缓存与惰性过期
@@ -71,6 +74,7 @@ RSViewer/
    ├─ workers/online_gallery_download_worker.py # 在线画廊断点下载 Worker
    ├─ workers/original_gallery_worker.py # 原图替换与压缩图备份清理 Worker
    ├─ workers/library_organizer_worker.py # 整理页扫描、同步和回收站操作 Worker
+   ├─ workers/gallery_trash_worker.py # 回收站串行批处理 Worker
    ├─ workers/gallery_update_worker.py # 本地画廊新版本可恢复更新 Worker
    ├─ workers/reading_progress_worker.py # 后台保存阅读进度
    ├─ workers/similar_manga_worker.py # 大型本地库标题相似搜索 Worker
@@ -85,6 +89,7 @@ RSViewer/
       ├─ download_manager_interface.py # 未完成下载任务的集中管理页面
       ├─ update_manager_interface.py # 未完成画廊版本更新管理页面
       ├─ library_organizer_interface.py # 未登记本地资源整理页面
+      ├─ recycle_bin_interface.py    # 可复选的画廊回收站卡片页
       ├─ manga_detail_interface.py   # 本地/在线共享详情、页面预览与评论区
       ├─ manga_reader_interface.py   # 单页阅读、缩放、预读和全屏控制
       ├─ online_manga_interface.py   # 在线画廊搜索、翻页、封面和主题化结果页
@@ -144,6 +149,8 @@ RSViewer 独立 SQLite 使用 `PRAGMA user_version` 执行可重复迁移。版�
 
 版本 11 为 `online_gallery_downloads` 新增 `download_mode`，区分 `standard`、`original_direct` 与 `original_local`；新增 `gallery_original_states` 持久化原图画廊属性、下载断点和 `staged`、`replacing_base`、`replacing_original`、`active`、`cleaning` 等文件操作阶段。原图属性不得只从目录猜测；应用启动须把中断的原图下载恢复为 paused，替换与清理则依据持久阶段和实际文件继续。
 
+版本 12 新增 `gallery_trash`，保存软删除画廊的标题、目录、封面、页数、状态及外部 `DOWNLOADS`、`DOWNLOAD_DIRNAME`、`Gallery_Tags` 精确行快照；版本 13 追加删除时使用的 `eh.db` 与漫画根目录绝对路径，数据源配置改变后仍须还原到原数据库。`moving`、`trashed`、`restoring`、`deleting`、`failed` 每个阶段都必须先落库；启动时把中断阶段改为 failed，用户可重试还原或永久删除。软删除期间保留播放列表、归类、收藏、历史、进度及原图状态等自有关联以便还原，但计数和管理任务不得展示该 GID；永久删除文件成功后才事务清理全部自有关联。
+
 ### `app/common/style_sheet.py`
 
 把 RSViewer 自定义样式注册到 QFluentWidgets 的样式管理器。设置页、阅读设置弹窗、漫画详情标签和在线资源页分别注册 `StyleSheet.SETTING_INTERFACE`、`StyleSheet.READER_SETTING_DIALOG`、`StyleSheet.MANGA_DETAIL_INTERFACE`、`StyleSheet.ONLINE_MANGA_INTERFACE`，`setTheme()` 会自动重新加载对应的 light/dark QSS。阅读设置弹窗是独立窗口，不能依赖主窗口背景透传，必须分别定义浅色与深色实体背景；在线资源滚动区、viewport、内容容器、结果卡片和封面占位也必须保持主题透明背景与对应明暗配色。
@@ -161,7 +168,9 @@ RSViewer 独立 SQLite 使用 `PRAGMA user_version` 执行可重复迁移。版�
 
 `SplashScreen` 在主窗口首次 `show()` 前必须显式 `resize(self.size())`，因为它是在主窗口初始 `resize()` 之后创建，不能依赖尚未发生的父窗口尺寸事件。退出时先隐藏窗口并取消下载；下载 provider 的流式响应必须支持由 Worker 主动关闭，未启动任务使用 `QThreadPool.clear()` 清理，不能只设置布尔标记后长时间等待网络超时。
 
-主窗口基于 `FluentWindow`，负责窗口、导航、主题、数据源组合，以及本地资源/收藏/历史之间的共享数据同步。左侧导航不使用树状父子路由：底部“漫画”“视频”两个模式按钮位于“设置”上方，按当前模式切换顶部扁平入口；漫画模式显示本地资源、收藏、在线资源、历史记录、正在下载、更新管理和整理，视频模式当前只显示资源，切换模式分别进入本地资源或视频资源默认页。页面和路由对象保持常驻，只切换导航项可见性，不应因模式切换重新创建页面。可配置的搜索栏与标签栏快捷键使用应用级 `QShortcut`，会先切回漫画模式的本地资源再展开搜索或切换标签侧栏，并随配置即时更新。在线资源路由使用 `OnlineMangaInterface`，不得在主窗口或 GUI 线程直接执行网络请求。收藏与本地历史不得各自重新执行大型库加载，而应消费 `LocalMangaInterface.libraryLoaded` 的同一批元数据。打开详情和阅读时由主窗口即时更新历史顺序，并在单线程后台队列保存。
+主窗口基于 `FluentWindow`，负责窗口、导航、主题、数据源组合，以及本地资源/收藏/历史之间的共享数据同步。左侧导航不使用树状父子路由：底部“漫画”“视频”两个模式按钮按当前模式切换顶部扁平入口，“新窗口”动作紧邻“设置”上方；漫画模式显示本地资源、收藏、在线资源、历史记录、正在下载、更新管理、整理和回收站，视频模式当前只显示资源，切换模式分别进入本地资源或视频资源默认页。页面和路由对象保持常驻，只切换导航项可见性，不应因模式切换重新创建页面。可配置的搜索栏与标签栏快捷键使用应用级 `QShortcut`，会先切回漫画模式的本地资源再展开搜索或切换标签侧栏，并随配置即时更新。在线资源路由使用 `OnlineMangaInterface`，不得在主窗口或 GUI 线程直接执行网络请求。收藏与本地历史不得各自重新执行大型库加载，而应消费 `LocalMangaInterface.libraryLoaded` 的同一批元数据。打开详情和阅读时由主窗口即时更新历史顺序，并在单线程后台队列保存。
+
+“新窗口”必须创建同一进程内的完整 `MainWindow`，并复用单一 `MultiWindowCoordinator`。协调器持有全局下载、画廊更新、原图文件操作、整理和回收站线程池，聚合各窗口活动任务与速度；下载总并发硬上限 3，更新总并发硬上限 1，同一 GID 的开始/暂停/删除必须路由到实际任务所有者。只有第一个窗口可执行启动中断恢复，后续窗口不得把正在运行的任务误标为暂停。收藏、历史、阅读进度、标签变更、资源重载、下载、更新、整理、回收站和数据源切换通过进程内事件总线同步；接收窗口更新 UI 或从共享数据库重载时不得再次回传同一事件形成循环。关闭一个窗口只能取消该窗口拥有的 Worker，禁止 `clear()` 共享线程池而影响仍打开的其他窗口。
 
 主窗口创建自有 Repository 后会立即加载已导入的 EH 标签，构造一个全局共享的 `EhTagSearchIndex`，并创建单一 `SearchHistoryService` 供本地、收藏、本地历史和在线页面共享；不得让各页面重复读取四万多条标签或维护互相独立的搜索历史。标签仓库更新由 `scripts/import_eh_tags.py` 显式执行，主程序启动只加载 SQLite 快照，不扫描 Markdown。
 
@@ -201,9 +210,15 @@ RSViewer 独立 SQLite 使用 `PRAGMA user_version` 执行可重复迁移。版�
 
 ### `app/services/library_organizer.py` 与整理页
 
-整理页只在用户点击右上角扫描按钮后工作，扫描和文件/数据库操作均使用专用单线程池，不得在 GUI 线程枚举 NAS 目录。扫描范围严格限制为 `ehViewerMangaRoot` 的直接实体子目录：排除 `DOWNLOADS` 已登记的 GID 和 `DOWNLOAD_DIRNAME` 已登记的目录名，不递归进入画廊内部的 `original/`、`history/` 等目录。每个候选目录解析 `VERSION2` `.ehviewer` 的 GID、gallery token、总页数和完整 page token；缺失或损坏 sidecar 的条目可以展示和删除，但不得同步。
+整理页只在用户点击右上角扫描按钮后工作，扫描和文件/数据库操作均使用专用单线程池，不得在 GUI 线程枚举 NAS 目录。扫描范围严格限制为 `ehViewerMangaRoot` 的直接实体子目录：排除 `DOWNLOADS` 已登记的 GID、`DOWNLOAD_DIRNAME` 已登记的目录名，以及自有 `gallery_trash` 中的 GID/目录名，不得把软删除画廊误报为孤儿；不递归进入画廊内部的 `original/`、`history/` 等目录。每个候选目录解析 `VERSION2` `.ehviewer` 的 GID、gallery token、总页数和完整 page token；缺失或损坏 sidecar 的条目可以展示和删除，但不得同步。
 
-整理页卡片常驻复选框并支持全选，右键“同步到数据库”和“删除本地资源”作用于当前选择集合。同步前必须再次验证目录仍是根目录直接子目录且不是符号链接，并拒绝已有 GID、目录名或不同路径残留映射冲突；允许在同一事务内修复 `DOWNLOADS` 已丢失但同 GID/同目录的 `DOWNLOAD_DIRNAME` 残行。同步不得创建、移动或覆盖图片目录，只按原目录名事务插入外部既有 `DOWNLOADS`、`DOWNLOAD_DIRNAME`、`Gallery_Tags`，随后保存 RSViewer `online_gallery_downloads`/同步记录；外部表不得执行 DDL。同步阶段必须逐页验证文件可解码，完整有效页集合写 finish/completed，不完整或损坏集合写 failed/paused 以便继续补齐。自有库写入失败时必须回滚本次精确匹配的外部插入。删除必须二次确认并调用 Windows 回收站，禁止直接永久递归删除；所有操作结束后自动重扫，成功同步后刷新本地资源。
+整理页使用与本地资源一致的响应式大封面卡片网格，卡片左上角常驻复选框并支持全选，右键“同步到数据库”和“删除本地资源”作用于当前选择集合。同步前必须再次验证目录仍是根目录直接子目录且不是符号链接，并拒绝已有 GID、目录名或不同路径残留映射冲突；允许在同一事务内修复 `DOWNLOADS` 已丢失但同 GID/同目录的 `DOWNLOAD_DIRNAME` 残行。同步不得创建、移动或覆盖图片目录，只按原目录名事务插入外部既有 `DOWNLOADS`、`DOWNLOAD_DIRNAME`、`Gallery_Tags`，随后保存 RSViewer `online_gallery_downloads`/同步记录；外部表不得执行 DDL。同步阶段必须逐页验证文件可解码，完整有效页集合写 finish/completed，不完整或损坏集合写 failed/paused 以便继续补齐。自有库写入失败时必须回滚本次精确匹配的外部插入。删除必须二次确认并调用 Windows 回收站，禁止直接永久递归删除；所有操作结束后自动重扫，成功同步后刷新本地资源。
+
+### `app/services/gallery_trash.py` 与回收站
+
+本地资源、收藏和本地历史卡片右键“移入回收站”作用于当前复选集合。执行前必须拒绝正在下载、更新、原图替换、单页补齐或元数据同步的 GID。软删除不移动目录、不删除图片：先把外部三张业务表的完整列名和值保存到自有库，再在单个外部事务内精确核对并删除这些行；不得仅保存当前已知列，也不得覆盖并发产生的新记录。还原要求原目录仍存在且 GID/目录名无冲突，以保存的原始列和值逐项插回原 `eh.db`，无需确认。
+
+回收站使用响应式封面卡片，支持常驻复选、全选、工具栏和右键“还原/彻底删除”。彻底删除前必须二次确认；确认后再次保证外部登记不存在，只允许递归删除记录中漫画根目录的直接实体子目录，拒绝根目录本身、嵌套路径和符号链接，最后清理自有关系。任一步失败均保留目录或回收记录及错误，不能假装完成。回收站批处理全进程单线程，操作完成通过多窗口事件总线立即刷新其他窗口。
 
 ### `app/view/local_manga_interface.py`
 
@@ -213,7 +228,7 @@ RSViewer 独立 SQLite 使用 `PRAGMA user_version` 执行可重复迁移。版�
 
 本地资源、收藏、本地历史和在线资源的主搜索框使用 `EhTagSearchLineEdit`。内存索引同时按英文原始标签与中文译名做包含匹配，标签结果以 `namespace：tag` 和译名上下两行显示；插入时使用 Markdown 中声明的缩写，多词标签必须加引号。补全只替换光标所在、引号外由空格分隔的当前条件，不得覆盖前面的条件。本地筛选要把 `o:"full color"` 等缩写还原为 `other:full color` 后匹配，在线搜索保留 EH 查询语法原样提交。候选层先按最近顺序显示匹配的历史输入，再显示标签结果；只有搜索图标、Enter 或页面明确执行搜索时才写历史，不能把逐字输入的中间状态入库。候选层必须复用 QFluentWidgets 的 `CompleterMenu`，限制为最多 8 个可见项并允许滚动；不得直接调用原生 `QCompleter.complete()`，否则会与 `SearchLineEdit` 自带菜单叠加并破坏主题。菜单关闭或搜索框真正失焦时必须取消待显示任务，`PopupFocusReason` 造成的菜单焦点归还不得重新弹出候选或拦截页面其余操作。
 
-网格和列表卡片的右键菜单只保留固定的“同步在线信息”“搜索相似画廊”“选择分类…”“选择播放列表…”“选择归类…”入口，不得重新把大量标签展开为悬浮子菜单；正在查看具体播放列表时额外显示“从当前播放列表移除”，支持单本和复选批量操作。“搜索相似画廊”必须在后台针对完整本地库执行，按文件元数据括号、语言/数字版标记、章节号、卷数、话数及前后篇等规则提取作品主标题，再进行保守的长标题模糊匹配；修改搜索词或切换标签退出相似模式。标签入口打开主题化 `MangaLabelSelectionDialog`：提供搜索和可滚动树，分类单选并包含“未分类”，播放列表与树状归类多选；批量目标成员状态不一致时显示半选，半选保持不变，用户明确勾选或取消后才批量写入。播放列表/归类窗口保留“新建并添加…”入口。右键不需要先开启复选且不得触发详情。分类更新目标 `DOWNLOADS.LABEL`，播放列表和归类写 RSViewer 自有库；数据库变更应在 Worker 中执行，多项选择变化应合并为单个后台任务。
+网格和列表卡片的右键菜单只保留固定的“同步在线信息”“搜索相似画廊”“选择分类…”“选择播放列表…”“选择归类…”和“移入回收站”入口，不得重新把大量标签展开为悬浮子菜单；正在查看具体播放列表时额外显示“从当前播放列表移除”，支持单本和复选批量操作。“搜索相似画廊”必须在后台针对完整本地库执行，按文件元数据括号、语言/数字版标记、章节号、卷数、话数及前后篇等规则提取作品主标题，再进行保守的长标题模糊匹配；修改搜索词或切换标签退出相似模式。标签入口打开主题化 `MangaLabelSelectionDialog`：提供搜索和可滚动树，分类单选并包含“未分类”，播放列表与树状归类多选；批量目标成员状态不一致时显示半选，半选保持不变，用户明确勾选或取消后才批量写入。播放列表/归类窗口保留“新建并添加…”入口。右键不需要先开启复选且不得触发详情。分类更新目标 `DOWNLOADS.LABEL`，播放列表和归类写 RSViewer 自有库；数据库变更应在 Worker 中执行，多项选择变化应合并为单个后台任务。
 
 复选模式提供“全选/取消全选”按钮，作用于当前分类、播放列表或归类及搜索条件共同形成的全部结果并跨越分页；切换筛选后选中集合必须收敛到新结果范围。卡片右键“同步在线信息”对全部选中项生效，列表批量同步最多同时运行 2 项；未加载 gallery token 的条目必须在同步 Worker 中只读 `.ehviewer` sidecar 补全，不能在 GUI 线程枚举页面。整批完成后只普通刷新一次本地库并保留当前筛选。
 

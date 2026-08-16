@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from app.domain.gallery_update import GalleryUpdateRecord
+from app.domain.gallery_trash import GalleryTrashRecord
 from app.domain.online_download import (
     DOWNLOAD_MODE_STANDARD,
     GalleryOriginalState,
@@ -18,7 +19,7 @@ from app.domain.online_gallery import OnlineGalleryComment
 class UserLibraryRepository:
     """RSViewer 自有数据库；绝不在外部 EhViewer 库中建表。"""
 
-    SCHEMA_VERSION = 11
+    SCHEMA_VERSION = 13
 
     def __init__(self, database_path: Path):
         self.database_path = Path(database_path).resolve()
@@ -366,6 +367,46 @@ class UserLibraryRepository:
                     """
                 )
                 connection.execute("PRAGMA user_version = 11")
+            if version < 12:
+                connection.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS gallery_trash (
+                        gid INTEGER PRIMARY KEY,
+                        title TEXT NOT NULL,
+                        folder TEXT NOT NULL,
+                        dirname TEXT NOT NULL COLLATE NOCASE,
+                        cover_path TEXT NOT NULL DEFAULT '',
+                        page_count INTEGER NOT NULL DEFAULT 0,
+                        state TEXT NOT NULL,
+                        external_snapshot_json TEXT NOT NULL,
+                        error TEXT NOT NULL DEFAULT '',
+                        deleted_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL
+                    );
+
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_gallery_trash_dirname
+                        ON gallery_trash(dirname COLLATE NOCASE);
+                    CREATE INDEX IF NOT EXISTS idx_gallery_trash_deleted
+                        ON gallery_trash(deleted_at DESC);
+                    """
+                )
+                connection.execute("PRAGMA user_version = 12")
+            if version < 13:
+                trash_columns = {
+                    row[1]
+                    for row in connection.execute("PRAGMA table_info(gallery_trash)")
+                }
+                if "database_path" not in trash_columns:
+                    connection.execute(
+                        "ALTER TABLE gallery_trash "
+                        "ADD COLUMN database_path TEXT NOT NULL DEFAULT ''"
+                    )
+                if "manga_root" not in trash_columns:
+                    connection.execute(
+                        "ALTER TABLE gallery_trash "
+                        "ADD COLUMN manga_root TEXT NOT NULL DEFAULT ''"
+                    )
+                connection.execute("PRAGMA user_version = 13")
 
     def list_labels(self) -> List[Tuple[int, str, int]]:
         self.initialize()
@@ -374,10 +415,12 @@ class UserLibraryRepository:
                 (int(row[0]), str(row[1]), int(row[2]))
                 for row in connection.execute(
                     """
-                    SELECT labels.id, labels.name, COUNT(assignments.gid)
+                    SELECT labels.id, labels.name,
+                           COUNT(CASE WHEN trash.gid IS NULL THEN assignments.gid END)
                     FROM multi_labels AS labels
                     LEFT JOIN manga_multi_labels AS assignments
                         ON assignments.label_id = labels.id
+                    LEFT JOIN gallery_trash AS trash ON trash.gid = assignments.gid
                     GROUP BY labels.id, labels.name
                     ORDER BY labels.name COLLATE NOCASE
                     """
@@ -396,11 +439,13 @@ class UserLibraryRepository:
                 )
                 for row in connection.execute(
                     """
-                    SELECT labels.id, labels.name, COUNT(assignments.gid),
+                    SELECT labels.id, labels.name,
+                           COUNT(CASE WHEN trash.gid IS NULL THEN assignments.gid END),
                            labels.last_gid
                     FROM multi_labels AS labels
                     LEFT JOIN manga_multi_labels AS assignments
                         ON assignments.label_id = labels.id
+                    LEFT JOIN gallery_trash AS trash ON trash.gid = assignments.gid
                     GROUP BY labels.id, labels.name, labels.last_gid
                     ORDER BY labels.name COLLATE NOCASE
                     """
@@ -569,10 +614,11 @@ class UserLibraryRepository:
                 for row in connection.execute(
                     """
                     SELECT labels.id, labels.parent_id, labels.name,
-                           COUNT(assignments.gid)
+                           COUNT(CASE WHEN trash.gid IS NULL THEN assignments.gid END)
                     FROM taxonomy_labels AS labels
                     LEFT JOIN manga_taxonomy_labels AS assignments
                         ON assignments.label_id = labels.id
+                    LEFT JOIN gallery_trash AS trash ON trash.gid = assignments.gid
                     GROUP BY labels.id, labels.parent_id, labels.name
                     ORDER BY labels.name COLLATE NOCASE
                     """
@@ -1058,6 +1104,142 @@ class UserLibraryRepository:
                 comments,
             )
 
+    def save_gallery_trash(self, record: GalleryTrashRecord):
+        self.initialize()
+        now = time.time_ns()
+        snapshot_json = json.dumps(
+            dict(record.external_snapshot or {}),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO gallery_trash(
+                    gid, title, folder, dirname, cover_path, page_count, state,
+                    external_snapshot_json, error, deleted_at, updated_at,
+                    database_path, manga_root
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(gid) DO UPDATE SET
+                    title = excluded.title,
+                    folder = excluded.folder,
+                    dirname = excluded.dirname,
+                    cover_path = excluded.cover_path,
+                    page_count = excluded.page_count,
+                    state = excluded.state,
+                    external_snapshot_json = excluded.external_snapshot_json,
+                    error = excluded.error,
+                    updated_at = excluded.updated_at,
+                    database_path = excluded.database_path,
+                    manga_root = excluded.manga_root
+                """,
+                (
+                    int(record.gid),
+                    str(record.title),
+                    str(Path(record.folder).resolve()),
+                    str(record.dirname),
+                    str(record.cover_path or ""),
+                    max(0, int(record.page_count)),
+                    str(record.state),
+                    snapshot_json,
+                    str(record.error or ""),
+                    int(record.deleted_at or now),
+                    int(record.updated_at or now),
+                    str(Path(record.database_path).resolve())
+                    if record.database_path
+                    else "",
+                    str(Path(record.manga_root).resolve())
+                    if record.manga_root
+                    else "",
+                ),
+            )
+
+    def gallery_trash(self, gid: int) -> Optional[GalleryTrashRecord]:
+        self.initialize()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT gid, title, folder, dirname, cover_path, page_count,
+                       state, external_snapshot_json, error, deleted_at, updated_at,
+                       database_path, manga_root
+                FROM gallery_trash WHERE gid = ?
+                """,
+                (int(gid),),
+            ).fetchone()
+        return self._gallery_trash_from_row(row) if row is not None else None
+
+    def gallery_trash_records(self):
+        self.initialize()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT gid, title, folder, dirname, cover_path, page_count,
+                       state, external_snapshot_json, error, deleted_at, updated_at,
+                       database_path, manga_root
+                FROM gallery_trash ORDER BY deleted_at DESC, gid DESC
+                """
+            ).fetchall()
+        return tuple(self._gallery_trash_from_row(row) for row in rows)
+
+    def update_gallery_trash_state(self, gid, state, error=""):
+        self.initialize()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE gallery_trash
+                SET state = ?, error = ?, updated_at = ? WHERE gid = ?
+                """,
+                (str(state), str(error or ""), time.time_ns(), int(gid)),
+            )
+
+    def delete_gallery_trash_record(self, gid):
+        self.initialize()
+        with self._connect() as connection:
+            connection.execute("DELETE FROM gallery_trash WHERE gid = ?", (int(gid),))
+
+    def purge_gallery(self, gid):
+        """Remove every RSViewer-owned relation after permanent file deletion."""
+        self.initialize()
+        gid = int(gid)
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE multi_labels SET last_gid = NULL WHERE last_gid = ?", (gid,)
+            )
+            for table, column in (
+                ("manga_multi_labels", "gid"),
+                ("manga_taxonomy_labels", "gid"),
+                ("manga_primary_labels", "gid"),
+                ("manga_favorites", "gid"),
+                ("manga_browsing_history", "gid"),
+                ("manga_reading_progress", "gid"),
+                ("gallery_update_tasks", "source_gid"),
+                ("gallery_original_states", "gid"),
+                ("online_gallery_downloads", "gid"),
+                ("gallery_sync_records", "gid"),
+            ):
+                connection.execute(
+                    f"DELETE FROM {table} WHERE {column} = ?", (gid,)
+                )
+            connection.execute("DELETE FROM gallery_trash WHERE gid = ?", (gid,))
+
+    def mark_interrupted_gallery_trash(self):
+        self.initialize()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE gallery_trash
+                SET state = 'failed',
+                    error = CASE
+                        WHEN error = '' THEN '上次回收站操作已中断，可重新还原或删除'
+                        ELSE error
+                    END,
+                    updated_at = ?
+                WHERE state IN ('moving', 'restoring', 'deleting')
+                """,
+                (time.time_ns(),),
+            )
+
     def save_gallery_update(self, record: GalleryUpdateRecord):
         self.initialize()
         now = time.time_ns()
@@ -1133,8 +1315,10 @@ class UserLibraryRepository:
                    page_count, metadata_json, error, created_at, updated_at
             FROM gallery_update_tasks
         """
+        conditions = ["source_gid NOT IN (SELECT gid FROM gallery_trash)"]
         if not include_completed:
-            query += " WHERE state != 'completed'"
+            conditions.append("state != 'completed'")
+        query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY updated_at DESC"
         with self._connect() as connection:
             rows = connection.execute(query).fetchall()
@@ -1348,6 +1532,7 @@ class UserLibraryRepository:
                        created_at, updated_at, download_mode
                 FROM online_gallery_downloads
                 WHERE state != 'completed'
+                  AND gid NOT IN (SELECT gid FROM gallery_trash)
                 ORDER BY updated_at DESC
                 """
             ).fetchall()
@@ -1656,6 +1841,30 @@ class UserLibraryRepository:
             error=str(row[9] or ""),
             created_at=int(row[10]),
             updated_at=int(row[11]),
+        )
+
+    @staticmethod
+    def _gallery_trash_from_row(row) -> GalleryTrashRecord:
+        try:
+            snapshot = json.loads(str(row[7] or "{}"))
+        except (TypeError, ValueError):
+            snapshot = {}
+        if not isinstance(snapshot, dict):
+            snapshot = {}
+        return GalleryTrashRecord(
+            gid=int(row[0]),
+            title=str(row[1]),
+            folder=Path(str(row[2])),
+            dirname=str(row[3]),
+            cover_path=Path(str(row[4])) if str(row[4] or "") else None,
+            page_count=max(0, int(row[5])),
+            state=str(row[6]),
+            external_snapshot=snapshot,
+            error=str(row[8] or ""),
+            deleted_at=int(row[9]),
+            updated_at=int(row[10]),
+            database_path=Path(str(row[11])) if str(row[11] or "") else None,
+            manga_root=Path(str(row[12])) if str(row[12] or "") else None,
         )
 
     @staticmethod

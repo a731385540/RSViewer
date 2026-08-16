@@ -247,6 +247,30 @@ class LibraryOrganizerTests(unittest.TestCase):
             interface.deleteLater()
             QApplication.processEvents()
 
+    def test_interface_uses_responsive_cover_card_grid(self):
+        records = self._scan()
+        interface = LibraryOrganizerInterface()
+        try:
+            interface.resize(900, 700)
+            interface.show()
+            interface.setRecords(records)
+            QApplication.processEvents()
+            interface._relayoutCards()
+
+            self.assertGreaterEqual(interface._lastColumns, 3)
+            cards = list(interface._cards.values())
+            self.assertEqual(0, interface.contentLayout.indexOf(cards[0]))
+            self.assertGreater(cards[0].coverLabel.height(), cards[0].coverLabel.width())
+
+            interface.resize(360, 600)
+            QApplication.processEvents()
+            interface._relayoutCards()
+            self.assertEqual(1, interface._lastColumns)
+        finally:
+            interface.close()
+            interface.deleteLater()
+            QApplication.processEvents()
+
     def test_delete_worker_uses_recycle_bin_operation(self):
         records = self._scan()
         completed = []

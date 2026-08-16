@@ -353,6 +353,7 @@ class LocalLibraryControlsTests(unittest.TestCase):
                 "选择分类…",
                 "选择播放列表…",
                 "选择归类…",
+                "移入回收站",
             ],
             [action.text() for action in menu.menuActions() if action.text()],
         )
