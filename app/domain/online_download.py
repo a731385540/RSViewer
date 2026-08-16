@@ -8,6 +8,20 @@ ONLINE_DOWNLOAD_PAUSED = "paused"
 ONLINE_DOWNLOAD_FAILED = "failed"
 ONLINE_DOWNLOAD_COMPLETED = "completed"
 
+DOWNLOAD_MODE_STANDARD = "standard"
+DOWNLOAD_MODE_ORIGINAL_DIRECT = "original_direct"
+DOWNLOAD_MODE_ORIGINAL_LOCAL = "original_local"
+
+ORIGINAL_STATE_QUEUED = "queued"
+ORIGINAL_STATE_DOWNLOADING = "downloading"
+ORIGINAL_STATE_PAUSED = "paused"
+ORIGINAL_STATE_FAILED = "failed"
+ORIGINAL_STATE_STAGED = "staged"
+ORIGINAL_STATE_REPLACING_BASE = "replacing_base"
+ORIGINAL_STATE_REPLACING_ORIGINAL = "replacing_original"
+ORIGINAL_STATE_ACTIVE = "active"
+ORIGINAL_STATE_CLEANING = "cleaning"
+
 
 @dataclass(frozen=True)
 class OnlineGalleryDownloadRecord:
@@ -19,6 +33,23 @@ class OnlineGalleryDownloadRecord:
     page_count: int
     completed_pages: int = 0
     state: str = ONLINE_DOWNLOAD_QUEUED
+    download_mode: str = DOWNLOAD_MODE_STANDARD
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+    error: str = ""
+    created_at: int = 0
+    updated_at: int = 0
+
+
+@dataclass(frozen=True)
+class GalleryOriginalState:
+    gid: int
+    site: str
+    token: str
+    dirname: str
+    mode: str
+    state: str = ORIGINAL_STATE_QUEUED
+    completed_pages: int = 0
+    page_count: int = 0
     metadata: Mapping[str, Any] = field(default_factory=dict)
     error: str = ""
     created_at: int = 0

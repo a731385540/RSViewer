@@ -13,12 +13,22 @@ from qfluentwidgets import (
 )
 from qfluentwidgets import FluentIcon as FIF
 
+from app.domain.online_download import (
+    DOWNLOAD_MODE_ORIGINAL_DIRECT,
+    DOWNLOAD_MODE_ORIGINAL_LOCAL,
+)
+
 
 STATE_TEXT = {
     "queued": "等待中",
     "downloading": "正在下载",
     "paused": "已暂停",
     "failed": "下载失败",
+}
+
+DOWNLOAD_MODE_TEXT = {
+    DOWNLOAD_MODE_ORIGINAL_DIRECT: "直接下载原图",
+    DOWNLOAD_MODE_ORIGINAL_LOCAL: "本地画廊下载原图",
 }
 
 
@@ -88,7 +98,11 @@ class DownloadTaskCard(SimpleCardWidget):
         if self.active:
             state_text = "正在下载"
         self.titleLabel.setText(record.title or str(record.gid))
-        metadata = f"GID {record.gid} · {completed} / {total} 页 · {state_text}"
+        mode_text = DOWNLOAD_MODE_TEXT.get(record.download_mode, "基础下载")
+        metadata = (
+            f"GID {record.gid} · {mode_text} · "
+            f"{completed} / {total} 页 · {state_text}"
+        )
         if self.active:
             metadata += " · " + (
                 format_download_speed(speed) if speed > 0 else self.tr("测速中")

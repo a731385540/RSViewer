@@ -11,8 +11,9 @@ from PySide6.QtTest import QTest
 from qfluentwidgets import FluentWindow
 
 from app.common.config import cfg
+from app.domain.gallery_update import GalleryUpdateRecord, UPDATE_QUEUED
 from app.domain.online_download import OnlineGalleryDownloadRecord
-from app.view.main_window import MainWindow
+from app.view.main_window import MAX_ONLINE_DOWNLOAD_CONCURRENCY, MainWindow
 
 
 class FakeSignal:
@@ -47,9 +48,13 @@ class FakeBootstrapWorker:
 class FakeThreadPool:
     def __init__(self):
         self.started = []
+        self.max_thread_counts = []
 
     def start(self, worker):
         self.started.append(worker)
+
+    def setMaxThreadCount(self, value):
+        self.max_thread_counts.append(int(value))
 
 
 class EmptySyncRepository:
@@ -78,6 +83,9 @@ class DownloadPreparationRepository:
 
     def online_gallery_download(self, gid):
         return self.records.get(int(gid))
+
+    def gallery_original_state(self, _gid):
+        return None
 
     def save_online_gallery_download(self, record, _comments=()):
         self.records[int(record.gid)] = record
@@ -146,6 +154,7 @@ class MainWindowNavigationTests(unittest.TestCase):
                 "历史记录",
                 "正在下载",
                 "更新管理",
+                "整理",
             ],
             [navigation.widget(route).text() for route in manga_routes],
         )
@@ -449,6 +458,82 @@ class MainWindowNavigationTests(unittest.TestCase):
 
         window._registerDownloadedGallery(object(), gid, "folder")
         self.assertEqual([True], reloads)
+
+    def test_second_gallery_update_stays_queued_while_one_is_running(self):
+        record = GalleryUpdateRecord(
+            source_gid=2,
+            source_token="token",
+            site="ehentai",
+            title="Queued",
+            folder="queued",
+            latest_url="https://e-hentai.org/g/2/token/",
+        )
+        state_updates = []
+        repository = SimpleNamespace(
+            gallery_update=lambda _gid: record,
+            update_gallery_update_state=lambda *args, **kwargs: state_updates.append(
+                (args, kwargs)
+            ),
+        )
+        window = SimpleNamespace(
+            _galleryUpdateWorkers={1: object()},
+            _libraryItems=[],
+            userLibraryRepository=repository,
+            _refreshUpdateManager=lambda: None,
+            _syncCurrentGalleryUpdate=lambda _gid: None,
+        )
+
+        MainWindow.startGalleryUpdate(window, 2)
+
+        self.assertEqual(((2, UPDATE_QUEUED), {"error": ""}), state_updates[-1])
+
+    def test_gallery_update_queue_starts_oldest_entry_next(self):
+        records = (
+            GalleryUpdateRecord(
+                source_gid=2,
+                source_token="two",
+                site="ehentai",
+                title="Second",
+                folder="second",
+                latest_url="https://e-hentai.org/g/2/two/",
+                updated_at=20,
+            ),
+            GalleryUpdateRecord(
+                source_gid=1,
+                source_token="one",
+                site="ehentai",
+                title="First",
+                folder="first",
+                latest_url="https://e-hentai.org/g/1/one/",
+                updated_at=10,
+            ),
+        )
+        started = []
+        window = SimpleNamespace(
+            _closing=False,
+            _galleryUpdateWorkers={},
+            userLibraryRepository=SimpleNamespace(
+                gallery_updates=lambda: records
+            ),
+            startGalleryUpdate=started.append,
+        )
+
+        with patch(
+            "app.view.main_window.QTimer.singleShot",
+            side_effect=lambda _delay, callback: callback(),
+        ):
+            MainWindow._startNextGalleryUpdate(window)
+
+        self.assertEqual([1], started)
+
+    def test_download_concurrency_is_hard_capped_at_three(self):
+        pool = FakeThreadPool()
+        window = SimpleNamespace(onlineDownloadThreadPool=pool)
+
+        MainWindow._updateOnlineDownloadConcurrency(window, 6)
+
+        self.assertEqual(3, MAX_ONLINE_DOWNLOAD_CONCURRENCY)
+        self.assertEqual([3], pool.max_thread_counts)
 
 
 if __name__ == "__main__":

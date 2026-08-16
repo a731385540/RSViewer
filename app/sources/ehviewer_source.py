@@ -112,17 +112,7 @@ class EhViewerDataSource:
 
     def load_pages(self, item: MangaItem) -> MangaItem:
         """按需读取单本漫画页面；只在用户打开详情时调用。"""
-        pages = tuple(
-            sorted(
-                (
-                    path
-                    for path in item.folder.iterdir()
-                    if path.is_file()
-                    and path.suffix.casefold() in IMAGE_SUFFIXES
-                ),
-                key=natural_page_key,
-            )
-        )
+        pages = self.list_page_files(item.folder)
         spider_info = self.read_spider_info(item)
         if spider_info is None:
             downloaded_count = len(pages)
@@ -152,6 +142,23 @@ class EhViewerDataSource:
             download_complete=complete,
             gallery_token=gallery_token,
             page_tokens=page_tokens,
+        )
+
+    @staticmethod
+    def list_page_files(folder):
+        folder = Path(folder)
+        if not folder.is_dir():
+            return ()
+        return tuple(
+            sorted(
+                (
+                    path
+                    for path in folder.iterdir()
+                    if path.is_file()
+                    and path.suffix.casefold() in IMAGE_SUFFIXES
+                ),
+                key=natural_page_key,
+            )
         )
 
     @staticmethod

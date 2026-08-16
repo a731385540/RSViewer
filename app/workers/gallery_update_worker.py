@@ -16,7 +16,7 @@ from app.domain.gallery_update import (
     UPDATE_PAUSED,
     UPDATE_RUNNING,
 )
-from app.domain.online_download import GallerySyncRecord
+from app.domain.online_download import GallerySyncRecord, ORIGINAL_STATE_ACTIVE
 from app.domain.online_gallery import OnlineGallery, OnlineGalleryPreview
 from app.repositories.gallery_update_state_repository import (
     GalleryUpdateStateRepository,
@@ -400,9 +400,14 @@ class GalleryUpdateWorker(QRunnable):
                 page_token=token,
             )
             started_at = time.monotonic()
+            page_method = (
+                "load_gallery_page_original"
+                if self.record.metadata.get("image_mode") == "original"
+                else "load_gallery_page_image"
+            )
             data = self._retry(
                 lambda: self._provider_call(
-                    "load_gallery_page_image", detail.gallery, preview
+                    page_method, detail.gallery, preview
                 ),
                 f"第 {index + 1} 页",
             )
@@ -551,6 +556,25 @@ class GalleryUpdateWorker(QRunnable):
             detail.gallery.gid,
             mapped_progress,
         )
+        original = self.user_repository.gallery_original_state(
+            detail.gallery.gid
+        )
+        if original is not None:
+            metadata = dict(original.metadata or {})
+            metadata["image_mode"] = "original"
+            self.user_repository.save_gallery_original_state(
+                replace(
+                    original,
+                    gid=int(detail.gallery.gid),
+                    site=str(self.record.site),
+                    token=str(detail.gallery.token),
+                    state=ORIGINAL_STATE_ACTIVE,
+                    completed_pages=int(detail.page_count),
+                    page_count=int(detail.page_count),
+                    metadata=metadata,
+                    error="",
+                )
+            )
         self.user_repository.save_gallery_sync(
             GallerySyncRecord(
                 gid=int(detail.gallery.gid),
@@ -584,6 +608,9 @@ class GalleryUpdateWorker(QRunnable):
         self.signals.completed.emit(self.record.source_gid, detail.gallery.gid)
 
     def _save_resolved_record(self, detail, sidecar, status):
+        metadata = online_detail_metadata(detail)
+        if self.record.metadata.get("image_mode") == "original":
+            metadata["image_mode"] = "original"
         self.record = replace(
             self.record,
             latest_url=str(detail.gallery.url),
@@ -592,7 +619,7 @@ class GalleryUpdateWorker(QRunnable):
             status=int(status),
             state=UPDATE_RUNNING,
             page_count=int(detail.page_count),
-            metadata=online_detail_metadata(detail),
+            metadata=metadata,
             error="",
         )
         self.user_repository.save_gallery_update(self.record)

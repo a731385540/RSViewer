@@ -252,6 +252,12 @@ class _OnlineGalleryCardBase(CardWidget):
         menu.exec(event.globalPos())
         event.accept()
 
+    def mouseReleaseEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
 
 class OnlineGalleryCard(_OnlineGalleryCardBase):
     def __init__(

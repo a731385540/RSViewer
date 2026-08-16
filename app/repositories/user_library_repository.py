@@ -6,14 +6,19 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from app.domain.gallery_update import GalleryUpdateRecord
-from app.domain.online_download import GallerySyncRecord, OnlineGalleryDownloadRecord
+from app.domain.online_download import (
+    DOWNLOAD_MODE_STANDARD,
+    GalleryOriginalState,
+    GallerySyncRecord,
+    OnlineGalleryDownloadRecord,
+)
 from app.domain.online_gallery import OnlineGalleryComment
 
 
 class UserLibraryRepository:
     """RSViewer 自有数据库；绝不在外部 EhViewer 库中建表。"""
 
-    SCHEMA_VERSION = 10
+    SCHEMA_VERSION = 11
 
     def __init__(self, database_path: Path):
         self.database_path = Path(database_path).resolve()
@@ -325,6 +330,42 @@ class UserLibraryRepository:
                     """
                 )
                 connection.execute("PRAGMA user_version = 10")
+            if version < 11:
+                download_columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(online_gallery_downloads)"
+                    )
+                }
+                if "download_mode" not in download_columns:
+                    connection.execute(
+                        "ALTER TABLE online_gallery_downloads "
+                        "ADD COLUMN download_mode TEXT NOT NULL DEFAULT 'standard'"
+                    )
+                connection.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS gallery_original_states (
+                        gid INTEGER PRIMARY KEY,
+                        site TEXT NOT NULL,
+                        token TEXT NOT NULL,
+                        dirname TEXT NOT NULL,
+                        mode TEXT NOT NULL,
+                        state TEXT NOT NULL,
+                        completed_pages INTEGER NOT NULL DEFAULT 0
+                            CHECK (completed_pages >= 0),
+                        page_count INTEGER NOT NULL DEFAULT 0
+                            CHECK (page_count >= 0),
+                        metadata_json TEXT NOT NULL DEFAULT '{}',
+                        error TEXT NOT NULL DEFAULT '',
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_gallery_original_state
+                        ON gallery_original_states(state, updated_at DESC);
+                    """
+                )
+                connection.execute("PRAGMA user_version = 11")
 
     def list_labels(self) -> List[Tuple[int, str, int]]:
         self.initialize()
@@ -953,8 +994,8 @@ class UserLibraryRepository:
                 INSERT INTO online_gallery_downloads(
                     gid, site, token, title, dirname, page_count,
                     completed_pages, state, metadata_json, error,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, updated_at, download_mode
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(gid) DO UPDATE SET
                     site = excluded.site,
                     token = excluded.token,
@@ -965,6 +1006,7 @@ class UserLibraryRepository:
                     state = excluded.state,
                     metadata_json = excluded.metadata_json,
                     error = excluded.error,
+                    download_mode = excluded.download_mode,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -980,6 +1022,7 @@ class UserLibraryRepository:
                     str(record.error or ""),
                     int(record.created_at or now),
                     int(record.updated_at or now),
+                    str(record.download_mode or DOWNLOAD_MODE_STANDARD),
                 ),
             )
             connection.execute(
@@ -1203,6 +1246,32 @@ class UserLibraryRepository:
                 "DELETE FROM manga_reading_progress WHERE gid = ?", (source_gid,)
             )
             connection.execute(
+                """
+                INSERT INTO gallery_original_states(
+                    gid, site, token, dirname, mode, state, completed_pages,
+                    page_count, metadata_json, error, created_at, updated_at
+                )
+                SELECT ?, site, token, dirname, mode, state, completed_pages,
+                       page_count, metadata_json, error, created_at, updated_at
+                FROM gallery_original_states WHERE gid = ?
+                ON CONFLICT(gid) DO UPDATE SET
+                    site = excluded.site,
+                    token = excluded.token,
+                    dirname = excluded.dirname,
+                    mode = excluded.mode,
+                    state = excluded.state,
+                    completed_pages = excluded.completed_pages,
+                    page_count = excluded.page_count,
+                    metadata_json = excluded.metadata_json,
+                    error = excluded.error,
+                    updated_at = excluded.updated_at
+                """,
+                (target_gid, source_gid),
+            )
+            connection.execute(
+                "DELETE FROM gallery_original_states WHERE gid = ?", (source_gid,)
+            )
+            connection.execute(
                 "DELETE FROM online_gallery_downloads WHERE gid = ?", (source_gid,)
             )
             connection.execute(
@@ -1240,7 +1309,7 @@ class UserLibraryRepository:
                 """
                 SELECT gid, site, token, title, dirname, page_count,
                        completed_pages, state, metadata_json, error,
-                       created_at, updated_at
+                       created_at, updated_at, download_mode
                 FROM online_gallery_downloads WHERE gid = ?
                 """,
                 (int(gid),),
@@ -1259,7 +1328,7 @@ class UserLibraryRepository:
                 """
                 SELECT gid, site, token, title, dirname, page_count,
                        completed_pages, state, metadata_json, error,
-                       created_at, updated_at
+                       created_at, updated_at, download_mode
                 FROM online_gallery_downloads
                 """
             ).fetchall()
@@ -1276,7 +1345,7 @@ class UserLibraryRepository:
                 """
                 SELECT gid, site, token, title, dirname, page_count,
                        completed_pages, state, metadata_json, error,
-                       created_at, updated_at
+                       created_at, updated_at, download_mode
                 FROM online_gallery_downloads
                 WHERE state != 'completed'
                 ORDER BY updated_at DESC
@@ -1299,6 +1368,134 @@ class UserLibraryRepository:
                 WHERE state IN ('queued', 'downloading')
                 """,
                 (time.time_ns(),),
+            )
+            connection.execute(
+                """
+                UPDATE gallery_original_states
+                SET state = 'paused',
+                    error = CASE
+                        WHEN error = '' THEN '上次原图下载已中断，可继续下载'
+                        ELSE error
+                    END,
+                    updated_at = ?
+                WHERE state IN ('queued', 'downloading')
+                """,
+                (time.time_ns(),),
+            )
+
+    def save_gallery_original_state(self, record: GalleryOriginalState):
+        self.initialize()
+        now = time.time_ns()
+        metadata_json = json.dumps(
+            dict(record.metadata or {}),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO gallery_original_states(
+                    gid, site, token, dirname, mode, state, completed_pages,
+                    page_count, metadata_json, error, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(gid) DO UPDATE SET
+                    site = excluded.site,
+                    token = excluded.token,
+                    dirname = excluded.dirname,
+                    mode = excluded.mode,
+                    state = excluded.state,
+                    completed_pages = excluded.completed_pages,
+                    page_count = excluded.page_count,
+                    metadata_json = excluded.metadata_json,
+                    error = excluded.error,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    int(record.gid),
+                    str(record.site),
+                    str(record.token),
+                    str(record.dirname),
+                    str(record.mode),
+                    str(record.state),
+                    max(0, int(record.completed_pages)),
+                    max(0, int(record.page_count)),
+                    metadata_json,
+                    str(record.error or ""),
+                    int(record.created_at or now),
+                    int(record.updated_at or now),
+                ),
+            )
+
+    def update_gallery_original_state(
+        self,
+        gid,
+        state,
+        completed_pages=None,
+        page_count=None,
+        error="",
+        dirname=None,
+    ):
+        self.initialize()
+        assignments = ["state = ?", "error = ?", "updated_at = ?"]
+        values = [str(state), str(error or ""), time.time_ns()]
+        if completed_pages is not None:
+            assignments.append("completed_pages = ?")
+            values.append(max(0, int(completed_pages)))
+        if page_count is not None:
+            assignments.append("page_count = ?")
+            values.append(max(0, int(page_count)))
+        if dirname is not None:
+            assignments.append("dirname = ?")
+            values.append(str(dirname))
+        values.append(int(gid))
+        with self._connect() as connection:
+            connection.execute(
+                f"UPDATE gallery_original_states SET {', '.join(assignments)} "
+                "WHERE gid = ?",
+                tuple(values),
+            )
+
+    def gallery_original_state(self, gid: int) -> Optional[GalleryOriginalState]:
+        self.initialize()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT gid, site, token, dirname, mode, state, completed_pages,
+                       page_count, metadata_json, error, created_at, updated_at
+                FROM gallery_original_states WHERE gid = ?
+                """,
+                (int(gid),),
+            ).fetchone()
+        return self._gallery_original_from_row(row) if row is not None else None
+
+    def gallery_original_states_for_mangas(
+        self, gids: Sequence[int]
+    ) -> Dict[int, GalleryOriginalState]:
+        self.initialize()
+        target_gids = {int(gid) for gid in gids}
+        if not target_gids:
+            return {}
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT gid, site, token, dirname, mode, state, completed_pages,
+                       page_count, metadata_json, error, created_at, updated_at
+                FROM gallery_original_states
+                """
+            ).fetchall()
+        return {
+            int(row[0]): self._gallery_original_from_row(row)
+            for row in rows
+            if int(row[0]) in target_gids
+        }
+
+    def delete_gallery_original_state(self, gid: int):
+        self.initialize()
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM gallery_original_states WHERE gid = ?",
+                (int(gid),),
             )
 
     def delete_online_gallery_download(self, gid: int):
@@ -1427,6 +1624,34 @@ class UserLibraryRepository:
             page_count=int(row[5]),
             completed_pages=int(row[6]),
             state=str(row[7]),
+            download_mode=(
+                str(row[12] or DOWNLOAD_MODE_STANDARD)
+                if len(row) > 12
+                else DOWNLOAD_MODE_STANDARD
+            ),
+            metadata=metadata,
+            error=str(row[9] or ""),
+            created_at=int(row[10]),
+            updated_at=int(row[11]),
+        )
+
+    @staticmethod
+    def _gallery_original_from_row(row) -> GalleryOriginalState:
+        try:
+            metadata = json.loads(str(row[8] or "{}"))
+        except (TypeError, ValueError):
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        return GalleryOriginalState(
+            gid=int(row[0]),
+            site=str(row[1]),
+            token=str(row[2]),
+            dirname=str(row[3]),
+            mode=str(row[4]),
+            state=str(row[5]),
+            completed_pages=int(row[6]),
+            page_count=int(row[7]),
             metadata=metadata,
             error=str(row[9] or ""),
             created_at=int(row[10]),

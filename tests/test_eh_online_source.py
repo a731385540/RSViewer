@@ -91,6 +91,43 @@ class EhOnlineProviderContractTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_streaming_download_caps_no_data_timeout(self):
+        provider = RefactoredEhOnlineProvider(
+            EhOnlineSettings.create(proxy_mode="direct", timeout_seconds=60)
+        )
+
+        class FakeResponse:
+            ok = True
+            status_code = 200
+
+            def iter_content(self, chunk_size):
+                self.chunk_size = chunk_size
+                yield b"image-data"
+
+            def close(self):
+                pass
+
+        class CapturingRequest:
+            def __init__(self):
+                self.kwargs = None
+
+            def get(self, _url, **kwargs):
+                self.kwargs = kwargs
+                return FakeResponse()
+
+        request = CapturingRequest()
+        provider._crawler = type("Crawler", (), {"req": request})()
+
+        data, status = provider._request_bytes_cancellable(
+            "https://exhentai.org/fullimg/1/1/key/page.jpg",
+            lambda: False,
+        )
+
+        self.assertEqual(b"image-data", data)
+        self.assertEqual(200, status)
+        self.assertTrue(request.kwargs["stream"])
+        self.assertEqual((15, 15), request.kwargs["timeout"])
+
     @staticmethod
     def _capture_error(errors, operation):
         try:
@@ -409,6 +446,9 @@ class EhOnlineProviderContractTests(unittest.TestCase):
         """
         image_page_html = b"""
         <div id="i3"><img id="img" src="https://b.hath.network/page.png"/></div>
+        <a href="https://e-hentai.org/fullimg/123/21/originalkey/021.jpg">
+          Download original
+        </a>
         """
         image_data = base64.b64decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
@@ -430,7 +470,11 @@ class EhOnlineProviderContractTests(unittest.TestCase):
                     return FakeResponse(preview_html)
                 if "/s/" in url:
                     return FakeResponse(image_page_html)
-                if url.endswith("page.png") or url.endswith("thumb.webp"):
+                if (
+                    url.endswith("page.png")
+                    or url.endswith("thumb.webp")
+                    or "/fullimg/" in url
+                ):
                     return FakeResponse(image_data)
                 raise AssertionError(url)
 
@@ -442,6 +486,7 @@ class EhOnlineProviderContractTests(unittest.TestCase):
         page = provider.load_gallery_preview_page(gallery, 2)
         thumb_data = provider.load_preview_thumbnail(page.items[0])
         page_data = provider.load_gallery_page_image(gallery, page.items[0])
+        original_data = provider.load_gallery_page_original(gallery, page.items[0])
 
         self.assertEqual(2, page.page_number)
         self.assertEqual(2, page.page_count)
@@ -455,12 +500,15 @@ class EhOnlineProviderContractTests(unittest.TestCase):
         ))
         self.assertEqual(image_data, thumb_data)
         self.assertEqual(image_data, page_data)
+        self.assertEqual(image_data, original_data)
         self.assertEqual(
             [
                 "https://e-hentai.org/g/123/abc/?p=1",
                 "https://a.hath.network/thumb.webp",
                 "https://e-hentai.org/s/pagetoken/123-21",
                 "https://b.hath.network/page.png",
+                "https://e-hentai.org/s/pagetoken/123-21",
+                "https://e-hentai.org/fullimg/123/21/originalkey/021.jpg",
             ],
             provider._crawler.req.urls,
         )
@@ -470,6 +518,12 @@ class EhOnlineProviderContractTests(unittest.TestCase):
         )
         with self.assertRaises(EhOnlineError):
             provider.load_gallery_page_image(gallery, foreign_preview)
+
+        provider._crawler.req.get = lambda _url: FakeResponse(
+            b'<a href="https://e-hentai.org/fullimg/999/21/key/021.jpg">original</a>'
+        )
+        with self.assertRaises(EhOnlineError):
+            provider.load_gallery_page_original(gallery, page.items[0])
 
 
 if __name__ == "__main__":

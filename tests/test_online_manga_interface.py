@@ -6,7 +6,9 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QCoreApplication, QEvent, QPoint
+from PySide6.QtCore import QCoreApplication, QEvent, QPoint, Qt
+from PySide6.QtGui import QContextMenuEvent
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from qfluentwidgets import Theme, qconfig, setTheme
 
@@ -402,25 +404,36 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
                 (gallery, current_provider, cover)
             )
         )
+        opened = []
+        interface.galleryActivated.connect(
+            lambda gallery, _provider, _cover: opened.append(gallery)
+        )
+        interface.resize(1100, 760)
+        interface.show()
+        QApplication.processEvents()
 
-        class ContextEvent:
-            accepted = False
+        for view_mode in ("card", "extended"):
+            with self.subTest(view_mode=view_mode):
+                cfg.set(cfg.onlineEhViewMode, view_mode)
+                interface._setItems((item,))
+                QApplication.processEvents()
+                card = interface._cards[0]
 
-            def globalPos(self):
-                return QPoint(10, 10)
+                QTest.mouseClick(card, Qt.RightButton, pos=card.rect().center())
+                self.assertEqual([], opened)
 
-            def accept(self):
-                self.accepted = True
+                event = QContextMenuEvent(
+                    QContextMenuEvent.Mouse,
+                    QPoint(10, 10),
+                    card.mapToGlobal(QPoint(10, 10)),
+                )
+                with patch(
+                    "app.view.online_manga_interface.RoundMenu.exec",
+                    lambda menu, _position: menu.actions()[0].trigger(),
+                ):
+                    QApplication.sendEvent(card, event)
 
-        event = ContextEvent()
-        with patch(
-            "app.view.online_manga_interface.RoundMenu.exec",
-            lambda menu, _position: menu.actions()[0].trigger(),
-        ):
-            interface._cards[0].contextMenuEvent(event)
-
-        self.assertTrue(event.accepted)
-        self.assertEqual([(item, provider, b"")], requested)
+        self.assertEqual([(item, provider, b""), (item, provider, b"")], requested)
         interface.deleteLater()
 
     def test_cover_pool_concurrency_updates_immediately(self):

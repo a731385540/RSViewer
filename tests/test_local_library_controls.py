@@ -23,6 +23,7 @@ from app.view.local_manga_interface import (
     FluentSplitterHandle,
     LocalMangaInterface,
     MangaLabelSelectionDialog,
+    ORIGINAL_PENDING_BORDER_COLOR,
     PlaylistOrderDialog,
 )
 from app.view.manga_history_interface import MangaHistoryInterface
@@ -101,6 +102,9 @@ class LocalLibraryControlsTests(unittest.TestCase):
         self.interface._onLoaded(
             (self.items, ["分类 A", "分类 B"], [])
         )
+
+    def test_original_pending_border_uses_dark_yellow(self):
+        self.assertEqual("#B8860B", ORIGINAL_PENDING_BORDER_COLOR)
 
     def tearDown(self):
         self.interface.cancelLoad()

@@ -88,6 +88,11 @@ class MangaItem:
     taxonomy_label_ids: Tuple[int, ...] = ()
     taxonomy_labels: Tuple[str, ...] = ()
     is_favorite: bool = False
+    original_mode: str = ""
+    original_state: str = ""
+    original_page_paths: Tuple[Path, ...] = ()
+    original_completed_pages: int = 0
+    standard_download_pending: bool = False
 
     @property
     def cover_image_path(self) -> Path:

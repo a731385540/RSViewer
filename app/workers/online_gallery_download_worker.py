@@ -1,16 +1,27 @@
 import math
 import inspect
+import os
 import time
+from pathlib import Path
 from threading import Lock
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 from PySide6.QtGui import QImage, QImageReader
 
 from app.domain.online_download import (
+    DOWNLOAD_MODE_ORIGINAL_DIRECT,
+    DOWNLOAD_MODE_ORIGINAL_LOCAL,
+    DOWNLOAD_MODE_STANDARD,
+    ORIGINAL_STATE_ACTIVE,
+    ORIGINAL_STATE_DOWNLOADING,
+    ORIGINAL_STATE_FAILED,
+    ORIGINAL_STATE_PAUSED,
+    ORIGINAL_STATE_STAGED,
     ONLINE_DOWNLOAD_COMPLETED,
     ONLINE_DOWNLOAD_DOWNLOADING,
     ONLINE_DOWNLOAD_FAILED,
     ONLINE_DOWNLOAD_PAUSED,
+    GalleryOriginalState,
     OnlineGalleryDownloadRecord,
 )
 from app.domain.online_gallery import OnlineGalleryPreviewPage
@@ -28,6 +39,7 @@ class OnlineGalleryDownloadSignals(QObject):
     galleryRegistered = Signal(int, str)
     sidecarReady = Signal(int, str)
     pageSaved = Signal(int, int, str, int, int)
+    originalPageSaved = Signal(int, int, str, int, int)
     completed = Signal(int, str)
     failed = Signal(int, str)
     paused = Signal(int)
@@ -50,6 +62,8 @@ class OnlineGalleryDownloadWorker(QRunnable):
         user_repository,
         site,
         target_label="",
+        download_mode=DOWNLOAD_MODE_STANDARD,
+        existing_folder=None,
         retry_count=3,
     ):
         super().__init__()
@@ -61,6 +75,14 @@ class OnlineGalleryDownloadWorker(QRunnable):
         self.user_repository = user_repository
         self.site = str(site)
         self.target_label = str(target_label or "").strip()
+        self.download_mode = str(download_mode or DOWNLOAD_MODE_STANDARD)
+        if self.download_mode not in {
+            DOWNLOAD_MODE_STANDARD,
+            DOWNLOAD_MODE_ORIGINAL_DIRECT,
+            DOWNLOAD_MODE_ORIGINAL_LOCAL,
+        }:
+            raise ValueError("未知的画廊下载模式")
+        self.existing_folder = Path(existing_folder) if existing_folder else None
         self.retry_count = max(1, int(retry_count))
         self.cancelled = False
         self._smoothed_speed = 0.0
@@ -89,11 +111,20 @@ class OnlineGalleryDownloadWorker(QRunnable):
         try:
             self._check_cancelled()
             self.signals.stageChanged.emit("正在保存画廊信息与评论…")
-            dirname, folder = self.ehviewer_repository.prepare_download(
-                self.detail,
-                self.target_label,
-            )
-            completed_indexes = self._existing_page_indexes(folder)
+            if self.download_mode == DOWNLOAD_MODE_ORIGINAL_LOCAL:
+                folder = self._validated_existing_folder()
+                dirname = str(
+                    folder.relative_to(
+                        self.ehviewer_repository.manga_root.resolve()
+                    )
+                )
+            else:
+                dirname, folder = self.ehviewer_repository.prepare_download(
+                    self.detail,
+                    self.target_label,
+                )
+            target_folder = self._target_folder(folder)
+            completed_indexes = self._existing_page_indexes(target_folder)
             completed_pages = len(completed_indexes)
             record = OnlineGalleryDownloadRecord(
                 gid=gid,
@@ -104,6 +135,7 @@ class OnlineGalleryDownloadWorker(QRunnable):
                 page_count=int(self.detail.page_count),
                 completed_pages=completed_pages,
                 state=ONLINE_DOWNLOAD_DOWNLOADING,
+                download_mode=self.download_mode,
                 metadata=online_detail_metadata(
                     self.detail,
                     self.target_label,
@@ -113,21 +145,42 @@ class OnlineGalleryDownloadWorker(QRunnable):
                 record,
                 self.detail.comments,
             )
+            if self._is_original_download:
+                previous = self.user_repository.gallery_original_state(gid)
+                self.user_repository.save_gallery_original_state(
+                    GalleryOriginalState(
+                        gid=gid,
+                        site=self.site,
+                        token=self.detail.gallery.token,
+                        dirname=dirname,
+                        mode=self.download_mode,
+                        state=ORIGINAL_STATE_DOWNLOADING,
+                        completed_pages=completed_pages,
+                        page_count=int(self.detail.page_count),
+                        metadata=online_detail_metadata(
+                            self.detail,
+                            self.target_label,
+                        ),
+                        created_at=previous.created_at if previous else 0,
+                    )
+                )
             self.signals.progressChanged.emit(
                 completed_pages, int(self.detail.page_count)
             )
 
-            self._save_thumbnail(folder)
-            self.signals.galleryRegistered.emit(gid, str(folder))
+            if self.download_mode != DOWNLOAD_MODE_ORIGINAL_LOCAL:
+                self._save_thumbnail(folder)
+                self.signals.galleryRegistered.emit(gid, str(folder))
             self.signals.stageChanged.emit("正在获取全部页面 ID…")
             previews = self._load_all_previews()
             page_tokens = {
                 index: preview.page_token for index, preview in previews.items()
             }
-            self.ehviewer_repository.write_spider_info(
-                folder, self.detail, page_tokens
-            )
-            self.signals.sidecarReady.emit(gid, str(folder))
+            if self.download_mode != DOWNLOAD_MODE_ORIGINAL_LOCAL:
+                self.ehviewer_repository.write_spider_info(
+                    folder, self.detail, page_tokens
+                )
+                self.signals.sidecarReady.emit(gid, str(folder))
 
             total = int(self.detail.page_count)
             for index in range(total):
@@ -155,7 +208,7 @@ class OnlineGalleryDownloadWorker(QRunnable):
                 self.signals.speedChanged.emit(self._smoothed_speed)
                 extension = _image_extension(data)
                 page_path = self.ehviewer_repository.write_page(
-                    folder, index, extension, data
+                    target_folder, index, extension, data
                 )
                 completed_indexes.add(index)
                 completed_pages = len(completed_indexes)
@@ -164,26 +217,54 @@ class OnlineGalleryDownloadWorker(QRunnable):
                     completed_pages,
                     ONLINE_DOWNLOAD_DOWNLOADING,
                 )
-                self.signals.pageSaved.emit(
-                    gid,
-                    index,
-                    str(page_path),
-                    completed_pages,
-                    total,
-                )
+                if self._is_original_download:
+                    self.user_repository.update_gallery_original_state(
+                        gid,
+                        ORIGINAL_STATE_DOWNLOADING,
+                        completed_pages,
+                        total,
+                    )
+                    self.signals.originalPageSaved.emit(
+                        gid,
+                        index,
+                        str(page_path),
+                        completed_pages,
+                        total,
+                    )
+                else:
+                    self.signals.pageSaved.emit(
+                        gid,
+                        index,
+                        str(page_path),
+                        completed_pages,
+                        total,
+                    )
                 self.signals.progressChanged.emit(completed_pages, total)
 
-            self.ehviewer_repository.mark_state(gid, EH_STATE_FINISHED)
+            if self.download_mode != DOWNLOAD_MODE_ORIGINAL_LOCAL:
+                self.ehviewer_repository.mark_state(gid, EH_STATE_FINISHED)
             self.user_repository.update_online_download(
                 gid,
                 total,
                 ONLINE_DOWNLOAD_COMPLETED,
             )
+            if self._is_original_download:
+                self.user_repository.update_gallery_original_state(
+                    gid,
+                    (
+                        ORIGINAL_STATE_ACTIVE
+                        if self.download_mode == DOWNLOAD_MODE_ORIGINAL_DIRECT
+                        else ORIGINAL_STATE_STAGED
+                    ),
+                    total,
+                    total,
+                )
             self.signals.stageChanged.emit("下载完成")
             self.signals.progressChanged.emit(total, total)
             self.signals.completed.emit(gid, str(folder))
         except _DownloadCancelled:
-            self.ehviewer_repository.mark_state(gid, EH_STATE_FAILED)
+            if self.download_mode != DOWNLOAD_MODE_ORIGINAL_LOCAL:
+                self.ehviewer_repository.mark_state(gid, EH_STATE_FAILED)
             record = self.user_repository.online_gallery_download(gid)
             if record is not None:
                 self.user_repository.update_online_download(
@@ -191,10 +272,19 @@ class OnlineGalleryDownloadWorker(QRunnable):
                     max(completed_pages, int(record.completed_pages)),
                     ONLINE_DOWNLOAD_PAUSED,
                 )
+            if self._is_original_download:
+                self.user_repository.update_gallery_original_state(
+                    gid,
+                    ORIGINAL_STATE_PAUSED,
+                    max(completed_pages, int(record.completed_pages))
+                    if record is not None else completed_pages,
+                    int(self.detail.page_count),
+                )
             self.signals.paused.emit(gid)
         except Exception as error:
             message = str(error) or error.__class__.__name__
-            self.ehviewer_repository.mark_state(gid, EH_STATE_FAILED)
+            if self.download_mode != DOWNLOAD_MODE_ORIGINAL_LOCAL:
+                self.ehviewer_repository.mark_state(gid, EH_STATE_FAILED)
             record = self.user_repository.online_gallery_download(gid)
             if record is not None:
                 self.user_repository.update_online_download(
@@ -203,7 +293,40 @@ class OnlineGalleryDownloadWorker(QRunnable):
                     ONLINE_DOWNLOAD_FAILED,
                     message,
                 )
+            if self._is_original_download:
+                self.user_repository.update_gallery_original_state(
+                    gid,
+                    ORIGINAL_STATE_FAILED,
+                    max(completed_pages, int(record.completed_pages))
+                    if record is not None else completed_pages,
+                    int(self.detail.page_count),
+                    message,
+                )
             self.signals.failed.emit(gid, message)
+
+    @property
+    def _is_original_download(self):
+        return self.download_mode in {
+            DOWNLOAD_MODE_ORIGINAL_DIRECT,
+            DOWNLOAD_MODE_ORIGINAL_LOCAL,
+        }
+
+    def _validated_existing_folder(self):
+        if self.existing_folder is None or not self.existing_folder.is_dir():
+            raise FileNotFoundError("找不到本地画廊目录，无法下载原图")
+        root = self.ehviewer_repository.manga_root.resolve()
+        folder = self.existing_folder.resolve()
+        if os.path.commonpath((str(root), str(folder))) != str(root):
+            raise ValueError("本地画廊目录超出配置的漫画根目录")
+        return folder
+
+    def _target_folder(self, folder):
+        folder = Path(folder)
+        if self.download_mode == DOWNLOAD_MODE_ORIGINAL_LOCAL:
+            target = folder / "original"
+            target.mkdir(parents=False, exist_ok=True)
+            return target
+        return folder
 
     def _save_thumbnail(self, folder):
         data = self.cover_data
@@ -266,6 +389,8 @@ class OnlineGalleryDownloadWorker(QRunnable):
                 return operation()
             except Exception as error:
                 last_error = error
+                self._smoothed_speed = 0.0
+                self.signals.speedChanged.emit(0.0)
                 self._check_cancelled()
                 if attempt >= self.retry_count:
                     break
@@ -276,9 +401,12 @@ class OnlineGalleryDownloadWorker(QRunnable):
         raise last_error
 
     def _download_page(self, preview, index):
-        data = self._provider_call(
-            "load_gallery_page_image", self.detail.gallery, preview
+        method = (
+            "load_gallery_page_original"
+            if self._is_original_download
+            else "load_gallery_page_image"
         )
+        data = self._provider_call(method, self.detail.gallery, preview)
         if not data or QImage.fromData(data).isNull():
             raise ValueError(f"第 {index + 1} 页不是有效图片")
         return data
@@ -354,6 +482,7 @@ class LocalGalleryPageDownloadWorker(QRunnable):
         gallery_cache,
         ehviewer_repository,
         site,
+        original=False,
     ):
         super().__init__()
         self.provider = provider
@@ -363,6 +492,7 @@ class LocalGalleryPageDownloadWorker(QRunnable):
         self.gallery_cache = gallery_cache
         self.ehviewer_repository = ehviewer_repository
         self.site = str(site)
+        self.original = bool(original)
         self.cancelled = False
         self.signals = LocalGalleryPageDownloadSignals()
 
@@ -402,18 +532,22 @@ class LocalGalleryPageDownloadWorker(QRunnable):
                     if int(current.page_index) == self.page_index
                 )
             started_at = time.monotonic()
-            data = self.provider.load_gallery_page_image(
-                self.detail.gallery, preview
+            method = (
+                self.provider.load_gallery_page_original
+                if self.original
+                else self.provider.load_gallery_page_image
             )
+            data = method(self.detail.gallery, preview)
             elapsed = max(0.001, time.monotonic() - started_at)
             if self.cancelled:
                 return
             if not data or QImage.fromData(data).isNull():
                 raise ValueError(f"第 {self.page_index + 1} 页不是有效图片")
             self.signals.speedChanged.emit(len(data) / elapsed)
-            self.gallery_cache.put_page_image(
-                self.site, self.detail.gallery, self.page_index, data
-            )
+            if not self.original:
+                self.gallery_cache.put_page_image(
+                    self.site, self.detail.gallery, self.page_index, data
+                )
             page_path = self.ehviewer_repository.write_page(
                 self.folder,
                 self.page_index,

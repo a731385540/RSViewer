@@ -67,10 +67,18 @@ from qfluentwidgets import FluentIcon as FIF
 
 from app.common.config import cfg
 from app.domain.manga import MangaItem
+from app.domain.online_download import (
+    DOWNLOAD_MODE_STANDARD,
+    ONLINE_DOWNLOAD_COMPLETED,
+    ORIGINAL_STATE_ACTIVE,
+)
 from app.repositories.user_library_repository import UserLibraryRepository
 from app.sources.ehviewer_source import EhViewerDataSource
 from app.view.eh_tag_search_line_edit import EhTagSearchLineEdit
 from app.workers.similar_manga_worker import SimilarMangaWorker
+
+
+ORIGINAL_PENDING_BORDER_COLOR = "#B8860B"
 
 
 class FluentSplitterHandle(QSplitterHandle):
@@ -242,6 +250,31 @@ def manga_metadata_text(item: MangaItem, translate) -> str:
     return " · ".join(parts)
 
 
+def paint_manga_download_state(card):
+    item = card.item
+    painter = QPainter(card)
+    painter.setRenderHint(QPainter.Antialiasing)
+    rect = card.rect().adjusted(1, 1, -1, -1)
+    if item.original_state == ORIGINAL_STATE_ACTIVE:
+        gradient = QLinearGradient(rect.left(), rect.top(), rect.right(), rect.bottom())
+        gradient.setColorAt(0.0, QColor("#f1c453"))
+        gradient.setColorAt(0.33, QColor("#d85dc7"))
+        gradient.setColorAt(0.66, QColor("#4abed1"))
+        gradient.setColorAt(1.0, QColor("#f1c453"))
+        painter.setPen(QPen(QBrush(gradient), 2))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(rect, 7, 7)
+    elif item.original_state:
+        painter.setPen(QPen(QColor(ORIGINAL_PENDING_BORDER_COLOR), 2))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(rect, 7, 7)
+
+    if item.standard_download_pending:
+        painter.setPen(QPen(QColor("#8c6b08"), 1))
+        painter.setBrush(QColor("#f2c94c"))
+        painter.drawEllipse(card.width() - 22, 10, 11, 11)
+
+
 class MangaGridCard(CardWidget):
     """大封面漫画卡片。"""
 
@@ -298,6 +331,11 @@ class MangaGridCard(CardWidget):
     def setItem(self, item: MangaItem):
         self.item = item
         self.metaLabel.setText(manga_metadata_text(item, self.tr))
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        paint_manga_download_state(self)
 
     def setSelectionState(self, selection_mode: bool, selected: bool):
         self.selectionMode = bool(selection_mode)
@@ -409,6 +447,11 @@ class MangaListCard(CardWidget):
     def setItem(self, item: MangaItem):
         self.item = item
         self.metaLabel.setText(manga_metadata_text(item, self.tr))
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        paint_manga_download_state(self)
 
     def setSelectionState(self, selection_mode: bool, selected: bool):
         self.selectionMode = bool(selection_mode)
@@ -546,6 +589,9 @@ class MangaLoadWorker(QRunnable):
             online_downloads = self.user_repository.online_gallery_downloads_for_mangas(
                 [item.gid for item in items]
             )
+            original_states = self.user_repository.gallery_original_states_for_mangas(
+                [item.gid for item in items]
+            )
             sync_records = self.user_repository.gallery_sync_records_for_mangas(
                 [item.gid for item in items]
             )
@@ -553,13 +599,11 @@ class MangaLoadWorker(QRunnable):
                 self.user_repository.favorite_gids([item.gid for item in items])
             )
             items = [
-                replace(
+                self._mergeUserState(
                     item,
-                    **self._onlineMetadata(
-                        item,
-                        online_downloads.get(item.gid),
-                        sync_records.get(item.gid),
-                    ),
+                    online_downloads.get(item.gid),
+                    original_states.get(item.gid),
+                    sync_records.get(item.gid),
                     multiple_labels=assignments.get(item.gid, ()),
                     progress_page_index=progress.get(item.gid),
                     is_favorite=item.gid in favorite_gids,
@@ -631,6 +675,32 @@ class MangaLoadWorker(QRunnable):
         if record is not None and record.state == "completed":
             values["page_count"] = max(0, int(record.page_count))
         return values
+
+    @classmethod
+    def _mergeUserState(
+        cls,
+        item,
+        download_record,
+        original_state,
+        sync_record,
+        **values,
+    ):
+        values.update(cls._onlineMetadata(item, download_record, sync_record))
+        values.update(
+            {
+                "original_mode": original_state.mode if original_state else "",
+                "original_state": original_state.state if original_state else "",
+                "original_completed_pages": (
+                    original_state.completed_pages if original_state else 0
+                ),
+                "standard_download_pending": bool(
+                    download_record is not None
+                    and download_record.download_mode == DOWNLOAD_MODE_STANDARD
+                    and download_record.state != ONLINE_DOWNLOAD_COMPLETED
+                ),
+            }
+        )
+        return replace(item, **values)
 
 
 class LabelMutationSignals(QObject):

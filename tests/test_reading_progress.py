@@ -16,6 +16,12 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel
 
 from app.domain.manga import MangaItem
+from app.domain.online_download import (
+    DOWNLOAD_MODE_ORIGINAL_LOCAL,
+    GalleryOriginalState,
+    ORIGINAL_STATE_STAGED,
+    ORIGINAL_STATE_ACTIVE,
+)
 from app.domain.online_gallery import (
     OnlineGallery,
     OnlineGalleryComment,
@@ -84,7 +90,82 @@ class ReadingProgressTests(unittest.TestCase):
         self.assertEqual(7, self.repository.progress_for_manga(123))
         with closing(sqlite3.connect(str(self.repository.database_path))) as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
+            download_columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(online_gallery_downloads)"
+                )
+            }
+            original_table = connection.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'gallery_original_states'"
+            ).fetchone()
         self.assertEqual(UserLibraryRepository.SCHEMA_VERSION, version)
+        self.assertIn("download_mode", download_columns)
+        self.assertEqual(("gallery_original_states",), original_table)
+
+    def test_staged_original_preview_switches_reader_source_and_shows_progress(self):
+        standard_pages = self._create_pages(2)
+        original_folder = self.root / "original"
+        original_folder.mkdir()
+        original_pages = []
+        for index in range(2):
+            path = original_folder / f"{index + 1:08d}.png"
+            image = QImage(160, 240, QImage.Format_RGB32)
+            image.fill(QColor(180, 20 * index, 80))
+            self.assertTrue(image.save(str(path)))
+            original_pages.append(path)
+        item = replace(
+            make_item(self.root, standard_pages),
+            original_mode=DOWNLOAD_MODE_ORIGINAL_LOCAL,
+            original_state=ORIGINAL_STATE_STAGED,
+            original_page_paths=tuple(original_pages),
+            original_completed_pages=2,
+            download_complete=True,
+        )
+        detail = MangaDetailInterface(
+            EhViewerDataSource(self.root / "unused.db", self.root),
+            self.repository,
+        )
+        requested = []
+        detail.readRequested.connect(
+            lambda requested_item, page_index: requested.append(
+                (requested_item, page_index)
+            )
+        )
+        detail.setManga(item)
+        detail.show()
+        QApplication.processEvents()
+
+        self.assertFalse(detail.previewSourceSwitch.isHidden())
+        detail._setPreviewSource("original")
+        QApplication.processEvents()
+        QTest.mouseClick(detail._preview_tiles[1], Qt.LeftButton)
+        self.assertEqual(1, requested[0][1])
+        self.assertEqual(tuple(original_pages), requested[0][0].page_paths)
+
+        state = GalleryOriginalState(
+            gid=item.gid,
+            site="exhentai",
+            token="token",
+            dirname=self.root.name,
+            mode=DOWNLOAD_MODE_ORIGINAL_LOCAL,
+            state=ORIGINAL_STATE_STAGED,
+            completed_pages=2,
+            page_count=2,
+        )
+        detail.setOriginalDownloadState(state)
+        self.assertEqual(100, detail.originalDownloadProgressBar.value())
+        self.assertFalse(detail.originalReplaceButton.isHidden())
+        self.assertEqual("基础下载", detail._localDownloadButtonText(item))
+        detail.setOriginalDownloadState(
+            replace(state, state=ORIGINAL_STATE_ACTIVE)
+        )
+        self.assertEqual("已使用原图", detail.downloadButton.text())
+        self.assertFalse(detail.downloadButton.isEnabled())
+        detail.cancelLoads()
+        detail.close()
+        detail.deleteLater()
 
     def test_playlist_order_position_and_taxonomy_are_persisted(self):
         playlist_id = self.repository.create_playlist("周末播放")

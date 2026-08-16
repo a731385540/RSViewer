@@ -21,6 +21,7 @@ from qfluentwidgets import (
     PrimaryPushButton,
     PushButton,
     ScrollArea,
+    SegmentedWidget,
     SimpleCardWidget,
     SpinBox,
     SubtitleLabel,
@@ -36,6 +37,17 @@ from app.domain.manga import (
     local_page_path_map,
     local_page_slot_count,
     merge_downloaded_page_path,
+)
+from app.domain.online_download import (
+    ORIGINAL_STATE_ACTIVE,
+    ORIGINAL_STATE_CLEANING,
+    ORIGINAL_STATE_DOWNLOADING,
+    ORIGINAL_STATE_FAILED,
+    ORIGINAL_STATE_PAUSED,
+    ORIGINAL_STATE_QUEUED,
+    ORIGINAL_STATE_REPLACING_BASE,
+    ORIGINAL_STATE_REPLACING_ORIGINAL,
+    ORIGINAL_STATE_STAGED,
 )
 from app.domain.online_gallery import (
     OnlineGallery,
@@ -323,6 +335,23 @@ class PageDiscoveryWorker(QRunnable):
     def run(self):
         try:
             item = self.source.load_pages(self.item)
+            original_state = self.user_repository.gallery_original_state(item.gid)
+            original_paths = ()
+            if original_state is not None and original_state.state in {
+                ORIGINAL_STATE_STAGED,
+                ORIGINAL_STATE_REPLACING_BASE,
+                ORIGINAL_STATE_REPLACING_ORIGINAL,
+            }:
+                original_paths = self.source.list_page_files(item.folder / "original")
+            item = replace(
+                item,
+                original_mode=original_state.mode if original_state else "",
+                original_state=original_state.state if original_state else "",
+                original_page_paths=original_paths,
+                original_completed_pages=(
+                    original_state.completed_pages if original_state else 0
+                ),
+            )
             progress = self.user_repository.resolve_progress(
                 item.gid,
                 self.source.read_ehviewer_progress(item),
@@ -354,6 +383,10 @@ class MangaDetailInterface(QWidget):
     onlineReadRequested = Signal(object, int)
     onlineDownloadRequested = Signal(object)
     localDownloadRequested = Signal(object)
+    onlineOriginalDownloadRequested = Signal(object)
+    localOriginalDownloadRequested = Signal(object)
+    originalReplaceRequested = Signal(object)
+    compressedCleanupRequested = Signal(object)
     localMetadataSyncRequested = Signal(object)
     galleryUpdateRequested = Signal(object)
     onlineDownloadCancelRequested = Signal(int)
@@ -388,6 +421,9 @@ class MangaDetailInterface(QWidget):
         self._online_thumbnail_workers = set()
         self._preview_patch_workers = set()
         self._online_download_active = False
+        self._original_download_active = False
+        self._original_operation_active = False
+        self._preview_source = "standard"
         self._local_sync_active = False
         self._gallery_update_locked = False
         self.onlineThreadPool = QThreadPool(self)
@@ -516,10 +552,11 @@ class MangaDetailInterface(QWidget):
         operation_layout.setContentsMargins(18, 14, 18, 14)
         operation_layout.setSpacing(10)
         operation_layout.addWidget(SubtitleLabel(self.tr("操作"), self.operationCard))
-        action_layout = QHBoxLayout()
+        self.actionWidget = QWidget(self.operationCard)
+        action_layout = FlowLayout(self.actionWidget, isTight=True)
         action_layout.setContentsMargins(0, 0, 0, 0)
-        action_layout.setSpacing(10)
-        action_layout.addStretch(1)
+        action_layout.setHorizontalSpacing(10)
+        action_layout.setVerticalSpacing(10)
         self.updateButton = PushButton(
             FIF.SYNC,
             self.tr("更新到最新"),
@@ -557,6 +594,46 @@ class MangaDetailInterface(QWidget):
         download_layout.addWidget(self.downloadProgressBar)
         download_layout.addWidget(self.downloadProgressLabel)
         action_layout.addWidget(self.downloadControls)
+
+        self.originalDownloadControls = QWidget(self.operationCard)
+        self.originalDownloadControls.setFixedWidth(160)
+        original_download_layout = QVBoxLayout(self.originalDownloadControls)
+        original_download_layout.setContentsMargins(0, 0, 0, 0)
+        original_download_layout.setSpacing(5)
+        self.originalDownloadButton = PushButton(
+            FIF.DOWNLOAD,
+            self.tr("下载原图"),
+            self.originalDownloadControls,
+        )
+        self.originalDownloadButton.setFixedWidth(160)
+        self.originalDownloadButton.clicked.connect(self._requestOriginalDownload)
+        self.originalDownloadProgressBar = ProgressBar(self.originalDownloadControls)
+        self.originalDownloadProgressBar.setRange(0, 100)
+        self.originalDownloadProgressBar.setFixedWidth(160)
+        self.originalDownloadProgressLabel = CaptionLabel(
+            "", self.originalDownloadControls
+        )
+        self.originalDownloadProgressLabel.setMaximumWidth(160)
+        self.originalDownloadProgressLabel.setWordWrap(True)
+        original_download_layout.addWidget(self.originalDownloadButton)
+        original_download_layout.addWidget(self.originalDownloadProgressBar)
+        original_download_layout.addWidget(self.originalDownloadProgressLabel)
+        action_layout.addWidget(self.originalDownloadControls)
+
+        self.originalReplaceButton = PushButton(
+            FIF.SYNC,
+            self.tr("原图替换"),
+            self.operationCard,
+        )
+        self.originalReplaceButton.clicked.connect(self._requestOriginalReplace)
+        action_layout.addWidget(self.originalReplaceButton)
+        self.deleteCompressedButton = PushButton(
+            FIF.DELETE,
+            self.tr("删除压缩图"),
+            self.operationCard,
+        )
+        self.deleteCompressedButton.clicked.connect(self._requestCompressedCleanup)
+        action_layout.addWidget(self.deleteCompressedButton)
         self.readButton = PrimaryPushButton(
             FIF.BOOK_SHELF,
             self.tr("开始阅读"),
@@ -564,10 +641,15 @@ class MangaDetailInterface(QWidget):
         )
         self.readButton.clicked.connect(self._requestRead)
         action_layout.addWidget(self.readButton)
-        operation_layout.addLayout(action_layout)
+        operation_layout.addWidget(self.actionWidget)
         self.downloadProgressLabel.hide()
         self.downloadProgressBar.hide()
         self.downloadControls.hide()
+        self.originalDownloadProgressLabel.hide()
+        self.originalDownloadProgressBar.hide()
+        self.originalDownloadControls.hide()
+        self.originalReplaceButton.hide()
+        self.deleteCompressedButton.hide()
         self.syncButton.hide()
         self.updateButton.hide()
 
@@ -576,7 +658,25 @@ class MangaDetailInterface(QWidget):
         preview_layout.setContentsMargins(18, 16, 18, 18)
         preview_layout.setSpacing(12)
         self.previewTitle = SubtitleLabel(self.tr("页面预览"), self.previewCard)
-        preview_layout.addWidget(self.previewTitle)
+        preview_header = QHBoxLayout()
+        preview_header.setContentsMargins(0, 0, 0, 0)
+        preview_header.addWidget(self.previewTitle)
+        preview_header.addStretch(1)
+        self.previewSourceSwitch = SegmentedWidget(self.previewCard)
+        self.previewSourceSwitch.addItem(
+            "standard",
+            self.tr("标准画廊"),
+            lambda: self._setPreviewSource("standard"),
+        )
+        self.previewSourceSwitch.addItem(
+            "original",
+            self.tr("原图画廊"),
+            lambda: self._setPreviewSource("original"),
+        )
+        self.previewSourceSwitch.setCurrentItem("standard")
+        self.previewSourceSwitch.hide()
+        preview_header.addWidget(self.previewSourceSwitch)
+        preview_layout.addLayout(preview_header)
         self.previewWidget = QWidget(self.previewCard)
         self.previewWidget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.previewGrid = QGridLayout(self.previewWidget)
@@ -694,6 +794,11 @@ class MangaDetailInterface(QWidget):
         self._local_online_provider = None
         self._local_online_cache = None
         self._online_download_active = False
+        self._original_download_active = False
+        self._original_operation_active = False
+        self._preview_source = "standard"
+        self.previewSourceSwitch.setCurrentItem("standard")
+        self.previewSourceSwitch.hide()
         self._local_sync_active = False
         self._gallery_update_locked = False
         if item.metadata_synced:
@@ -705,6 +810,13 @@ class MangaDetailInterface(QWidget):
         self.downloadProgressLabel.hide()
         self.downloadProgressBar.hide()
         self.downloadControls.show()
+        self.originalDownloadControls.show()
+        self.originalDownloadProgressBar.hide()
+        self.originalDownloadProgressLabel.hide()
+        self.originalDownloadButton.setEnabled(bool(item.gallery_token))
+        self.originalDownloadButton.setText(self.tr("下载原图"))
+        self.originalReplaceButton.hide()
+        self.deleteCompressedButton.hide()
         self.syncButton.show()
         self.syncButton.setEnabled(bool(item.gallery_token))
         self.syncButton.setText(self.tr("同步信息"))
@@ -782,6 +894,11 @@ class MangaDetailInterface(QWidget):
         self._online_provider = provider
         self._online_cache = cache
         self._online_download_active = False
+        self._original_download_active = False
+        self._original_operation_active = False
+        self._preview_source = "standard"
+        self.previewSourceSwitch.setCurrentItem("standard")
+        self.previewSourceSwitch.hide()
         self._local_sync_active = False
         self.pageTitle.setText(self.tr("在线画廊详情"))
         self.originalTitleLabel.setText(item.title)
@@ -797,6 +914,13 @@ class MangaDetailInterface(QWidget):
         self.downloadProgressLabel.hide()
         self.downloadProgressBar.hide()
         self.downloadControls.show()
+        self.originalDownloadControls.show()
+        self.originalDownloadProgressBar.hide()
+        self.originalDownloadProgressLabel.hide()
+        self.originalDownloadButton.setEnabled(False)
+        self.originalDownloadButton.setText(self.tr("正在读取画廊信息…"))
+        self.originalReplaceButton.hide()
+        self.deleteCompressedButton.hide()
         self.syncButton.hide()
         self.updateButton.hide()
         self.downloadButton.setEnabled(False)
@@ -845,8 +969,11 @@ class MangaDetailInterface(QWidget):
         self.operationCard.show()
         self.previewCard.show()
         self.downloadControls.show()
+        self.originalDownloadControls.show()
         self.downloadButton.setEnabled(detail.page_count > 0)
         self.downloadButton.setText(self.tr("下载画廊"))
+        self.originalDownloadButton.setEnabled(detail.page_count > 0)
+        self.originalDownloadButton.setText(self.tr("下载原图"))
         self.readButton.setEnabled(detail.page_count > 0)
         self.readButton.setText(
             self.tr("开始在线阅读")
@@ -934,6 +1061,119 @@ class MangaDetailInterface(QWidget):
             else:
                 self.downloadButton.setText(self.tr("下载画廊"))
                 self.downloadButton.setEnabled(page_count > 0)
+
+    def setOriginalDownloadState(
+        self,
+        record=None,
+        active=False,
+        message="",
+        has_compressed_backup=False,
+        operation_active=False,
+    ):
+        if self._online_gallery is None and self._item is None:
+            return
+        self.originalDownloadControls.show()
+        self._original_operation_active = bool(operation_active)
+        state = str(record.state) if record is not None else "idle"
+        completed = max(0, int(record.completed_pages)) if record else 0
+        total = max(0, int(record.page_count)) if record else 0
+        self._original_download_active = bool(
+            active and state in {ORIGINAL_STATE_QUEUED, ORIGINAL_STATE_DOWNLOADING}
+        )
+        if record is not None and self._item is not None:
+            self._item = replace(
+                self._item,
+                original_mode=record.mode,
+                original_state=state,
+                original_completed_pages=completed,
+            )
+
+        progress_states = {
+            ORIGINAL_STATE_QUEUED,
+            ORIGINAL_STATE_DOWNLOADING,
+            ORIGINAL_STATE_PAUSED,
+            ORIGINAL_STATE_FAILED,
+            ORIGINAL_STATE_STAGED,
+        }
+        self.originalDownloadProgressBar.setVisible(bool(total and state in progress_states))
+        self.originalDownloadProgressBar.setValue(
+            min(100, round(completed * 100 / total)) if total else 0
+        )
+        status_message = str(message or (record.error if record else ""))
+        self.originalDownloadProgressLabel.setVisible(bool(status_message))
+        self.originalDownloadProgressLabel.setToolTip(status_message)
+        self.originalDownloadProgressLabel.setText(
+            self.originalDownloadProgressLabel.fontMetrics().elidedText(
+                status_message,
+                Qt.ElideRight,
+                self.originalDownloadProgressLabel.maximumWidth(),
+            )
+        )
+        self.originalDownloadButton.setToolTip(status_message)
+
+        if self._original_download_active:
+            self.originalDownloadButton.setText(
+                self.tr("取消等待原图 {} / {}").format(completed, total)
+                if state == ORIGINAL_STATE_QUEUED
+                else self.tr("暂停原图下载 {} / {}").format(completed, total)
+            )
+            self.originalDownloadButton.setEnabled(True)
+        elif state in {ORIGINAL_STATE_PAUSED, ORIGINAL_STATE_FAILED}:
+            self.originalDownloadButton.setText(
+                self.tr("继续下载原图 {} / {}").format(completed, total)
+            )
+            self.originalDownloadButton.setEnabled(total > 0)
+        elif state == ORIGINAL_STATE_STAGED:
+            self.originalDownloadButton.setText(
+                self.tr("原图已下载 {} / {}").format(completed, total)
+            )
+            self.originalDownloadButton.setEnabled(False)
+        elif state in {
+            ORIGINAL_STATE_REPLACING_BASE,
+            ORIGINAL_STATE_REPLACING_ORIGINAL,
+            ORIGINAL_STATE_CLEANING,
+        }:
+            self.originalDownloadButton.setText(self.tr("原图文件处理中"))
+            self.originalDownloadButton.setEnabled(False)
+        elif state == ORIGINAL_STATE_ACTIVE:
+            self.originalDownloadButton.setText(self.tr("已是原图画廊"))
+            self.originalDownloadButton.setEnabled(False)
+            self.downloadButton.setText(self.tr("已使用原图"))
+            self.downloadButton.setEnabled(False)
+        else:
+            self.originalDownloadButton.setText(self.tr("下载原图"))
+            page_count = (
+                self._online_detail.page_count
+                if self._online_detail is not None
+                else self._item.page_count
+            )
+            self.originalDownloadButton.setEnabled(bool(page_count))
+
+        can_replace = self._item is not None and state in {
+            ORIGINAL_STATE_STAGED,
+            ORIGINAL_STATE_REPLACING_BASE,
+            ORIGINAL_STATE_REPLACING_ORIGINAL,
+        }
+        self.originalReplaceButton.setVisible(can_replace)
+        self.originalReplaceButton.setEnabled(can_replace and not operation_active)
+        self.originalReplaceButton.setText(
+            self.tr("继续原图替换")
+            if state in {
+                ORIGINAL_STATE_REPLACING_BASE,
+                ORIGINAL_STATE_REPLACING_ORIGINAL,
+            }
+            else self.tr("原图替换")
+        )
+        can_cleanup = self._item is not None and (
+            bool(has_compressed_backup) or state == ORIGINAL_STATE_CLEANING
+        )
+        self.deleteCompressedButton.setVisible(can_cleanup)
+        self.deleteCompressedButton.setEnabled(can_cleanup and not operation_active)
+        self.deleteCompressedButton.setText(
+            self.tr("继续删除压缩图")
+            if state == ORIGINAL_STATE_CLEANING else self.tr("删除压缩图")
+        )
+        self._updatePreviewSourceVisibility()
 
     def setLocalSyncState(self, active, message=""):
         if self._item is None:
@@ -1033,6 +1273,29 @@ class MangaDetailInterface(QWidget):
         elif self._item is not None and self._item.page_tokens:
             self.localDownloadRequested.emit(self._item)
 
+    def _requestOriginalDownload(self):
+        if self._gallery_update_locked or self._original_operation_active:
+            return
+        if self._original_download_active:
+            gid = (
+                self._online_detail.gallery.gid
+                if self._online_detail is not None else self._item.gid
+            )
+            self.onlineDownloadCancelRequested.emit(gid)
+            return
+        if self._online_detail is not None and self._online_detail.page_count:
+            self.onlineOriginalDownloadRequested.emit(self._online_detail)
+        elif self._item is not None and self._item.page_tokens:
+            self.localOriginalDownloadRequested.emit(self._item)
+
+    def _requestOriginalReplace(self):
+        if self._item is not None and not self._original_operation_active:
+            self.originalReplaceRequested.emit(self._item)
+
+    def _requestCompressedCleanup(self):
+        if self._item is not None and not self._original_operation_active:
+            self.compressedCleanupRequested.emit(self._item)
+
     def _requestGalleryUpdate(self):
         if (
             self._item is not None
@@ -1054,7 +1317,23 @@ class MangaDetailInterface(QWidget):
             self.updateButton.setVisible(bool(self._item.newer_gallery_urls))
             self.updateButton.setEnabled(bool(self._item.newer_gallery_urls))
             self.syncButton.setEnabled(bool(self._item.gallery_token))
-            self.downloadButton.setEnabled(bool(self._item.page_tokens))
+            if self._item.original_state == ORIGINAL_STATE_ACTIVE:
+                self.downloadButton.setText(self.tr("已使用原图"))
+                self.downloadButton.setEnabled(False)
+            else:
+                self.downloadButton.setEnabled(bool(self._item.page_tokens))
+            self.originalDownloadButton.setEnabled(
+                bool(self._item.page_tokens)
+                and self._item.original_state != ORIGINAL_STATE_ACTIVE
+            )
+            self.originalReplaceButton.setEnabled(
+                self.originalReplaceButton.isVisible()
+                and not self._original_operation_active
+            )
+            self.deleteCompressedButton.setEnabled(
+                self.deleteCompressedButton.isVisible()
+                and not self._original_operation_active
+            )
             self.readButton.setEnabled(bool(self._item.page_paths))
             return
         self.updateButton.show()
@@ -1074,7 +1353,23 @@ class MangaDetailInterface(QWidget):
         self.updateButton.setToolTip(record.error or "")
         self.syncButton.setEnabled(False)
         self.downloadButton.setEnabled(False)
+        self.originalDownloadButton.setEnabled(False)
+        self.originalReplaceButton.setEnabled(False)
+        self.deleteCompressedButton.setEnabled(False)
         self.readButton.setEnabled(False)
+
+    def reloadCurrentMangaPages(self):
+        if self._item is None or self._online_detail is not None:
+            return
+        self.setManga(
+            replace(
+                self._item,
+                page_paths=(),
+                original_page_paths=(),
+                downloaded_page_count=0,
+                download_complete=None,
+            )
+        )
 
     def _requestMetadataSync(self):
         if self._item is None or self._local_sync_active or self._gallery_update_locked:
@@ -1083,9 +1378,9 @@ class MangaDetailInterface(QWidget):
 
     def _localDownloadButtonText(self, item):
         if item.download_complete is False:
-            return self.tr("继续下载")
+            return self.tr("基础下载")
         if item.download_complete is True:
-            return self.tr("检查并补齐")
+            return self.tr("基础下载")
         return self.tr("无法补齐")
 
     def _onlineMetadataText(self, item, detail=None):
@@ -1174,6 +1469,7 @@ class MangaDetailInterface(QWidget):
 
     def _showPages(self, item: MangaItem):
         self._preview_page = 1
+        self._updatePreviewSourceVisibility()
         self._renderPreviewPage(item)
 
     def _renderPreviewPage(self, item: MangaItem):
@@ -1182,9 +1478,10 @@ class MangaDetailInterface(QWidget):
         page_count = self._previewPageCount(item)
         self._preview_page = min(max(1, self._preview_page), page_count)
         start = (self._preview_page - 1) * self.PREVIEW_PAGE_SIZE
-        total = local_page_slot_count(item)
+        paths = self._localPreviewPaths(item)
+        total = self._localPreviewTotal(item)
         end = min(total, start + self.PREVIEW_PAGE_SIZE)
-        paths_by_index = local_page_path_map(item.page_paths)
+        paths_by_index = local_page_path_map(paths)
         self._preview_tiles = [
             PreviewTile(index, self.previewWidget)
             for index in range(start, end)
@@ -1192,9 +1489,11 @@ class MangaDetailInterface(QWidget):
         for tile in self._preview_tiles:
             tile.clicked.connect(self._requestLocalPreviewRead)
         self.previewTitle.setText(
-            self.tr("页面预览（共 {} 页，第 {} / {} 页）").format(
-                total, self._preview_page, page_count
-            )
+            (
+                self.tr("原图页面预览（共 {} 页，第 {} / {} 页）")
+                if self._preview_source == "original"
+                else self.tr("页面预览（共 {} 页，第 {} / {} 页）")
+            ).format(total, self._preview_page, page_count)
         )
         self._updatePreviewPagination(page_count)
         QTimer.singleShot(0, self._relayoutPreview)
@@ -1212,9 +1511,63 @@ class MangaDetailInterface(QWidget):
             self._preview_worker = worker
             QThreadPool.globalInstance().start(worker)
         for tile in self._preview_tiles:
-            if tile.pageIndex not in paths_by_index:
+            if tile.pageIndex not in paths_by_index and self._preview_source == "standard":
                 tile.imageLabel.setText(self.tr("正在加载在线预览…"))
-        self._loadMissingLocalPreviews()
+        if self._preview_source == "standard":
+            self._loadMissingLocalPreviews()
+
+    def _localPreviewPaths(self, item=None):
+        current_item = item or self._item
+        if current_item is None:
+            return ()
+        if self._preview_source == "original":
+            return tuple(current_item.original_page_paths)
+        return tuple(current_item.page_paths)
+
+    def _localPreviewTotal(self, item=None):
+        current_item = item or self._item
+        if current_item is None:
+            return 0
+        if self._preview_source == "original":
+            return len(current_item.original_page_paths)
+        return local_page_slot_count(current_item)
+
+    def _updatePreviewSourceVisibility(self):
+        has_original_preview = bool(
+            self._item is not None
+            and self._online_detail is None
+            and self._item.original_page_paths
+            and len(self._item.original_page_paths) >= self._item.page_count
+        )
+        self.previewSourceSwitch.setVisible(has_original_preview)
+        if not has_original_preview and self._preview_source == "original":
+            self._preview_source = "standard"
+            self.previewSourceSwitch.setCurrentItem("standard")
+
+    def _setPreviewSource(self, source):
+        source = str(source)
+        if self._item is None or self._online_detail is not None:
+            return
+        if source == "original" and not self._item.original_page_paths:
+            return
+        if source not in {"standard", "original"} or source == self._preview_source:
+            return
+        self._preview_source = source
+        self.previewSourceSwitch.setCurrentItem(source)
+        self._preview_page = 1
+        self._renderPreviewPage(self._item)
+
+    def _readerItemForPreviewSource(self):
+        if self._item is None or self._preview_source != "original":
+            return self._item
+        paths = tuple(self._item.original_page_paths)
+        return replace(
+            self._item,
+            page_paths=paths,
+            page_count=len(paths),
+            downloaded_page_count=len(paths),
+            download_complete=bool(paths),
+        )
 
     def _previewPageCount(self, item=None) -> int:
         if self._online_detail is not None:
@@ -1225,7 +1578,7 @@ class MangaDetailInterface(QWidget):
                 // self.ONLINE_PREVIEW_PAGE_SIZE,
             )
         current_item = item or self._item
-        total = local_page_slot_count(current_item) if current_item else 0
+        total = self._localPreviewTotal(current_item)
         return max(1, (total + self.PREVIEW_PAGE_SIZE - 1) // self.PREVIEW_PAGE_SIZE)
 
     def _setPreviewPage(self, page: int):
@@ -1235,7 +1588,7 @@ class MangaDetailInterface(QWidget):
                 return
             self._loadOnlinePreviewPage(page)
             return
-        if self._item is None or not local_page_slot_count(self._item):
+        if self._item is None or not self._localPreviewTotal(self._item):
             return
         page = min(max(1, int(page)), self._previewPageCount())
         if page == self._preview_page and self._preview_tiles:
@@ -1307,9 +1660,10 @@ class MangaDetailInterface(QWidget):
         if self._online_detail is not None and self._online_detail.page_count:
             self.onlineReadRequested.emit(self._online_detail, 0)
             return
-        if self._item is None or not self._item.page_paths:
+        reader_item = self._readerItemForPreviewSource()
+        if reader_item is None or not reader_item.page_paths:
             return
-        self.readRequested.emit(self._item, -1)
+        self.readRequested.emit(reader_item, -1)
 
     def updateReadingProgress(self, gid: int, page_index: int, page_count=0):
         if self._item is None or self._item.gid != gid:
@@ -1380,7 +1734,9 @@ class MangaDetailInterface(QWidget):
             and self._online_detail is None
             and not self._gallery_update_locked
         ):
-            self.readRequested.emit(self._item, int(page_index))
+            self.readRequested.emit(
+                self._readerItemForPreviewSource(), int(page_index)
+            )
 
     def _progressText(self, item: MangaItem) -> str:
         if item.progress_page_number is None:
@@ -1648,6 +2004,8 @@ class MangaDetailInterface(QWidget):
 
     def _loadMissingLocalPreviews(self):
         if (
+            self._preview_source != "standard"
+            or
             self._item is None
             or self._local_online_detail is None
             or self._local_online_provider is None

@@ -5,7 +5,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
-from app.domain.online_download import OnlineGalleryDownloadRecord
+from app.domain.online_download import (
+    DOWNLOAD_MODE_ORIGINAL_DIRECT,
+    DOWNLOAD_MODE_ORIGINAL_LOCAL,
+    OnlineGalleryDownloadRecord,
+)
 from app.view.download_manager_interface import (
     DownloadManagerInterface,
     format_download_speed,
@@ -113,6 +117,22 @@ class DownloadManagerInterfaceTests(unittest.TestCase):
         self.interface.setRecords(records, (42,), {})
         self.assertIn("测速中", self.interface._cards[42].metaLabel.text())
         self.assertNotIn("测速中", self.interface._cards[43].metaLabel.text())
+
+    def test_original_download_modes_are_named_in_task_cards(self):
+        direct = self._record(gid=42)
+        local = self._record(gid=43)
+        direct = OnlineGalleryDownloadRecord(
+            **{**direct.__dict__, "download_mode": DOWNLOAD_MODE_ORIGINAL_DIRECT}
+        )
+        local = OnlineGalleryDownloadRecord(
+            **{**local.__dict__, "download_mode": DOWNLOAD_MODE_ORIGINAL_LOCAL}
+        )
+
+        self.interface.setRecords((direct, local))
+        QApplication.processEvents()
+
+        self.assertIn("直接下载原图", self.interface._cards[42].metaLabel.text())
+        self.assertIn("本地画廊下载原图", self.interface._cards[43].metaLabel.text())
 
 
 if __name__ == "__main__":

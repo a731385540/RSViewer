@@ -10,6 +10,11 @@ from PySide6.QtCore import QByteArray, QBuffer, QIODevice
 from PySide6.QtGui import QColor, QImage
 
 from app.domain.gallery_update import GalleryUpdateRecord, UPDATE_COMPLETED
+from app.domain.online_download import (
+    DOWNLOAD_MODE_ORIGINAL_LOCAL,
+    GalleryOriginalState,
+    ORIGINAL_STATE_ACTIVE,
+)
 from app.domain.online_gallery import (
     OnlineGallery,
     OnlineGalleryDetail,
@@ -46,12 +51,17 @@ class UpdateProvider:
         self.detail = detail
         self.pages = pages
         self.page_calls = []
+        self.original_calls = []
 
     def load_gallery_detail(self, _gallery):
         return self.detail
 
     def load_gallery_page_image(self, _gallery, preview):
         self.page_calls.append(preview.page_index)
+        return self.pages[preview.page_index]
+
+    def load_gallery_page_original(self, _gallery, preview):
+        self.original_calls.append(preview.page_index)
         return self.pages[preview.page_index]
 
     def load_thumbnail(self, _url):
@@ -215,6 +225,52 @@ class GalleryUpdateTests(unittest.TestCase):
             ).fetchall()
         self.assertEqual([(200,)], gids)
         self.assertEqual([(200,)], dirname_gid)
+
+    def test_original_gallery_update_downloads_original_and_promotes_state(self):
+        dirname = self.folder.name
+        self.user_repository.save_gallery_original_state(
+            GalleryOriginalState(
+                gid=100,
+                site="exhentai",
+                token="abcdef1234",
+                dirname=dirname,
+                mode=DOWNLOAD_MODE_ORIGINAL_LOCAL,
+                state=ORIGINAL_STATE_ACTIVE,
+                completed_pages=3,
+                page_count=3,
+            )
+        )
+        record = GalleryUpdateRecord(
+            source_gid=100,
+            source_token="abcdef1234",
+            site="exhentai",
+            title="Old",
+            folder=str(self.folder),
+            latest_url=self.latest_gallery.url,
+            metadata={"image_mode": "original"},
+        )
+        self.user_repository.save_gallery_update(record)
+        provider = UpdateProvider(
+            self.latest_detail,
+            {0: image_bytes("green"), 1: image_bytes("yellow"), 2: image_bytes("red")},
+        )
+        worker = GalleryUpdateWorker(
+            record,
+            provider,
+            OnlineGalleryMemoryCache(),
+            self.external_repository,
+            self.user_repository,
+        )
+
+        worker.run()
+
+        self.assertEqual([], provider.page_calls)
+        self.assertEqual([1], provider.original_calls)
+        promoted = self.user_repository.gallery_original_state(200)
+        self.assertIsNotNone(promoted)
+        self.assertEqual(ORIGINAL_STATE_ACTIVE, promoted.state)
+        self.assertEqual("fedcba4321", promoted.token)
+        self.assertIsNone(self.user_repository.gallery_original_state(100))
 
     def test_startup_marks_interrupted_update_as_paused(self):
         record = GalleryUpdateRecord(

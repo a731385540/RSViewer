@@ -177,6 +177,98 @@ class EhViewerDownloadRepository:
             self._upsert_tags(connection, detail, now)
             connection.commit()
 
+    def import_existing_folder(self, detail, folder, state=EH_STATE_FINISHED):
+        """Register one existing root child without creating or moving files."""
+        self._validate_targets()
+        folder = Path(folder)
+        if folder.is_symlink():
+            raise ValueError("不能导入符号链接目录")
+        folder = folder.resolve()
+        root = self.manga_root.resolve()
+        if folder.parent != root or not folder.is_dir() or folder.is_symlink():
+            raise ValueError("只能导入漫画根目录下的现有实体目录")
+        gid = int(detail.gallery.gid)
+        dirname = folder.name
+        now = int(time.time() * 1000)
+        state = int(state)
+        if state not in {EH_STATE_DOWNLOADING, EH_STATE_FINISHED, EH_STATE_FAILED}:
+            raise ValueError("EhViewer 下载状态无效")
+        with closing(sqlite3.connect(str(self.database_path), timeout=30)) as connection:
+            self._validate_schema(connection)
+            if connection.execute(
+                "SELECT 1 FROM DOWNLOADS WHERE GID = ? LIMIT 1", (gid,)
+            ).fetchone() is not None:
+                raise ValueError(f"EhViewer 数据库中已存在 GID {gid}")
+            stale_mapping = connection.execute(
+                "SELECT DIRNAME FROM DOWNLOAD_DIRNAME WHERE GID = ?",
+                (gid,),
+            ).fetchone()
+            if stale_mapping is not None:
+                if str(stale_mapping[0] or "").casefold() != dirname.casefold():
+                    raise ValueError(
+                        f"GID {gid} 仍指向其他目录：{stale_mapping[0]}"
+                    )
+                connection.execute(
+                    "DELETE FROM DOWNLOAD_DIRNAME WHERE GID = ?", (gid,)
+                )
+            collision = connection.execute(
+                """
+                SELECT GID FROM DOWNLOAD_DIRNAME
+                WHERE DIRNAME = ? COLLATE NOCASE LIMIT 1
+                """,
+                (dirname,),
+            ).fetchone()
+            if collision is not None:
+                raise ValueError(
+                    f"目录 {dirname} 已被 GID {int(collision[0])} 占用"
+                )
+            values = self._download_values(
+                detail,
+                state,
+                "",
+                now,
+                None,
+            )
+            connection.execute(
+                """
+                INSERT INTO DOWNLOADS(
+                    GID, TOKEN, TITLE, TITLE_JPN, THUMB, CATEGORY,
+                    POSTED, UPLOADER, RATING, SIMPLE_LANGUAGE, STATE,
+                    LEGACY, TIME, LABEL, ARCHIVE_URI
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                values,
+            )
+            connection.execute(
+                "INSERT INTO DOWNLOAD_DIRNAME(GID, DIRNAME) VALUES (?, ?)",
+                (gid, dirname),
+            )
+            self._upsert_tags(connection, detail, now)
+            connection.commit()
+
+    def remove_imported_folder(self, gid, folder):
+        """Compensate a failed paired import without touching local files."""
+        self._validate_targets()
+        gid = int(gid)
+        folder = Path(folder)
+        if folder.is_symlink():
+            raise ValueError("不能回滚符号链接目录")
+        folder = folder.resolve()
+        if folder.parent != self.manga_root.resolve():
+            raise ValueError("待回滚目录不在漫画根目录中")
+        with closing(sqlite3.connect(str(self.database_path), timeout=30)) as connection:
+            self._validate_schema(connection)
+            row = connection.execute(
+                "SELECT DIRNAME FROM DOWNLOAD_DIRNAME WHERE GID = ?",
+                (gid,),
+            ).fetchone()
+            if row is None or str(row[0]).casefold() != folder.name.casefold():
+                raise ValueError("数据库记录已变化，拒绝回滚其他资源")
+            connection.execute("DELETE FROM Gallery_Tags WHERE GID = ?", (gid,))
+            connection.execute("DELETE FROM DOWNLOAD_DIRNAME WHERE GID = ?", (gid,))
+            connection.execute("DELETE FROM DOWNLOADS WHERE GID = ?", (gid,))
+            connection.commit()
+
     def validate_update_target(self, source_gid, target_gid, folder):
         """Reject GID/folder collisions before any update filename is changed."""
         self._validate_targets()

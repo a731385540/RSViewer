@@ -4,7 +4,7 @@ import re
 import socket
 from threading import Lock
 from typing import Dict, Iterable
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 from urllib.request import getproxies
 
 from bs4 import BeautifulSoup
@@ -212,6 +212,14 @@ class EhOnlineProvider(ABC):
     ) -> bytes:
         raise EhOnlineError("当前在线 provider 不支持在线阅读")
 
+    def load_gallery_page_original(
+        self,
+        gallery: OnlineGallery,
+        preview: OnlineGalleryPreview,
+        should_cancel=None,
+    ) -> bytes:
+        raise EhOnlineError("当前在线 provider 不支持下载原图")
+
     def set_display_mode(self, mode: str):
         """Update the account/session list mode through the site's own page control."""
 
@@ -230,6 +238,8 @@ class UnimplementedEhOnlineProvider(EhOnlineProvider):
 
 class RefactoredEhOnlineProvider(EhOnlineProvider):
     """Adapter for the user-supplied ``eh_tool_refactored`` list crawler."""
+
+    STREAM_READ_IDLE_TIMEOUT_SECONDS = 15
 
     SOURCE_NAMES = {
         "ehentai": "e-hentai",
@@ -371,6 +381,42 @@ class RefactoredEhOnlineProvider(EhOnlineProvider):
             raise EhOnlineError("在线图片请求失败")
         return data
 
+    def load_gallery_page_original(self, gallery, preview, should_cancel=None):
+        self._validate_gallery_page_url(gallery, preview)
+        if should_cancel is None:
+            response = self._crawler.req.get(preview.page_url)
+            content = (
+                getattr(response, "content", b"")
+                or getattr(response, "text", "")
+                if response is not None else b""
+            )
+            status = getattr(response, "status_code", "未知")
+            ok = response is not None and getattr(response, "ok", False)
+        else:
+            content, status = self._request_bytes_cancellable(
+                preview.page_url, should_cancel
+            )
+            ok = bool(content)
+        if not ok:
+            raise EhOnlineError(f"单图页面请求失败（HTTP {status}）")
+        soup = BeautifulSoup(content, "lxml")
+        original_url = ""
+        for anchor in soup.select("a[href]"):
+            candidate = urljoin(preview.page_url, str(anchor.get("href") or ""))
+            path = urlparse(candidate).path.casefold()
+            if path.startswith("/fullimg/") or path == "/fullimg.php":
+                original_url = candidate
+                break
+        if not original_url:
+            raise EhOnlineError(
+                "单图页面没有可用的原图下载链接；请检查账户权限或原图额度"
+            )
+        self._validate_original_image_url(original_url, gallery, preview)
+        data = self._request_image(original_url, should_cancel)
+        if not data:
+            raise EhOnlineError("原图请求失败")
+        return data
+
     def _request_image(self, url, should_cancel=None):
         if should_cancel is not None:
             data, _status = self._request_bytes_cancellable(url, should_cancel)
@@ -389,8 +435,17 @@ class RefactoredEhOnlineProvider(EhOnlineProvider):
 
     def _request_bytes_cancellable(self, url, should_cancel):
         self._raise_if_request_cancelled(should_cancel)
+        configured_timeout = max(3, int(self.settings.timeout_seconds))
+        transfer_idle_timeout = min(
+            configured_timeout,
+            self.STREAM_READ_IDLE_TIMEOUT_SECONDS,
+        )
         try:
-            response = self._crawler.req.get(url, stream=True)
+            response = self._crawler.req.get(
+                url,
+                stream=True,
+                timeout=(transfer_idle_timeout, transfer_idle_timeout),
+            )
         except TypeError:
             # Small provider test doubles and third-party adapters may not
             # expose requests' streaming keyword.
@@ -530,6 +585,38 @@ class RefactoredEhOnlineProvider(EhOnlineProvider):
             or int(match.group(3)) != int(preview.page_index) + 1
         ):
             raise EhOnlineError("拒绝访问当前画廊之外的单图页面")
+
+    def _validate_original_image_url(self, url, gallery, preview):
+        parsed = urlparse(str(url or ""))
+        expected_host = urlparse(self.settings.base_url).hostname
+        valid = False
+        path_match = re.fullmatch(
+            r"/fullimg/(\d+)/(\d+)/[0-9A-Za-z]+/[^/]+",
+            parsed.path,
+        )
+        if path_match is not None and not parsed.query:
+            valid = (
+                int(path_match.group(1)) == int(gallery.gid)
+                and int(path_match.group(2)) == int(preview.page_index) + 1
+            )
+        elif parsed.path.casefold() == "/fullimg.php":
+            query = parse_qs(parsed.query, keep_blank_values=True)
+            try:
+                valid = (
+                    set(query) == {"gid", "page", "key"}
+                    and int(query["gid"][0]) == int(gallery.gid)
+                    and int(query["page"][0]) == int(preview.page_index) + 1
+                    and bool(re.fullmatch(r"[0-9A-Za-z]+", query["key"][0]))
+                )
+            except (KeyError, TypeError, ValueError):
+                valid = False
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != expected_host
+            or parsed.fragment
+            or not valid
+        ):
+            raise EhOnlineError("拒绝访问当前画廊之外的原图地址")
 
     @staticmethod
     def _validate_thumbnail_url(url: str):
