@@ -1,5 +1,6 @@
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -65,6 +66,25 @@ class ShortcutCaptureButtonTests(unittest.TestCase):
             cfg.set(cfg.tagSidebarShortcut, original_tags)
             cfg.set(cfg.mangaSearchHoverEnabled, original_hover)
             cfg.set(cfg.searchHistoryLimit, original_history_limit)
+            settings.close()
+            settings.deleteLater()
+
+    def test_database_card_exports_instead_of_selecting_a_runtime_source(self):
+        settings = SettingInterface()
+        requested = []
+        settings.ehViewerExportRequested.connect(requested.append)
+        try:
+            with patch(
+                "app.view.setting_interface.QFileDialog.getSaveFileName",
+                return_value=("C:/exports/eh.db", ""),
+            ):
+                settings.ehViewerDatabaseCard.exportButton.click()
+            self.assertEqual(["C:/exports/eh.db"], requested)
+            self.assertEqual(
+                "导出 EhViewer 数据库",
+                settings.ehViewerDatabaseCard.titleLabel.text(),
+            )
+        finally:
             settings.close()
             settings.deleteLater()
 

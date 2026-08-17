@@ -422,7 +422,7 @@ class EhViewerDownloadRepository:
     @classmethod
     def _validate_snapshot_identity(cls, snapshot, gid, dirname):
         if not isinstance(snapshot, dict):
-            raise ValueError("回收站外部数据库快照无效")
+            raise ValueError("回收站漫画数据库快照无效")
         download = snapshot.get("DOWNLOADS")
         mapping = snapshot.get("DOWNLOAD_DIRNAME")
         if download is None or mapping is None:
@@ -520,7 +520,7 @@ class EhViewerDownloadRepository:
                         detail,
                         EH_STATE_FINISHED,
                         str(target[3] or ""),
-                        int(target[2]),
+                        now,
                         target[4],
                     )
                 )
@@ -549,7 +549,7 @@ class EhViewerDownloadRepository:
                     detail,
                     EH_STATE_FINISHED,
                     str(source[3] or ""),
-                    int(source[2]),
+                    now,
                     source[4],
                 )
             )
@@ -595,6 +595,24 @@ class EhViewerDownloadRepository:
                 "UPDATE DOWNLOADS SET STATE = ? WHERE GID = ?",
                 (int(state), int(gid)),
             )
+            connection.commit()
+
+    def touch_download_time(self, gid, timestamp=None):
+        """Refresh the local-library sort time after a content replacement."""
+        self._validate_targets()
+        updated_at = (
+            int(timestamp)
+            if timestamp is not None
+            else int(time.time() * 1000)
+        )
+        with closing(sqlite3.connect(str(self.database_path), timeout=30)) as connection:
+            self._validate_schema(connection)
+            cursor = connection.execute(
+                "UPDATE DOWNLOADS SET TIME = ? WHERE GID = ?",
+                (updated_at, int(gid)),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("EhViewer 数据库中找不到需要更新时间的画廊")
             connection.commit()
 
     def write_thumbnail(self, folder, data):

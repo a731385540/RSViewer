@@ -12,14 +12,18 @@ from app.domain.online_download import (
     GalleryOriginalState,
     GallerySyncRecord,
     OnlineGalleryDownloadRecord,
+    ORIGINAL_PAGE_MODE_BASE,
+    normalize_original_page_modes,
 )
 from app.domain.online_gallery import OnlineGalleryComment
+from app.domain.online_gallery import OnlineGalleryLink
+from app.repositories.ehviewer_schema import ensure_ehviewer_schema
 
 
 class UserLibraryRepository:
-    """RSViewer 自有数据库；绝不在外部 EhViewer 库中建表。"""
+    """RSViewer's complete application and local-gallery database."""
 
-    SCHEMA_VERSION = 13
+    SCHEMA_VERSION = 19
 
     def __init__(self, database_path: Path):
         self.database_path = Path(database_path).resolve()
@@ -263,6 +267,7 @@ class UserLibraryRepository:
                         body TEXT NOT NULL DEFAULT '',
                         score INTEGER,
                         is_uploader INTEGER NOT NULL DEFAULT 0,
+                        gallery_links_json TEXT NOT NULL DEFAULT '[]',
                         PRIMARY KEY (gid, comment_id),
                         FOREIGN KEY (gid) REFERENCES online_gallery_downloads(gid)
                             ON DELETE CASCADE
@@ -292,6 +297,7 @@ class UserLibraryRepository:
                         body TEXT NOT NULL DEFAULT '',
                         score INTEGER,
                         is_uploader INTEGER NOT NULL DEFAULT 0,
+                        gallery_links_json TEXT NOT NULL DEFAULT '[]',
                         PRIMARY KEY (gid, comment_id),
                         FOREIGN KEY (gid) REFERENCES gallery_sync_records(gid)
                             ON DELETE CASCADE
@@ -356,6 +362,8 @@ class UserLibraryRepository:
                             CHECK (completed_pages >= 0),
                         page_count INTEGER NOT NULL DEFAULT 0
                             CHECK (page_count >= 0),
+                        fallback_to_standard INTEGER NOT NULL DEFAULT 0,
+                        page_modes_json TEXT NOT NULL DEFAULT '[]',
                         metadata_json TEXT NOT NULL DEFAULT '{}',
                         error TEXT NOT NULL DEFAULT '',
                         created_at INTEGER NOT NULL,
@@ -407,6 +415,59 @@ class UserLibraryRepository:
                         "ADD COLUMN manga_root TEXT NOT NULL DEFAULT ''"
                     )
                 connection.execute("PRAGMA user_version = 13")
+            if version < 14:
+                ensure_ehviewer_schema(connection)
+                connection.execute("PRAGMA user_version = 14")
+            if version < 15:
+                connection.execute(
+                    "UPDATE gallery_trash SET database_path = ?",
+                    (str(self.database_path),),
+                )
+                connection.execute("PRAGMA user_version = 15")
+            if version < 16:
+                ensure_ehviewer_schema(connection)
+                connection.execute("PRAGMA user_version = 16")
+            if version < 17:
+                original_columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(gallery_original_states)"
+                    )
+                }
+                if "fallback_to_standard" not in original_columns:
+                    connection.execute(
+                        "ALTER TABLE gallery_original_states "
+                        "ADD COLUMN fallback_to_standard INTEGER NOT NULL DEFAULT 0"
+                    )
+                connection.execute("PRAGMA user_version = 17")
+            if version < 18:
+                original_columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(gallery_original_states)"
+                    )
+                }
+                if "page_modes_json" not in original_columns:
+                    connection.execute(
+                        "ALTER TABLE gallery_original_states "
+                        "ADD COLUMN page_modes_json TEXT NOT NULL DEFAULT '[]'"
+                    )
+                connection.execute("PRAGMA user_version = 18")
+            if version < 19:
+                for table in (
+                    "online_gallery_comments",
+                    "gallery_sync_comments",
+                ):
+                    columns = {
+                        row[1]
+                        for row in connection.execute(f"PRAGMA table_info({table})")
+                    }
+                    if "gallery_links_json" not in columns:
+                        connection.execute(
+                            f"ALTER TABLE {table} ADD COLUMN "
+                            "gallery_links_json TEXT NOT NULL DEFAULT '[]'"
+                        )
+                connection.execute("PRAGMA user_version = 19")
 
     def list_labels(self) -> List[Tuple[int, str, int]]:
         self.initialize()
@@ -1078,8 +1139,9 @@ class UserLibraryRepository:
             connection.executemany(
                 """
                 INSERT OR REPLACE INTO online_gallery_comments(
-                    gid, comment_id, author, posted, body, score, is_uploader
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    gid, comment_id, author, posted, body, score, is_uploader,
+                    gallery_links_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     (
@@ -1090,6 +1152,7 @@ class UserLibraryRepository:
                         str(comment.text or ""),
                         int(comment.score) if comment.score is not None else None,
                         1 if comment.is_uploader else 0,
+                        self._comment_gallery_links_json(comment),
                     )
                     for comment in comments
                 ),
@@ -1317,7 +1380,7 @@ class UserLibraryRepository:
         """
         conditions = ["source_gid NOT IN (SELECT gid FROM gallery_trash)"]
         if not include_completed:
-            conditions.append("state != 'completed'")
+            conditions.append("state != 'completed' AND status < 6")
         query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY updated_at DESC"
         with self._connect() as connection:
@@ -1355,7 +1418,16 @@ class UserLibraryRepository:
 
     def mark_interrupted_gallery_updates(self):
         self.initialize()
+        now = time.time_ns()
         with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE gallery_update_tasks
+                SET state = 'completed', error = '', updated_at = ?
+                WHERE status >= 6
+                """,
+                (now,),
+            )
             connection.execute(
                 """
                 UPDATE gallery_update_tasks
@@ -1365,9 +1437,18 @@ class UserLibraryRepository:
                         ELSE error
                     END,
                     updated_at = ?
-                WHERE state IN ('queued', 'updating')
+                WHERE state IN ('queued', 'updating') AND status < 6
                 """,
-                (time.time_ns(),),
+                (now,),
+            )
+
+    def delete_gallery_update(self, source_gid):
+        """Delete only the task index; folder checkpoints remain recoverable."""
+        self.initialize()
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM gallery_update_tasks WHERE source_gid = ?",
+                (int(source_gid),),
             )
 
     def promote_gallery_gid(self, source_gid, target_gid, progress_page_index=None):
@@ -1433,10 +1514,12 @@ class UserLibraryRepository:
                 """
                 INSERT INTO gallery_original_states(
                     gid, site, token, dirname, mode, state, completed_pages,
-                    page_count, metadata_json, error, created_at, updated_at
+                    page_count, fallback_to_standard, page_modes_json,
+                    metadata_json, error, created_at, updated_at
                 )
                 SELECT ?, site, token, dirname, mode, state, completed_pages,
-                       page_count, metadata_json, error, created_at, updated_at
+                       page_count, fallback_to_standard, page_modes_json,
+                       metadata_json, error, created_at, updated_at
                 FROM gallery_original_states WHERE gid = ?
                 ON CONFLICT(gid) DO UPDATE SET
                     site = excluded.site,
@@ -1446,6 +1529,8 @@ class UserLibraryRepository:
                     state = excluded.state,
                     completed_pages = excluded.completed_pages,
                     page_count = excluded.page_count,
+                    fallback_to_standard = excluded.fallback_to_standard,
+                    page_modes_json = excluded.page_modes_json,
                     metadata_json = excluded.metadata_json,
                     error = excluded.error,
                     updated_at = excluded.updated_at
@@ -1571,6 +1656,21 @@ class UserLibraryRepository:
     def save_gallery_original_state(self, record: GalleryOriginalState):
         self.initialize()
         now = time.time_ns()
+        page_modes = normalize_original_page_modes(
+            record.page_modes,
+            record.page_count,
+            record.completed_pages,
+            record.fallback_to_standard,
+        )
+        fallback_to_standard = (
+            ORIGINAL_PAGE_MODE_BASE in page_modes
+            or bool(record.fallback_to_standard and not any(page_modes))
+        )
+        page_modes_json = json.dumps(
+            list(page_modes),
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
         metadata_json = json.dumps(
             dict(record.metadata or {}),
             ensure_ascii=False,
@@ -1582,8 +1682,9 @@ class UserLibraryRepository:
                 """
                 INSERT INTO gallery_original_states(
                     gid, site, token, dirname, mode, state, completed_pages,
-                    page_count, metadata_json, error, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    page_count, fallback_to_standard, page_modes_json,
+                    metadata_json, error, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(gid) DO UPDATE SET
                     site = excluded.site,
                     token = excluded.token,
@@ -1592,6 +1693,8 @@ class UserLibraryRepository:
                     state = excluded.state,
                     completed_pages = excluded.completed_pages,
                     page_count = excluded.page_count,
+                    fallback_to_standard = excluded.fallback_to_standard,
+                    page_modes_json = excluded.page_modes_json,
                     metadata_json = excluded.metadata_json,
                     error = excluded.error,
                     updated_at = excluded.updated_at
@@ -1605,6 +1708,8 @@ class UserLibraryRepository:
                     str(record.state),
                     max(0, int(record.completed_pages)),
                     max(0, int(record.page_count)),
+                    int(fallback_to_standard),
+                    page_modes_json,
                     metadata_json,
                     str(record.error or ""),
                     int(record.created_at or now),
@@ -1620,6 +1725,8 @@ class UserLibraryRepository:
         page_count=None,
         error="",
         dirname=None,
+        fallback_to_standard=None,
+        page_modes=None,
     ):
         self.initialize()
         assignments = ["state = ?", "error = ?", "updated_at = ?"]
@@ -1633,6 +1740,18 @@ class UserLibraryRepository:
         if dirname is not None:
             assignments.append("dirname = ?")
             values.append(str(dirname))
+        if fallback_to_standard is not None:
+            assignments.append("fallback_to_standard = ?")
+            values.append(int(bool(fallback_to_standard)))
+        if page_modes is not None:
+            assignments.append("page_modes_json = ?")
+            values.append(
+                json.dumps(
+                    list(page_modes),
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                )
+            )
         values.append(int(gid))
         with self._connect() as connection:
             connection.execute(
@@ -1647,7 +1766,8 @@ class UserLibraryRepository:
             row = connection.execute(
                 """
                 SELECT gid, site, token, dirname, mode, state, completed_pages,
-                       page_count, metadata_json, error, created_at, updated_at
+                       page_count, fallback_to_standard, page_modes_json,
+                       metadata_json, error, created_at, updated_at
                 FROM gallery_original_states WHERE gid = ?
                 """,
                 (int(gid),),
@@ -1665,7 +1785,8 @@ class UserLibraryRepository:
             rows = connection.execute(
                 """
                 SELECT gid, site, token, dirname, mode, state, completed_pages,
-                       page_count, metadata_json, error, created_at, updated_at
+                       page_count, fallback_to_standard, page_modes_json,
+                       metadata_json, error, created_at, updated_at
                 FROM gallery_original_states
                 """
             ).fetchall()
@@ -1705,7 +1826,8 @@ class UserLibraryRepository:
             )
             rows = connection.execute(
                 f"""
-                SELECT comment_id, author, posted, body, score, is_uploader
+                SELECT comment_id, author, posted, body, score, is_uploader,
+                       gallery_links_json
                 FROM {table}
                 WHERE gid = ? ORDER BY rowid
                 """,
@@ -1719,6 +1841,9 @@ class UserLibraryRepository:
                 text=str(row[3]),
                 score=int(row[4]) if row[4] is not None else None,
                 is_uploader=bool(row[5]),
+                gallery_links=UserLibraryRepository._comment_gallery_links_from_json(
+                    row[6]
+                ),
             )
             for row in rows
         )
@@ -1759,8 +1884,9 @@ class UserLibraryRepository:
         connection.executemany(
             """
             INSERT OR REPLACE INTO gallery_sync_comments(
-                gid, comment_id, author, posted, body, score, is_uploader
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                gid, comment_id, author, posted, body, score, is_uploader,
+                gallery_links_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 (
@@ -1771,6 +1897,7 @@ class UserLibraryRepository:
                     str(comment.text or ""),
                     int(comment.score) if comment.score is not None else None,
                     1 if comment.is_uploader else 0,
+                    UserLibraryRepository._comment_gallery_links_json(comment),
                 )
                 for comment in comments
             ),
@@ -1821,9 +1948,68 @@ class UserLibraryRepository:
         )
 
     @staticmethod
+    def _comment_gallery_links_json(comment):
+        return json.dumps(
+            [
+                {
+                    "gid": int(link.gid),
+                    "token": str(link.token),
+                    "text": str(link.text or ""),
+                }
+                for link in tuple(comment.gallery_links or ())
+                if int(link.gid) > 0 and str(link.token or "")
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    @staticmethod
+    def _comment_gallery_links_from_json(value):
+        try:
+            raw_links = json.loads(str(value or "[]"))
+        except (TypeError, ValueError):
+            raw_links = []
+        if not isinstance(raw_links, list):
+            return ()
+        links = []
+        seen = set()
+        for raw_link in raw_links:
+            if not isinstance(raw_link, dict):
+                continue
+            try:
+                gid = int(raw_link.get("gid", 0))
+            except (TypeError, ValueError):
+                continue
+            token = str(raw_link.get("token", ""))
+            identity = (gid, token.casefold())
+            if gid <= 0 or not token or identity in seen:
+                continue
+            seen.add(identity)
+            links.append(
+                OnlineGalleryLink(
+                    gid=gid,
+                    token=token,
+                    text=str(raw_link.get("text", "")),
+                )
+            )
+        return tuple(links)
+
+    @staticmethod
     def _gallery_original_from_row(row) -> GalleryOriginalState:
         try:
-            metadata = json.loads(str(row[8] or "{}"))
+            raw_page_modes = json.loads(str(row[9] or "[]"))
+        except (TypeError, ValueError):
+            raw_page_modes = []
+        if not isinstance(raw_page_modes, list):
+            raw_page_modes = []
+        page_modes = normalize_original_page_modes(
+            raw_page_modes,
+            int(row[7]),
+            int(row[6]),
+            bool(row[8]),
+        )
+        try:
+            metadata = json.loads(str(row[10] or "{}"))
         except (TypeError, ValueError):
             metadata = {}
         if not isinstance(metadata, dict):
@@ -1837,10 +2023,14 @@ class UserLibraryRepository:
             state=str(row[5]),
             completed_pages=int(row[6]),
             page_count=int(row[7]),
+            fallback_to_standard=(
+                ORIGINAL_PAGE_MODE_BASE in page_modes or bool(row[8])
+            ),
+            page_modes=page_modes,
             metadata=metadata,
-            error=str(row[9] or ""),
-            created_at=int(row[10]),
-            updated_at=int(row[11]),
+            error=str(row[11] or ""),
+            created_at=int(row[12]),
+            updated_at=int(row[13]),
         )
 
     @staticmethod

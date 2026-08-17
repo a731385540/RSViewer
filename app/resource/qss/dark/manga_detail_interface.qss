@@ -23,6 +23,35 @@ QLabel#galleryVersionStatus[versionState="current"] {
     color: #8fd694;
 }
 
+QLabel#galleryQualityBadge {
+    min-height: 22px;
+    padding: 1px 9px;
+    border: 1px solid #5f6268;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+QLabel#galleryQualityBadge[qualityTone="full"] {
+    border-color: #d1a744;
+    background: qlineargradient(x1: 0, y1: 0, x2: 1, y2: 0,
+        stop: 0 #d9b74d, stop: 0.34 #c65dab,
+        stop: 0.67 #4aaeba, stop: 1 #d9b74d);
+    color: #1f1727;
+}
+
+QLabel#galleryQualityBadge[qualityTone="original"] {
+    border-color: #8e6d28;
+    background: rgba(205, 154, 49, 42);
+    color: #efc865;
+}
+
+QLabel#galleryQualityBadge[qualityTone="base"] {
+    border-color: #7455a2;
+    background: rgba(139, 92, 201, 45);
+    color: #c9a8f4;
+}
+
 QLabel#mangaTagChip {
     min-height: 24px;
     padding: 1px 9px;

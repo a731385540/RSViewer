@@ -39,6 +39,8 @@ from app.domain.manga import (
     merge_downloaded_page_path,
 )
 from app.domain.online_download import (
+    ORIGINAL_PAGE_MODE_BASE,
+    ORIGINAL_PAGE_MODE_ORIGINAL,
     ORIGINAL_STATE_ACTIVE,
     ORIGINAL_STATE_CLEANING,
     ORIGINAL_STATE_DOWNLOADING,
@@ -151,6 +153,15 @@ class TagChip(QLabel):
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
 
+class GalleryQualityBadge(QLabel):
+    def __init__(self, text: str, tone: str, parent=None):
+        super().__init__(text, parent)
+        self.setObjectName("galleryQualityBadge")
+        self.setProperty("qualityTone", tone)
+        self.setAlignment(Qt.AlignCenter)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+
 class TagGroupWidget(QWidget):
     def __init__(self, title: str, namespace: str, tone: str, values, parent=None):
         super().__init__(parent)
@@ -174,6 +185,8 @@ class TagGroupWidget(QWidget):
 
 class OnlineCommentWidget(QWidget):
     """Selectable, unframed comment row used by the shared detail page."""
+
+    galleryLinkActivated = Signal(object)
 
     def __init__(self, comment, parent=None):
         super().__init__(parent)
@@ -221,6 +234,33 @@ class OnlineCommentWidget(QWidget):
         layout.addLayout(header)
         layout.addWidget(self.postedLabel)
         layout.addWidget(self.bodyLabel)
+        if comment.gallery_links:
+            links_widget = QWidget(self)
+            links_widget.setObjectName("onlineCommentGalleryLinks")
+            links_layout = FlowLayout(links_widget, isTight=True)
+            links_layout.setContentsMargins(0, 0, 0, 0)
+            links_layout.setHorizontalSpacing(8)
+            links_layout.setVerticalSpacing(7)
+            for link in comment.gallery_links:
+                label = str(link.text or "").strip()
+                if not label or "://" in label:
+                    label = self.tr("GID {}").format(link.gid)
+                else:
+                    if len(label) > 42:
+                        label = label[:39] + "..."
+                    label = self.tr("{} · GID {}").format(label, link.gid)
+                button = PushButton(FIF.LINK, label, links_widget)
+                button.setObjectName("onlineCommentGalleryLink")
+                button.setToolTip(
+                    self.tr("在应用内打开画廊 GID {}").format(link.gid)
+                )
+                button.clicked.connect(
+                    lambda _checked=False, target=link: (
+                        self.galleryLinkActivated.emit(target)
+                    )
+                )
+                links_layout.addWidget(button)
+            layout.addWidget(links_widget)
         layout.addWidget(separator)
 
 
@@ -351,6 +391,13 @@ class PageDiscoveryWorker(QRunnable):
                 original_completed_pages=(
                     original_state.completed_pages if original_state else 0
                 ),
+                original_fallback_to_standard=bool(
+                    original_state is not None
+                    and original_state.fallback_to_standard
+                ),
+                original_page_modes=(
+                    original_state.page_modes if original_state is not None else ()
+                ),
             )
             progress = self.user_repository.resolve_progress(
                 item.gid,
@@ -389,6 +436,8 @@ class MangaDetailInterface(QWidget):
     compressedCleanupRequested = Signal(object)
     localMetadataSyncRequested = Signal(object)
     galleryUpdateRequested = Signal(object)
+    folderOpenRequested = Signal(object)
+    onlineGalleryLinkRequested = Signal(object)
     onlineDownloadCancelRequested = Signal(int)
     localMangaResolved = Signal(object)
     progressResolved = Signal(int, int, int)
@@ -411,6 +460,7 @@ class MangaDetailInterface(QWidget):
         self._page_worker: Optional[PageDiscoveryWorker] = None
         self._online_gallery: Optional[OnlineGallery] = None
         self._online_detail: Optional[OnlineGalleryDetail] = None
+        self._folder_open_item = None
         self._online_provider = None
         self._online_cache = None
         self._online_preview_worker = None
@@ -441,6 +491,20 @@ class MangaDetailInterface(QWidget):
         header_layout.addWidget(self.backButton)
         header_layout.addWidget(self.pageTitle)
         header_layout.addStretch(1)
+        self.fullOriginalBadge = GalleryQualityBadge(
+            "ORIGINAL", "full", self
+        )
+        self.originalCountBadge = GalleryQualityBadge(
+            "0 ORIGINAL", "original", self
+        )
+        self.baseCountBadge = GalleryQualityBadge("0 BASE", "base", self)
+        for badge in (
+            self.fullOriginalBadge,
+            self.originalCountBadge,
+            self.baseCountBadge,
+        ):
+            badge.hide()
+            header_layout.addWidget(badge)
 
         self.infoCard = SimpleCardWidget(self)
         info_layout = QHBoxLayout(self.infoCard)
@@ -571,6 +635,13 @@ class MangaDetailInterface(QWidget):
         )
         self.syncButton.clicked.connect(self._requestMetadataSync)
         action_layout.addWidget(self.syncButton)
+        self.openFolderButton = PushButton(
+            FIF.FOLDER,
+            self.tr("在资源管理器中打开"),
+            self.operationCard,
+        )
+        self.openFolderButton.clicked.connect(self._requestOpenFolder)
+        action_layout.addWidget(self.openFolderButton)
 
         self.downloadControls = QWidget(self.operationCard)
         self.downloadControls.setFixedWidth(160)
@@ -652,6 +723,7 @@ class MangaDetailInterface(QWidget):
         self.deleteCompressedButton.hide()
         self.syncButton.hide()
         self.updateButton.hide()
+        self.openFolderButton.hide()
 
         self.previewCard = SimpleCardWidget(self)
         preview_layout = QVBoxLayout(self.previewCard)
@@ -786,6 +858,7 @@ class MangaDetailInterface(QWidget):
             self._page_worker.cancelled = True
             self._page_worker = None
         self._item = item
+        self._folder_open_item = item
         self._online_gallery = None
         self._online_detail = None
         self._online_provider = None
@@ -801,6 +874,11 @@ class MangaDetailInterface(QWidget):
         self.previewSourceSwitch.hide()
         self._local_sync_active = False
         self._gallery_update_locked = False
+        self._updateOriginalQualityBadges(
+            item.original_page_modes,
+            item.page_count,
+            item.original_state,
+        )
         if item.metadata_synced:
             self.commentsCard.show()
             self._setComments(self.userRepository.online_gallery_comments(item.gid))
@@ -818,6 +896,7 @@ class MangaDetailInterface(QWidget):
         self.originalReplaceButton.hide()
         self.deleteCompressedButton.hide()
         self.syncButton.show()
+        self.openFolderButton.show()
         self.syncButton.setEnabled(bool(item.gallery_token))
         self.syncButton.setText(self.tr("同步信息"))
         self.syncButton.setToolTip(
@@ -886,6 +965,7 @@ class MangaDetailInterface(QWidget):
     ):
         self.cancelLoads()
         self._item = None
+        self._folder_open_item = None
         self._local_online_detail = None
         self._local_online_provider = None
         self._local_online_cache = None
@@ -900,6 +980,7 @@ class MangaDetailInterface(QWidget):
         self.previewSourceSwitch.setCurrentItem("standard")
         self.previewSourceSwitch.hide()
         self._local_sync_active = False
+        self._updateOriginalQualityBadges()
         self.pageTitle.setText(self.tr("在线画廊详情"))
         self.originalTitleLabel.setText(item.title)
         self.englishTitleLabel.clear()
@@ -923,6 +1004,7 @@ class MangaDetailInterface(QWidget):
         self.deleteCompressedButton.hide()
         self.syncButton.hide()
         self.updateButton.hide()
+        self.openFolderButton.hide()
         self.downloadButton.setEnabled(False)
         self.downloadButton.setText(self.tr("正在读取画廊信息…"))
         self.readButton.setEnabled(False)
@@ -1086,6 +1168,10 @@ class MangaDetailInterface(QWidget):
                 original_mode=record.mode,
                 original_state=state,
                 original_completed_pages=completed,
+                original_fallback_to_standard=bool(
+                    record.fallback_to_standard
+                ),
+                original_page_modes=record.page_modes,
             )
 
         progress_states = {
@@ -1099,7 +1185,27 @@ class MangaDetailInterface(QWidget):
         self.originalDownloadProgressBar.setValue(
             min(100, round(completed * 100 / total)) if total else 0
         )
-        status_message = str(message or (record.error if record else ""))
+        fallback_to_standard = bool(
+            record is not None and record.fallback_to_standard
+        )
+        self._updateOriginalQualityBadges(
+            record.page_modes if record is not None else (),
+            total,
+            state,
+        )
+        original_count = record.original_page_count if record is not None else 0
+        base_count = record.base_page_count if record is not None else 0
+        status_message = str(
+            message
+            or (record.error if record else "")
+            or (
+                self.tr("混合画廊：{} 张原图，{} 张基础图").format(
+                    original_count, base_count
+                )
+                if fallback_to_standard
+                else ""
+            )
+        )
         self.originalDownloadProgressLabel.setVisible(bool(status_message))
         self.originalDownloadProgressLabel.setToolTip(status_message)
         self.originalDownloadProgressLabel.setText(
@@ -1136,9 +1242,17 @@ class MangaDetailInterface(QWidget):
             self.originalDownloadButton.setText(self.tr("原图文件处理中"))
             self.originalDownloadButton.setEnabled(False)
         elif state == ORIGINAL_STATE_ACTIVE:
-            self.originalDownloadButton.setText(self.tr("已是原图画廊"))
+            self.originalDownloadButton.setText(
+                self.tr("已是混合原图画廊")
+                if fallback_to_standard
+                else self.tr("已是原图画廊")
+            )
             self.originalDownloadButton.setEnabled(False)
-            self.downloadButton.setText(self.tr("已使用原图"))
+            self.downloadButton.setText(
+                self.tr("已使用混合原图")
+                if fallback_to_standard
+                else self.tr("已使用原图")
+            )
             self.downloadButton.setEnabled(False)
         else:
             self.originalDownloadButton.setText(self.tr("下载原图"))
@@ -1149,11 +1263,14 @@ class MangaDetailInterface(QWidget):
             )
             self.originalDownloadButton.setEnabled(bool(page_count))
 
-        can_replace = self._item is not None and state in {
-            ORIGINAL_STATE_STAGED,
-            ORIGINAL_STATE_REPLACING_BASE,
-            ORIGINAL_STATE_REPLACING_ORIGINAL,
-        }
+        can_replace = (
+            self._item is not None
+            and state in {
+                ORIGINAL_STATE_STAGED,
+                ORIGINAL_STATE_REPLACING_BASE,
+                ORIGINAL_STATE_REPLACING_ORIGINAL,
+            }
+        )
         self.originalReplaceButton.setVisible(can_replace)
         self.originalReplaceButton.setEnabled(can_replace and not operation_active)
         self.originalReplaceButton.setText(
@@ -1174,6 +1291,32 @@ class MangaDetailInterface(QWidget):
             if state == ORIGINAL_STATE_CLEANING else self.tr("删除压缩图")
         )
         self._updatePreviewSourceVisibility()
+
+    def _updateOriginalQualityBadges(
+        self, page_modes=(), page_count=0, state=""
+    ):
+        modes = tuple(page_modes or ())
+        total = max(0, int(page_count or 0))
+        original_count = modes.count(ORIGINAL_PAGE_MODE_ORIGINAL)
+        base_count = modes.count(ORIGINAL_PAGE_MODE_BASE)
+        complete = bool(total and original_count + base_count == total)
+        show_full = complete and original_count == total and base_count == 0
+        show_mixed = base_count > 0
+        self.fullOriginalBadge.setVisible(show_full)
+        self.originalCountBadge.setVisible(show_mixed)
+        self.baseCountBadge.setVisible(show_mixed)
+        if show_full:
+            self.fullOriginalBadge.setToolTip(
+                self.tr("全部 {} 页均为原图").format(total)
+            )
+        if show_mixed:
+            self.originalCountBadge.setText(f"{original_count} ORIGINAL")
+            self.baseCountBadge.setText(f"{base_count} BASE")
+            tooltip = self.tr("原图下载画廊：{} 张原图，{} 张基础图").format(
+                original_count, base_count
+            )
+            self.originalCountBadge.setToolTip(tooltip)
+            self.baseCountBadge.setToolTip(tooltip)
 
     def setLocalSyncState(self, active, message=""):
         if self._item is None:
@@ -1305,9 +1448,19 @@ class MangaDetailInterface(QWidget):
         ):
             self.galleryUpdateRequested.emit(self._item)
 
+    def _requestOpenFolder(self):
+        if self._folder_open_item is not None:
+            self.folderOpenRequested.emit(self._folder_open_item)
+
+    def setFolderOpenTarget(self, item=None):
+        self._folder_open_item = item
+        self.openFolderButton.setVisible(item is not None)
+
     def setGalleryUpdateState(self, record=None, active=False, speed=0):
         """Lock destructive gallery actions while an update is unfinished."""
-        if record is not None and record.state == "completed":
+        if record is not None and (
+            record.state == "completed" or int(record.status) >= 6
+        ):
             record = None
         locked = record is not None
         self._gallery_update_locked = locked
@@ -1318,7 +1471,11 @@ class MangaDetailInterface(QWidget):
             self.updateButton.setEnabled(bool(self._item.newer_gallery_urls))
             self.syncButton.setEnabled(bool(self._item.gallery_token))
             if self._item.original_state == ORIGINAL_STATE_ACTIVE:
-                self.downloadButton.setText(self.tr("已使用原图"))
+                self.downloadButton.setText(
+                    self.tr("已使用混合原图")
+                    if self._item.original_fallback_to_standard
+                    else self.tr("已使用原图")
+                )
                 self.downloadButton.setEnabled(False)
             else:
                 self.downloadButton.setEnabled(bool(self._item.page_tokens))
@@ -1455,9 +1612,11 @@ class MangaDetailInterface(QWidget):
             return
         self.commentsStatusLabel.hide()
         for comment in comments:
-            self.commentsListLayout.addWidget(
-                OnlineCommentWidget(comment, self.commentsWidget)
+            widget = OnlineCommentWidget(comment, self.commentsWidget)
+            widget.galleryLinkActivated.connect(
+                lambda link: self.onlineGalleryLinkRequested.emit(link)
             )
+            self.commentsListLayout.addWidget(widget)
 
     def _clearComments(self):
         while self.commentsListLayout.count():

@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, replace
 import re
 import socket
+import time
 from threading import Lock
 from typing import Dict, Iterable
 from urllib.parse import parse_qs, urljoin, urlparse
@@ -15,6 +16,7 @@ from app.domain.online_gallery import (
     OnlineGallery,
     OnlineGalleryComment,
     OnlineGalleryDetail,
+    OnlineGalleryLink,
     OnlineGalleryPage,
     OnlineGalleryPreview,
     OnlineGalleryPreviewPage,
@@ -27,6 +29,56 @@ SITE_BASE_URLS = {
     "exhentai": "https://exhentai.org/",
 }
 
+GALLERY_HOST_SITES = {
+    "e-hentai.org": "ehentai",
+    "exhentai.org": "exhentai",
+}
+
+
+@dataclass(frozen=True)
+class EhGalleryAddress:
+    source_site: str
+    gid: int
+    token: str
+
+
+def parse_eh_gallery_url(value: str) -> EhGalleryAddress:
+    """Parse only a canonical EH/EX gallery URL with both GID and token."""
+
+    try:
+        parsed = urlparse(str(value or "").strip())
+    except ValueError as error:
+        raise EhOnlineError(
+            "请输入完整的 E-Hentai 或 ExHentai 画廊地址，地址必须包含 GID 和 token"
+        ) from error
+    hostname = (parsed.hostname or "").casefold()
+    match = re.fullmatch(r"/g/([1-9]\d*)/([0-9a-fA-F]+)/?", parsed.path)
+    if (
+        parsed.scheme.casefold() != "https"
+        or parsed.netloc.casefold() not in GALLERY_HOST_SITES
+        or hostname not in GALLERY_HOST_SITES
+        or match is None
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise EhOnlineError(
+            "请输入完整的 E-Hentai 或 ExHentai 画廊地址，地址必须包含 GID 和 token"
+        )
+    return EhGalleryAddress(
+        source_site=GALLERY_HOST_SITES[hostname],
+        gid=int(match.group(1)),
+        token=match.group(2),
+    )
+
+
+def build_eh_gallery_url(site: str, gid: int, token: str) -> str:
+    if site not in SITE_BASE_URLS or int(gid) <= 0 or not re.fullmatch(
+        r"[0-9a-fA-F]+", str(token or "")
+    ):
+        raise EhOnlineError("无法生成有效的 EH/EX 画廊地址")
+    return f"{SITE_BASE_URLS[site]}g/{int(gid)}/{token}/"
+
 
 class EhOnlineError(RuntimeError):
     """Safe, user-facing error raised by an online provider."""
@@ -34,6 +86,10 @@ class EhOnlineError(RuntimeError):
 
 class EhOnlineProviderNotImplemented(EhOnlineError):
     """Raised until a concrete crawler provider is registered."""
+
+
+class OriginalImageUnavailableError(EhOnlineError):
+    """The image page is valid but does not expose a full-image target."""
 
 
 @dataclass(frozen=True)
@@ -209,6 +265,7 @@ class EhOnlineProvider(ABC):
         gallery: OnlineGallery,
         preview: OnlineGalleryPreview,
         should_cancel=None,
+        progress_callback=None,
     ) -> bytes:
         raise EhOnlineError("当前在线 provider 不支持在线阅读")
 
@@ -217,6 +274,7 @@ class EhOnlineProvider(ABC):
         gallery: OnlineGallery,
         preview: OnlineGalleryPreview,
         should_cancel=None,
+        progress_callback=None,
     ) -> bytes:
         raise EhOnlineError("当前在线 provider 不支持下载原图")
 
@@ -240,6 +298,7 @@ class RefactoredEhOnlineProvider(EhOnlineProvider):
     """Adapter for the user-supplied ``eh_tool_refactored`` list crawler."""
 
     STREAM_READ_IDLE_TIMEOUT_SECONDS = 15
+    SPEED_UPDATE_INTERVAL_SECONDS = 0.5
 
     SOURCE_NAMES = {
         "ehentai": "e-hentai",
@@ -268,6 +327,14 @@ class RefactoredEhOnlineProvider(EhOnlineProvider):
         if query.cursor:
             self._validate_list_url(query.cursor)
             result = self._crawler.getUrl(query.cursor)
+        elif query.seek_date:
+            if query.keyword:
+                context = self._crawler.getMain(search=query.keyword)
+                if not isinstance(context, dict):
+                    raise EhOnlineError("画廊爬虫返回了未知数据")
+                if context.get("error"):
+                    raise EhOnlineError(str(context["error"]))
+            result = self._crawler.getMain(time=query.seek_date)
         else:
             result = self._crawler.getMain(search=query.keyword)
         if not isinstance(result, dict):
@@ -352,7 +419,9 @@ class RefactoredEhOnlineProvider(EhOnlineProvider):
         self._validate_online_image_url(preview.thumbnail_url)
         return self._request_image(preview.thumbnail_url)
 
-    def load_gallery_page_image(self, gallery, preview, should_cancel=None):
+    def load_gallery_page_image(
+        self, gallery, preview, should_cancel=None, progress_callback=None
+    ):
         self._validate_gallery_page_url(gallery, preview)
         if should_cancel is None:
             response = self._crawler.req.get(preview.page_url)
@@ -376,12 +445,16 @@ class RefactoredEhOnlineProvider(EhOnlineProvider):
             raise EhOnlineError("站点返回的单图页面缺少图片地址")
         image_url = str(image.get("src") or "")
         self._validate_online_image_url(image_url)
-        data = self._request_image(image_url, should_cancel)
+        data = self._request_image(
+            image_url, should_cancel, progress_callback=progress_callback
+        )
         if not data:
             raise EhOnlineError("在线图片请求失败")
         return data
 
-    def load_gallery_page_original(self, gallery, preview, should_cancel=None):
+    def load_gallery_page_original(
+        self, gallery, preview, should_cancel=None, progress_callback=None
+    ):
         self._validate_gallery_page_url(gallery, preview)
         if should_cancel is None:
             response = self._crawler.req.get(preview.page_url)
@@ -408,18 +481,22 @@ class RefactoredEhOnlineProvider(EhOnlineProvider):
                 original_url = candidate
                 break
         if not original_url:
-            raise EhOnlineError(
-                "单图页面没有可用的原图下载链接；请检查账户权限或原图额度"
+            raise OriginalImageUnavailableError(
+                "单图页面没有可用的原图下载链接"
             )
         self._validate_original_image_url(original_url, gallery, preview)
-        data = self._request_image(original_url, should_cancel)
+        data = self._request_image(
+            original_url, should_cancel, progress_callback=progress_callback
+        )
         if not data:
             raise EhOnlineError("原图请求失败")
         return data
 
-    def _request_image(self, url, should_cancel=None):
+    def _request_image(self, url, should_cancel=None, progress_callback=None):
         if should_cancel is not None:
-            data, _status = self._request_bytes_cancellable(url, should_cancel)
+            data, _status = self._request_bytes_cancellable(
+                url, should_cancel, progress_callback=progress_callback
+            )
             return data
         response = self._crawler.req.get(url)
         if response is None or not getattr(response, "ok", False):
@@ -433,7 +510,9 @@ class RefactoredEhOnlineProvider(EhOnlineProvider):
         for response in responses:
             self._abort_response(response, close_response=False)
 
-    def _request_bytes_cancellable(self, url, should_cancel):
+    def _request_bytes_cancellable(
+        self, url, should_cancel, progress_callback=None
+    ):
         self._raise_if_request_cancelled(should_cancel)
         configured_timeout = max(3, int(self.settings.timeout_seconds))
         transfer_idle_timeout = min(
@@ -467,11 +546,27 @@ class RefactoredEhOnlineProvider(EhOnlineProvider):
                 self._raise_if_request_cancelled(should_cancel)
                 return bytes(getattr(response, "content", b"") or b""), status
             chunks = []
+            interval_bytes = 0
+            last_progress_at = time.monotonic()
             for chunk in iterator(chunk_size=64 * 1024):
                 self._raise_if_request_cancelled(should_cancel)
                 if chunk:
-                    chunks.append(bytes(chunk))
+                    chunk = bytes(chunk)
+                    chunks.append(chunk)
+                    interval_bytes += len(chunk)
+                    now = time.monotonic()
+                    elapsed = now - last_progress_at
+                    if (
+                        progress_callback is not None
+                        and elapsed >= self.SPEED_UPDATE_INTERVAL_SECONDS
+                    ):
+                        progress_callback(interval_bytes / max(0.001, elapsed))
+                        interval_bytes = 0
+                        last_progress_at = now
             self._raise_if_request_cancelled(should_cancel)
+            if progress_callback is not None and interval_bytes:
+                elapsed = time.monotonic() - last_progress_at
+                progress_callback(interval_bytes / max(0.001, elapsed))
             return b"".join(chunks), status
         finally:
             with self._request_lock:
@@ -674,7 +769,8 @@ class RefactoredEhOnlineProvider(EhOnlineProvider):
         comments = tuple(
             comment
             for comment in (
-                cls._parse_comment(node) for node in soup.select("#cdiv .c1")
+                cls._parse_comment(node, gallery.url)
+                for node in soup.select("#cdiv .c1")
             )
             if comment is not None
         )
@@ -787,7 +883,7 @@ class RefactoredEhOnlineProvider(EhOnlineProvider):
         return tuple(previews)
 
     @staticmethod
-    def _parse_comment(node):
+    def _parse_comment(node, gallery_url):
         body = node.select_one(".c6[id^='comment_']")
         header = node.select_one(".c3")
         if body is None or header is None:
@@ -803,6 +899,26 @@ class RefactoredEhOnlineProvider(EhOnlineProvider):
         score = int(score_match.group(1)) if score_match else None
         text = body.get_text("\n", strip=True)
         text = re.sub(r"\n{3,}", "\n\n", text)
+        gallery_links = []
+        seen_links = set()
+        for anchor in body.select("a[href]"):
+            try:
+                target = parse_eh_gallery_url(
+                    urljoin(gallery_url, str(anchor.get("href") or ""))
+                )
+            except EhOnlineError:
+                continue
+            identity = (target.gid, target.token.casefold())
+            if identity in seen_links:
+                continue
+            seen_links.add(identity)
+            gallery_links.append(
+                OnlineGalleryLink(
+                    gid=target.gid,
+                    token=target.token,
+                    text=anchor.get_text(" ", strip=True),
+                )
+            )
         uploader_marker = RefactoredEhOnlineProvider._node_text(node, ".c4")
         return OnlineGalleryComment(
             comment_id=comment_id,
@@ -811,6 +927,7 @@ class RefactoredEhOnlineProvider(EhOnlineProvider):
             text=text,
             score=score,
             is_uploader="Uploader Comment" in uploader_marker,
+            gallery_links=tuple(gallery_links),
         )
 
     @staticmethod

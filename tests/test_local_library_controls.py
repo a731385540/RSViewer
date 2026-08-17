@@ -3,12 +3,12 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QPoint, Qt, QThreadPool
-from PySide6.QtGui import QContextMenuEvent
+from PySide6.QtGui import QColor, QContextMenuEvent, QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog
 
@@ -16,13 +16,17 @@ from app.common.config import cfg
 from app.domain.online_download import (
     ONLINE_DOWNLOAD_COMPLETED,
     OnlineGalleryDownloadRecord,
+    ORIGINAL_STATE_ACTIVE,
 )
 from app.domain.manga import MangaItem
 from app.repositories.user_library_repository import UserLibraryRepository
 from app.view.local_manga_interface import (
     FluentSplitterHandle,
+    CoverLabel,
     LocalMangaInterface,
     MangaLabelSelectionDialog,
+    MangaGridCard,
+    ORIGINAL_FALLBACK_BADGE_COLOR,
     ORIGINAL_PENDING_BORDER_COLOR,
     PlaylistOrderDialog,
 )
@@ -105,6 +109,50 @@ class LocalLibraryControlsTests(unittest.TestCase):
 
     def test_original_pending_border_uses_dark_yellow(self):
         self.assertEqual("#B8860B", ORIGINAL_PENDING_BORDER_COLOR)
+
+    def test_cover_scaling_is_cached_until_widget_size_changes(self):
+        image = QImage(480, 640, QImage.Format_RGB32)
+        image.fill(QColor("red"))
+        label = CoverLabel(self.root / "unused", image=image)
+        label.resize(180, 245)
+        label.show()
+        QApplication.processEvents()
+        cached_key = label._display_pixmap.cacheKey()
+
+        label.grab()
+        label.grab()
+
+        self.assertEqual(cached_key, label._display_pixmap.cacheKey())
+        label.resize(200, 272)
+        QApplication.processEvents()
+        self.assertNotEqual(cached_key, label._display_pixmap.cacheKey())
+        label.deleteLater()
+
+    def test_original_fallback_card_has_purple_badge_and_original_border(self):
+        item = replace(
+            self.items[0],
+            original_state=ORIGINAL_STATE_ACTIVE,
+            original_fallback_to_standard=True,
+        )
+        card = MangaGridCard(item)
+        card.setCardWidth(180)
+        card.show()
+        QApplication.processEvents()
+        image = QImage(card.size(), QImage.Format_ARGB32)
+        image.fill(Qt.transparent)
+        card.render(image)
+
+        badge = QColor(ORIGINAL_FALLBACK_BADGE_COLOR)
+        badge_pixels = [
+            image.pixelColor(x, y)
+            for x in range(11, 23)
+            for y in range(11, 23)
+        ]
+        self.assertIn(badge, badge_pixels)
+        self.assertFalse(card.originalFallbackBadge.isHidden())
+        self.assertIn("部分页面没有原图", card.toolTip())
+        card.close()
+        card.deleteLater()
 
     def tearDown(self):
         self.interface.cancelLoad()
@@ -202,6 +250,63 @@ class LocalLibraryControlsTests(unittest.TestCase):
         self.assertEqual(
             [1], [item.gid for item in self.interface._filtered_items]
         )
+
+    def test_incremental_download_update_preserves_active_category_and_search(self):
+        categorized = replace(self.items[0], primary_label="分类 A")
+        other = replace(self.items[1], primary_label="分类 B")
+        self.interface._onLoaded(
+            ([categorized, other, self.items[2]], ["分类 A", "分类 B"], [])
+        )
+        self.interface.primaryLabelTree.setCurrentItem(
+            self.interface.primaryLabelTree.topLevelItem(1)
+        )
+        self.interface.searchEdit.setText("Manga 1")
+        QApplication.processEvents()
+        before_scroll = self.interface.scrollArea.verticalScrollBar().value()
+
+        self.interface.upsertItem(
+            replace(categorized, page_count=24, standard_download_pending=False)
+        )
+
+        self.assertFalse(self.interface._show_all_manga)
+        self.assertEqual("分类 A", self.interface._primary_label_filter)
+        self.assertEqual("Manga 1", self.interface.searchEdit.text())
+        self.assertEqual([1], [item.gid for item in self.interface._filtered_items])
+        self.assertEqual(before_scroll, self.interface.scrollArea.verticalScrollBar().value())
+        self.assertEqual(24, self.interface._cards[0].item.page_count)
+
+    def test_incremental_nonmatching_registration_does_not_rebuild_cards(self):
+        categorized = replace(self.items[0], primary_label="分类 A")
+        self.interface._onLoaded(
+            ([categorized], ["分类 A", "分类 B"], [])
+        )
+        self.interface.primaryLabelTree.setCurrentItem(
+            self.interface.primaryLabelTree.topLevelItem(1)
+        )
+        self.interface._renderCards = MagicMock()
+
+        self.interface.upsertItem(
+            replace(self.items[1], primary_label="分类 B")
+        )
+
+        self.interface._renderCards.assert_not_called()
+        self.assertEqual([1], [item.gid for item in self.interface._filtered_items])
+        self.assertEqual({1, 2}, {item.gid for item in self.interface._all_items})
+
+    def test_inflight_library_load_keeps_new_incremental_registration(self):
+        worker = object()
+        downloaded = replace(self.items[2], primary_label="分类 B")
+        self.interface._load_worker = worker
+
+        self.interface.upsertItem(downloaded)
+        self.interface._onLoaded(
+            ([self.items[0], self.items[1]], ["分类 A", "分类 B"], []),
+            worker,
+        )
+
+        self.assertEqual({1, 2, 3}, {item.gid for item in self.interface._all_items})
+        merged = next(item for item in self.interface._all_items if item.gid == 3)
+        self.assertEqual("分类 B", merged.primary_label)
 
     def test_regular_refresh_preserves_playlist_mode_show_all_and_page(self):
         playlist_id = self.repository.create_playlist("阅读中")
@@ -333,6 +438,52 @@ class LocalLibraryControlsTests(unittest.TestCase):
         QApplication.processEvents()
         self.assertTrue(self.interface.searchPanel.isHidden())
 
+    def test_search_button_pins_hover_panel_until_clicked_again(self):
+        self.interface.resize(1000, 700)
+        self.interface.show()
+        QApplication.processEvents()
+
+        QApplication.sendEvent(
+            self.interface.searchButton, QEvent(QEvent.Enter)
+        )
+        QApplication.processEvents()
+        self.assertTrue(self.interface.searchPanel.isVisible())
+        self.assertFalse(self.interface._search_pinned)
+
+        self.interface.searchButton.click()
+        self.assertTrue(self.interface._search_pinned)
+        QApplication.sendEvent(
+            self.interface.searchButton, QEvent(QEvent.Leave)
+        )
+        QApplication.sendEvent(
+            self.interface.searchPanel, QEvent(QEvent.Leave)
+        )
+        QTest.qWait(200)
+        self.assertTrue(self.interface.searchPanel.isVisible())
+
+        self.interface.searchButton.click()
+        self.assertFalse(self.interface._search_pinned)
+        QApplication.sendEvent(
+            self.interface.searchButton, QEvent(QEvent.Leave)
+        )
+        QApplication.sendEvent(
+            self.interface.searchPanel, QEvent(QEvent.Leave)
+        )
+        QTest.qWait(200)
+        self.assertTrue(self.interface.searchPanel.isHidden())
+
+        cfg.set(cfg.mangaSearchHoverEnabled, False)
+        self.interface.searchButton.click()
+        self.assertTrue(self.interface._search_pinned)
+        self.assertTrue(self.interface.searchPanel.isVisible())
+        QApplication.sendEvent(
+            self.interface.searchPanel, QEvent(QEvent.Leave)
+        )
+        QTest.qWait(200)
+        self.assertTrue(self.interface.searchPanel.isVisible())
+        self.interface.searchButton.click()
+        self.assertTrue(self.interface.searchPanel.isHidden())
+
     def test_context_menu_opens_three_fixed_label_selection_dialogs(self):
         self.repository.create_playlist("播放列表 A")
         self.repository.create_taxonomy_label("全彩")
@@ -348,6 +499,7 @@ class LocalLibraryControlsTests(unittest.TestCase):
         self.assertEqual(
             [
                 "添加到收藏",
+                "在资源管理器中打开",
                 "同步在线信息",
                 "搜索相似画廊",
                 "选择分类…",
@@ -547,6 +699,23 @@ class LocalLibraryControlsTests(unittest.TestCase):
                 ).menuActions()
             ],
         )
+
+    def test_open_folder_context_action_only_targets_right_clicked_gallery(self):
+        opened = []
+        self.interface.folderOpenRequested.connect(
+            lambda item: opened.append(item.gid)
+        )
+        right_clicked = self.items[2]
+        menu = self.interface._buildLabelMenu(right_clicked, (1, 2))
+        action = next(
+            action
+            for action in menu.menuActions()
+            if action.text() == "在资源管理器中打开"
+        )
+
+        action.trigger()
+
+        self.assertEqual([right_clicked.gid], opened)
 
     def test_collection_mode_reuses_items_and_preserves_repository_order(self):
         collection = LocalMangaInterface(

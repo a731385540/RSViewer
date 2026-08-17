@@ -19,6 +19,8 @@ from app.domain.online_download import (
     ONLINE_DOWNLOAD_QUEUED,
     OnlineGalleryDownloadRecord,
     ORIGINAL_STATE_ACTIVE,
+    ORIGINAL_PAGE_MODE_BASE,
+    ORIGINAL_PAGE_MODE_ORIGINAL,
     ORIGINAL_STATE_REPLACING_ORIGINAL,
     ORIGINAL_STATE_STAGED,
 )
@@ -26,6 +28,7 @@ from app.domain.online_gallery import (
     OnlineGallery,
     OnlineGalleryComment,
     OnlineGalleryDetail,
+    OnlineGalleryLink,
     OnlineGalleryPreview,
 )
 from app.repositories.ehviewer_download_repository import EhViewerDownloadRepository
@@ -35,6 +38,7 @@ from app.services.online_download_builder import (
     build_online_gallery_from_download_record,
 )
 from app.services.online_gallery_memory_cache import OnlineGalleryMemoryCache
+from app.sources.eh_online_source import OriginalImageUnavailableError
 from app.sources.ehviewer_source import EhViewerDataSource
 from app.workers.online_gallery_download_worker import (
     LocalGalleryPageDownloadWorker,
@@ -158,7 +162,13 @@ class OnlineGalleryDownloadTests(unittest.TestCase):
             tags=gallery.tags,
             comments=(
                 OnlineGalleryComment(
-                    "15", "reader", "today", "saved comment", 2, False
+                    "15",
+                    "reader",
+                    "today",
+                    "saved comment",
+                    2,
+                    False,
+                    (OnlineGalleryLink(987, "deadbeef01", "Prequel"),),
                 ),
             ),
             previews=previews,
@@ -314,6 +324,125 @@ class OnlineGalleryDownloadTests(unittest.TestCase):
         self.assertFalse((folder / "original").exists())
         self.assertEqual(3, len(tuple(folder.glob("*.png"))))
 
+    def test_missing_original_falls_back_to_base_and_resumes_as_base(self):
+        class MissingOriginalProvider(FakeDownloadProvider):
+            def load_gallery_page_original(self, _gallery, preview):
+                self.original_calls.append(preview.page_index)
+                if preview.page_index > 0:
+                    raise OriginalImageUnavailableError("no full image")
+                return image_bytes("purple")
+
+        first_provider = MissingOriginalProvider(self.pages, fail_index=1)
+        first_worker = self._worker(first_provider)
+        first_worker.download_mode = DOWNLOAD_MODE_ORIGINAL_DIRECT
+        first_worker.run()
+
+        failed = self.user_repository.online_gallery_download(4120989)
+        original = self.user_repository.gallery_original_state(4120989)
+        self.assertEqual(ONLINE_DOWNLOAD_FAILED, failed.state)
+        self.assertEqual([0, 1], first_provider.original_calls)
+        self.assertEqual([1], first_provider.page_calls)
+        self.assertTrue(original.fallback_to_standard)
+        self.assertEqual(1, original.completed_pages)
+        self.assertEqual(
+            (ORIGINAL_PAGE_MODE_ORIGINAL, ORIGINAL_PAGE_MODE_BASE, ""),
+            original.page_modes,
+        )
+
+        second_provider = MissingOriginalProvider(self.pages)
+        second_worker = self._worker(second_provider)
+        second_worker.download_mode = DOWNLOAD_MODE_ORIGINAL_DIRECT
+        second_worker.run()
+
+        completed = self.user_repository.online_gallery_download(4120989)
+        original = self.user_repository.gallery_original_state(4120989)
+        folder = self.download_root / completed.dirname
+        self.assertEqual(ONLINE_DOWNLOAD_COMPLETED, completed.state)
+        self.assertEqual(ORIGINAL_STATE_ACTIVE, original.state)
+        self.assertTrue(original.fallback_to_standard)
+        self.assertEqual([2], second_provider.original_calls)
+        self.assertEqual([1, 2], second_provider.page_calls)
+        self.assertEqual(
+            (
+                ORIGINAL_PAGE_MODE_ORIGINAL,
+                ORIGINAL_PAGE_MODE_BASE,
+                ORIGINAL_PAGE_MODE_BASE,
+            ),
+            original.page_modes,
+        )
+        self.assertEqual(3, len(tuple(folder.glob("*.png"))))
+        self.assertEqual(self.pages[1], (folder / "00000002.png").read_bytes())
+
+    def test_local_missing_original_reuses_complete_base_gallery(self):
+        dirname, folder = self.external_repository.prepare_download(self.detail)
+        for index in range(3):
+            (folder / f"{index + 1:08d}.jpg").write_bytes(
+                image_bytes("black")
+            )
+
+        class MissingOriginalProvider(FakeDownloadProvider):
+            def load_gallery_page_original(self, _gallery, preview):
+                self.original_calls.append(preview.page_index)
+                if preview.page_index > 0:
+                    raise OriginalImageUnavailableError("no full image")
+                return self.pages[preview.page_index]
+
+        provider = MissingOriginalProvider(self.pages)
+        worker = OnlineGalleryDownloadWorker(
+            provider=provider,
+            detail=self.detail,
+            cover_data=b"",
+            gallery_cache=self.cache,
+            ehviewer_repository=self.external_repository,
+            user_repository=self.user_repository,
+            site="exhentai",
+            download_mode=DOWNLOAD_MODE_ORIGINAL_LOCAL,
+            existing_folder=folder,
+            retry_count=1,
+        )
+        worker.run()
+
+        original = self.user_repository.gallery_original_state(4120989)
+        self.assertEqual(dirname, original.dirname)
+        self.assertEqual(ORIGINAL_STATE_STAGED, original.state)
+        self.assertTrue(original.fallback_to_standard)
+        self.assertEqual([0, 1, 2], provider.original_calls)
+        self.assertEqual([1, 2], provider.page_calls)
+        self.assertEqual(
+            (
+                ORIGINAL_PAGE_MODE_ORIGINAL,
+                ORIGINAL_PAGE_MODE_BASE,
+                ORIGINAL_PAGE_MODE_BASE,
+            ),
+            original.page_modes,
+        )
+        self.assertEqual(3, len(tuple(folder.glob("*.jpg"))))
+        self.assertEqual(3, len(tuple((folder / "original").glob("*.png"))))
+
+        OriginalGalleryFileWorker(
+            original,
+            self.download_root,
+            self.user_repository,
+            OriginalGalleryFileWorker.REPLACE,
+            self.external_repository,
+        ).run()
+
+        promoted = self.user_repository.gallery_original_state(4120989)
+        self.assertEqual(ORIGINAL_STATE_ACTIVE, promoted.state)
+        self.assertEqual(
+            (
+                ORIGINAL_PAGE_MODE_ORIGINAL,
+                ORIGINAL_PAGE_MODE_BASE,
+                ORIGINAL_PAGE_MODE_BASE,
+            ),
+            promoted.page_modes,
+        )
+        self.assertEqual(3, len(tuple(folder.glob("*.png"))))
+        self.assertEqual(
+            3, len(tuple((folder / "history" / "del").glob("*.jpg")))
+        )
+        self.assertFalse((folder / "original").exists())
+
     def test_stalled_original_request_retries_and_clears_stale_speed(self):
         class FlakyOriginalProvider(FakeDownloadProvider):
             def __init__(self, pages):
@@ -378,12 +507,18 @@ class OnlineGalleryDownloadTests(unittest.TestCase):
         self.assertEqual("keep-sidecar", sidecar.read_text(encoding="ascii"))
         self.assertEqual(base_pages[0], (folder / "00000001.jpg").read_bytes())
         self.assertEqual(3, len(tuple((folder / "original").glob("*.png"))))
+        with closing(sqlite3.connect(str(self.external_db))) as connection:
+            connection.execute(
+                "UPDATE DOWNLOADS SET TIME = 123 WHERE GID = 4120989"
+            )
+            connection.commit()
 
         replacement = OriginalGalleryFileWorker(
             original,
             self.download_root,
             self.user_repository,
             OriginalGalleryFileWorker.REPLACE,
+            self.external_repository,
         )
         replacement.run()
         promoted = self.user_repository.gallery_original_state(4120989)
@@ -391,6 +526,11 @@ class OnlineGalleryDownloadTests(unittest.TestCase):
         self.assertEqual(3, len(tuple((folder / "history" / "del").glob("*.jpg"))))
         self.assertEqual(3, len(tuple(folder.glob("*.png"))))
         self.assertEqual("keep-sidecar", sidecar.read_text(encoding="ascii"))
+        with closing(sqlite3.connect(str(self.external_db))) as connection:
+            updated_time = connection.execute(
+                "SELECT TIME FROM DOWNLOADS WHERE GID = 4120989"
+            ).fetchone()[0]
+        self.assertGreater(updated_time, 123)
 
         cleanup = OriginalGalleryFileWorker(
             promoted,
@@ -528,6 +668,10 @@ class OnlineGalleryDownloadTests(unittest.TestCase):
         comments = self.user_repository.online_gallery_comments(4120989)
         self.assertEqual(1, len(comments))
         self.assertEqual("saved comment", comments[0].text)
+        self.assertEqual(
+            (OnlineGalleryLink(987, "deadbeef01", "Prequel"),),
+            comments[0].gallery_links,
+        )
         self.assertEqual("3 MiB", record.metadata["file_size"])
 
         with closing(sqlite3.connect(str(self.external_db))) as connection:

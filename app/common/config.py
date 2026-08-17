@@ -45,7 +45,6 @@ class Config(QConfig):
 
     libraryFolders = ConfigItem(
         "Library", "Folders", [], FolderListValidator())
-    ehViewerDatabase = ConfigItem("ExternalData", "EhViewerDatabase", "")
     ehViewerMangaRoot = ConfigItem("ExternalData", "EhViewerMangaRoot", "")
     mangaPageSize = OptionsConfigItem(
         "Library", "MangaPageSize", 40, OptionsValidator([20, 40, 60, 100]))
@@ -81,7 +80,10 @@ class Config(QConfig):
         "OnlineEH", "RequestTimeout", 20, OptionsValidator([10, 20, 30, 60])
     )
     onlineEhViewMode = OptionsConfigItem(
-        "OnlineEH", "ViewMode", "card", OptionsValidator(["card", "extended"])
+        "OnlineEH",
+        "ViewMode",
+        "card",
+        OptionsValidator(["card", "list", "extended"]),
     )
     onlineEhThumbnailConcurrency = OptionsConfigItem(
         "OnlineEH", "ThumbnailConcurrency", 6, OptionsValidator([1, 2, 4, 6, 8, 12])

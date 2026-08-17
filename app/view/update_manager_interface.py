@@ -37,6 +37,7 @@ CHECKPOINT_TEXT = {
 class GalleryUpdateTaskCard(SimpleCardWidget):
     startRequested = Signal(int)
     pauseRequested = Signal(int)
+    deleteRequested = Signal(int)
 
     def __init__(self, record, active=False, speed=0, parent=None):
         super().__init__(parent)
@@ -54,6 +55,13 @@ class GalleryUpdateTaskCard(SimpleCardWidget):
         self.progressBar.setFixedWidth(180)
         self.actionButton = ToolButton(FIF.PAUSE if active else FIF.PLAY, self)
         self.actionButton.clicked.connect(self._requestAction)
+        self.deleteButton = ToolButton(FIF.DELETE, self)
+        self.deleteButton.setToolTip(
+            "删除任务记录，保留画廊文件和目录恢复记录"
+        )
+        self.deleteButton.clicked.connect(
+            lambda: self.deleteRequested.emit(int(self.record.source_gid))
+        )
 
         text_layout = QVBoxLayout()
         text_layout.setContentsMargins(0, 0, 0, 0)
@@ -67,6 +75,7 @@ class GalleryUpdateTaskCard(SimpleCardWidget):
         layout.addLayout(text_layout, 1)
         layout.addWidget(self.progressBar)
         layout.addWidget(self.actionButton)
+        layout.addWidget(self.deleteButton)
         self.updateRecord(record, active, speed)
 
     def updateRecord(self, record, active=False, speed=0):
@@ -102,6 +111,7 @@ class GalleryUpdateTaskCard(SimpleCardWidget):
 class UpdateManagerInterface(QWidget):
     startRequested = Signal(int)
     pauseRequested = Signal(int)
+    deleteRequested = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -160,6 +170,7 @@ class UpdateManagerInterface(QWidget):
                 )
                 card.startRequested.connect(self.startRequested)
                 card.pauseRequested.connect(self.pauseRequested)
+                card.deleteRequested.connect(self.deleteRequested)
                 self._cards[gid] = card
                 self.contentLayout.addWidget(card)
             else:

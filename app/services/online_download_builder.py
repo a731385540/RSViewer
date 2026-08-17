@@ -45,6 +45,22 @@ def online_detail_metadata(detail, download_label=None):
     return metadata
 
 
+def build_online_detail_from_gallery(gallery):
+    """Promote list metadata into the partial detail used for early registration."""
+
+    return OnlineGalleryDetail(
+        gallery=gallery,
+        title=str(gallery.title or gallery.gid),
+        category=str(gallery.category or ""),
+        cover_url=str(gallery.thumbnail_url or ""),
+        posted=str(gallery.posted or ""),
+        uploader=str(gallery.uploader or ""),
+        page_count=max(0, int(gallery.page_count)),
+        rating=gallery.rating,
+        tags=tuple(gallery.tags),
+    )
+
+
 def build_online_gallery_from_download_record(record):
     """Rebuild the canonical gallery request needed to resume an early task."""
     site = str(record.site or "")

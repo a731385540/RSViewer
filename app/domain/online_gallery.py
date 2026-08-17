@@ -21,6 +21,15 @@ class OnlineGallery:
 
 
 @dataclass(frozen=True)
+class OnlineGalleryLink:
+    """A same-service gallery reference embedded in a comment."""
+
+    gid: int
+    token: str
+    text: str = ""
+
+
+@dataclass(frozen=True)
 class OnlineGalleryComment:
     """One read-only comment parsed from a gallery HTML page."""
 
@@ -30,6 +39,7 @@ class OnlineGalleryComment:
     text: str
     score: Optional[int] = None
     is_uploader: bool = False
+    gallery_links: Tuple[OnlineGalleryLink, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -92,6 +102,7 @@ class OnlineGalleryQuery:
     """Provider-neutral query passed from the online resource page."""
 
     keyword: str = ""
+    seek_date: str = ""
     cursor: str = ""
     page_number: int = 1
     filters: Mapping[str, Any] = field(default_factory=dict)

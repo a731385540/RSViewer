@@ -10,6 +10,7 @@ QScrollArea#onlineMangaScrollArea {
 }
 
 QWidget#onlineGalleryCard,
+QWidget#onlineGalleryListCard,
 QWidget#onlineGalleryExtendedCard {
     background: rgba(255, 255, 255, 180);
     border: 1px solid rgba(0, 0, 0, 18);
@@ -44,6 +45,15 @@ QLabel#onlineGalleryTitleCell {
     background: transparent;
     border: none;
     color: #202020;
+}
+
+QLabel#onlineGalleryListTitle {
+    padding: 0;
+    background: transparent;
+    border: none;
+    color: #202020;
+    font-size: 14px;
+    font-weight: 600;
 }
 
 QLabel#onlineGalleryCategory {

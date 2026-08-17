@@ -26,12 +26,20 @@ class OriginalGalleryFileWorker(QRunnable):
     REPLACE = "replace"
     CLEANUP = "cleanup"
 
-    def __init__(self, record, manga_root, user_repository, action):
+    def __init__(
+        self,
+        record,
+        manga_root,
+        user_repository,
+        action,
+        ehviewer_repository=None,
+    ):
         super().__init__()
         self.record = record
         self.manga_root = Path(manga_root)
         self.user_repository = user_repository
         self.action = str(action)
+        self.ehviewer_repository = ehviewer_repository
         self.signals = OriginalGalleryFileSignals()
 
     def run(self):
@@ -65,11 +73,11 @@ class OriginalGalleryFileWorker(QRunnable):
             ORIGINAL_STATE_REPLACING_BASE,
             ORIGINAL_STATE_REPLACING_ORIGINAL,
         }:
-            raise ValueError("当前画廊没有可提升的完整原图")
+            raise ValueError("当前画廊没有可提升的完整原图下载内容")
 
         if state.state == ORIGINAL_STATE_STAGED:
             originals = self._numbered_images(original)
-            self._require_complete(originals, total, "original")
+            self._require_complete(originals, total, "原图下载暂存目录")
             self.user_repository.update_gallery_original_state(
                 gid, ORIGINAL_STATE_REPLACING_BASE, error=""
             )
@@ -89,7 +97,7 @@ class OriginalGalleryFileWorker(QRunnable):
                 gid, ORIGINAL_STATE_REPLACING_ORIGINAL, error=""
             )
 
-        self.signals.stageChanged.emit("正在将原图提升为画廊页面…")
+        self.signals.stageChanged.emit("正在将原图下载内容提升为画廊页面…")
         originals = self._numbered_images(original)
         active = self._numbered_images(folder)
         for index in range(total):
@@ -97,7 +105,7 @@ class OriginalGalleryFileWorker(QRunnable):
                 continue
             source = originals.get(index)
             if source is None:
-                raise ValueError(f"缺少待提升的第 {index + 1} 页原图")
+                raise ValueError(f"缺少待提升的第 {index + 1} 页下载内容")
             target = folder / source.name
             if target.exists():
                 raise FileExistsError(f"原图提升目标已存在：{target.name}")
@@ -105,11 +113,13 @@ class OriginalGalleryFileWorker(QRunnable):
             active[index] = target
         self._require_complete(self._numbered_images(folder), total, "画廊根目录")
         if self._numbered_images(original):
-            raise ValueError("original 目录仍有尚未提升的原图")
+            raise ValueError("original 目录仍有尚未提升的下载内容")
         try:
             original.rmdir()
         except OSError:
             pass
+        if self.ehviewer_repository is not None:
+            self.ehviewer_repository.touch_download_time(gid)
         self.user_repository.update_gallery_original_state(
             gid,
             ORIGINAL_STATE_ACTIVE,

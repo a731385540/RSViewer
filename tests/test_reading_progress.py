@@ -13,7 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QByteArray, QBuffer, QIODevice, Qt, QThreadPool
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 from app.domain.manga import MangaItem
 from app.domain.online_download import (
@@ -26,6 +26,7 @@ from app.domain.online_gallery import (
     OnlineGallery,
     OnlineGalleryComment,
     OnlineGalleryDetail,
+    OnlineGalleryLink,
     OnlineGalleryPreview,
 )
 from app.repositories.user_library_repository import UserLibraryRepository
@@ -100,9 +101,101 @@ class ReadingProgressTests(unittest.TestCase):
                 "SELECT name FROM sqlite_master "
                 "WHERE type = 'table' AND name = 'gallery_original_states'"
             ).fetchone()
+            original_columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(gallery_original_states)"
+                )
+            }
+            online_comment_columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(online_gallery_comments)"
+                )
+            }
+            sync_comment_columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(gallery_sync_comments)"
+                )
+            }
         self.assertEqual(UserLibraryRepository.SCHEMA_VERSION, version)
         self.assertIn("download_mode", download_columns)
         self.assertEqual(("gallery_original_states",), original_table)
+        self.assertIn("fallback_to_standard", original_columns)
+        self.assertIn("page_modes_json", original_columns)
+        self.assertIn("gallery_links_json", online_comment_columns)
+        self.assertIn("gallery_links_json", sync_comment_columns)
+
+    def test_v17_original_fallback_migrates_to_per_page_base_modes(self):
+        with closing(sqlite3.connect(str(self.repository.database_path))) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE gallery_original_states (
+                    gid INTEGER PRIMARY KEY,
+                    site TEXT NOT NULL,
+                    token TEXT NOT NULL,
+                    dirname TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    completed_pages INTEGER NOT NULL DEFAULT 0,
+                    page_count INTEGER NOT NULL DEFAULT 0,
+                    fallback_to_standard INTEGER NOT NULL DEFAULT 0,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    error TEXT NOT NULL DEFAULT '',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                CREATE TABLE online_gallery_comments (
+                    gid INTEGER NOT NULL,
+                    comment_id TEXT NOT NULL,
+                    author TEXT NOT NULL DEFAULT '',
+                    posted TEXT NOT NULL DEFAULT '',
+                    body TEXT NOT NULL DEFAULT '',
+                    score INTEGER,
+                    is_uploader INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (gid, comment_id)
+                );
+                CREATE TABLE gallery_sync_comments (
+                    gid INTEGER NOT NULL,
+                    comment_id TEXT NOT NULL,
+                    author TEXT NOT NULL DEFAULT '',
+                    posted TEXT NOT NULL DEFAULT '',
+                    body TEXT NOT NULL DEFAULT '',
+                    score INTEGER,
+                    is_uploader INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (gid, comment_id)
+                );
+                INSERT INTO gallery_original_states(
+                    gid, site, token, dirname, mode, state, completed_pages,
+                    page_count, fallback_to_standard, metadata_json, error,
+                    created_at, updated_at
+                ) VALUES (
+                    456, 'exhentai', 'token', '456-gallery',
+                    'original_direct', 'active', 3, 3, 1, '{}', '', 1, 1
+                );
+                INSERT INTO online_gallery_comments(
+                    gid, comment_id, author, posted, body, score, is_uploader
+                ) VALUES (456, 'old', 'reader', 'today', 'legacy comment', 1, 0);
+                PRAGMA user_version = 17;
+                """
+            )
+
+        self.repository.initialize()
+
+        state = self.repository.gallery_original_state(456)
+        self.assertEqual(("base", "base", "base"), state.page_modes)
+        self.assertTrue(state.fallback_to_standard)
+        with closing(sqlite3.connect(str(self.repository.database_path))) as connection:
+            self.assertEqual(
+                UserLibraryRepository.SCHEMA_VERSION,
+                connection.execute("PRAGMA user_version").fetchone()[0],
+            )
+            legacy_comment = connection.execute(
+                "SELECT body, gallery_links_json "
+                "FROM online_gallery_comments WHERE gid = 456"
+            ).fetchone()
+        self.assertEqual(("legacy comment", "[]"), legacy_comment)
 
     def test_staged_original_preview_switches_reader_source_and_shows_progress(self):
         standard_pages = self._create_pages(2)
@@ -121,6 +214,7 @@ class ReadingProgressTests(unittest.TestCase):
             original_state=ORIGINAL_STATE_STAGED,
             original_page_paths=tuple(original_pages),
             original_completed_pages=2,
+            page_tokens=("page-one", "page-two"),
             download_complete=True,
         )
         detail = MangaDetailInterface(
@@ -153,6 +247,7 @@ class ReadingProgressTests(unittest.TestCase):
             state=ORIGINAL_STATE_STAGED,
             completed_pages=2,
             page_count=2,
+            page_modes=("original", "original"),
         )
         detail.setOriginalDownloadState(state)
         self.assertEqual(100, detail.originalDownloadProgressBar.value())
@@ -163,6 +258,27 @@ class ReadingProgressTests(unittest.TestCase):
         )
         self.assertEqual("已使用原图", detail.downloadButton.text())
         self.assertFalse(detail.downloadButton.isEnabled())
+        self.assertFalse(detail.fullOriginalBadge.isHidden())
+
+        mixed_state = replace(
+            state,
+            fallback_to_standard=True,
+            page_modes=("original", "base"),
+        )
+        detail.setOriginalDownloadState(mixed_state)
+        self.assertFalse(detail.originalReplaceButton.isHidden())
+        detail.setOriginalDownloadState(
+            replace(mixed_state, state=ORIGINAL_STATE_ACTIVE)
+        )
+        self.assertEqual("已是混合原图画廊", detail.originalDownloadButton.text())
+        self.assertEqual("已使用混合原图", detail.downloadButton.text())
+        self.assertFalse(detail.downloadButton.isEnabled())
+        self.assertFalse(detail.previewSourceSwitch.isHidden())
+        self.assertEqual("original", detail._preview_source)
+        self.assertEqual("1 ORIGINAL", detail.originalCountBadge.text())
+        self.assertEqual("1 BASE", detail.baseCountBadge.text())
+        self.assertFalse(detail.originalCountBadge.isHidden())
+        self.assertFalse(detail.baseCountBadge.isHidden())
         detail.cancelLoads()
         detail.close()
         detail.deleteLater()
@@ -265,6 +381,10 @@ class ReadingProgressTests(unittest.TestCase):
         self.assertNotIn("阅读进度：", detail.metadataLabel.text())
         self.assertTrue(detail.detailMetadataLabel.isHidden())
         self.assertIn("第 3 / 4 页", detail.detailMetadataLabel.text())
+        opened = []
+        detail.folderOpenRequested.connect(lambda value: opened.append(value.gid))
+        detail.openFolderButton.click()
+        self.assertEqual([item.gid], opened)
         detail.cancelLoads()
         detail.close()
         detail.deleteLater()
@@ -384,6 +504,8 @@ class ReadingProgressTests(unittest.TestCase):
     def test_shared_detail_page_switches_between_online_comments_and_local_preview(self):
         source = EhViewerDataSource(self.root / "unused.db", self.root)
         detail_widget = MangaDetailInterface(source, self.repository)
+        folder_requests = []
+        detail_widget.folderOpenRequested.connect(folder_requests.append)
         sprite = QImage(4, 2, QImage.Format_RGB32)
         sprite.fill(QColor("red"))
         for x in range(2, 4):
@@ -426,6 +548,12 @@ class ReadingProgressTests(unittest.TestCase):
             rating=4.0,
         )
         detail_widget.setOnlineLoading(gallery, provider, cache)
+        self.assertTrue(detail_widget.openFolderButton.isHidden())
+        local_item = SimpleNamespace(gid=gallery.gid, folder=self.root)
+        detail_widget.setFolderOpenTarget(local_item)
+        self.assertFalse(detail_widget.openFolderButton.isHidden())
+        detail_widget.openFolderButton.click()
+        self.assertEqual([gallery.gid], [item.gid for item in folder_requests])
         self.assertTrue(detail_widget.isOnlineGallery)
         self.assertFalse(detail_widget.operationCard.isHidden())
         self.assertFalse(detail_widget.previewCard.isHidden())
@@ -442,7 +570,14 @@ class ReadingProgressTests(unittest.TestCase):
             tags=("artist:someone", "language:chinese"),
             comments=(
                 OnlineGalleryComment(
-                    "12", "reader", "15 August 2026", "copyable comment", 2
+                    "12",
+                    "reader",
+                    "15 August 2026",
+                    "copyable comment",
+                    2,
+                    gallery_links=(
+                        OnlineGalleryLink(789, "deadbeef01", "Sequel"),
+                    ),
                 ),
             ),
             previews=previews,
@@ -457,6 +592,10 @@ class ReadingProgressTests(unittest.TestCase):
         detail_widget.onlineDownloadCancelRequested.connect(
             download_cancelled.append
         )
+        gallery_links_requested = []
+        detail_widget.onlineGalleryLinkRequested.connect(
+            gallery_links_requested.append
+        )
         detail_widget.setOnlineDetail(online_detail, provider=provider, cache=cache)
         detail_widget.waitForOnlineLoads(3000)
         QApplication.processEvents()
@@ -466,6 +605,17 @@ class ReadingProgressTests(unittest.TestCase):
         self.assertEqual(
             selectable,
             comment_bodies[0].textInteractionFlags() & selectable,
+        )
+        gallery_link_button = detail_widget.findChild(
+            QWidget,
+            "onlineCommentGalleryLink",
+        )
+        self.assertIsNotNone(gallery_link_button)
+        self.assertIn("Sequel", gallery_link_button.text())
+        QTest.mouseClick(gallery_link_button, Qt.LeftButton)
+        self.assertEqual(
+            [(789, "deadbeef01")],
+            [(link.gid, link.token) for link in gallery_links_requested],
         )
         self.assertIn("语言：Chinese", detail_widget.metadataLabel.text())
         self.assertNotIn("页数：", detail_widget.metadataLabel.text())

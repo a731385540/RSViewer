@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from qfluentwidgets import (
     ColorSettingCard,
     ComboBox,
@@ -17,7 +19,7 @@ from qfluentwidgets import (
 )
 from qfluentwidgets import FluentIcon as FIF
 from qfluentwidgets import InfoBar
-from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtCore import QEvent, QStandardPaths, Qt, Signal
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import QFileDialog, QLabel, QWidget
 
@@ -63,6 +65,42 @@ class DataPathSettingCard(SettingCard):
 
     def _updateContent(self, path: str):
         self.setContent(path or self.tr("尚未配置"))
+
+
+class DatabaseExportSettingCard(SettingCard):
+    exportRequested = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(
+            FIF.SAVE,
+            self.tr("导出 EhViewer 数据库"),
+            self.tr("从 RSViewer 自有数据生成可供 EhViewer 使用的新 eh.db"),
+            parent,
+        )
+        self.exportButton = PushButton(self.tr("导出…"), self)
+        self.exportButton.clicked.connect(self._chooseDestination)
+        self.hBoxLayout.addWidget(self.exportButton)
+        self.hBoxLayout.addSpacing(16)
+
+    def _chooseDestination(self):
+        documents = QStandardPaths.writableLocation(
+            QStandardPaths.DocumentsLocation
+        )
+        default_path = str(Path(documents or ".") / "eh.db")
+        path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            self.tr("导出 EhViewer 数据库"),
+            default_path,
+            self.tr("EhViewer 数据库 (eh.db);;SQLite 数据库 (*.db);;所有文件 (*)"),
+        )
+        if path:
+            self.exportRequested.emit(path)
+
+    def setExporting(self, exporting):
+        self.exportButton.setEnabled(not exporting)
+        self.exportButton.setText(
+            self.tr("正在导出…") if exporting else self.tr("导出…")
+        )
 
 
 class TextConfigSettingCard(SettingCard):
@@ -254,6 +292,7 @@ class SettingInterface(ScrollArea):
     """ Setting interface """
 
     dataSourceChanged = Signal()
+    ehViewerExportRequested = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent=parent)
@@ -290,13 +329,8 @@ class SettingInterface(ScrollArea):
             self.tr("更改应用的强调色"),
             self.personalGroup
         )
-        self.ehViewerDatabaseCard = DataPathSettingCard(
-            cfg.ehViewerDatabase,
-            FIF.DOCUMENT,
-            self.tr("EhViewer 数据库"),
-            self.tr("只读加载外部 eh.db，不会修改原数据库"),
-            True,
-            self.dataSourceGroup,
+        self.ehViewerDatabaseCard = DatabaseExportSettingCard(
+            self.dataSourceGroup
         )
         self.ehViewerMangaRootCard = DataPathSettingCard(
             cfg.ehViewerMangaRoot,
@@ -324,7 +358,7 @@ class SettingInterface(ScrollArea):
             cfg.onlineEhCookie,
             FIF.FINGERPRINT,
             self.tr("EH Token / Cookie"),
-            self.tr("建议粘贴完整 Cookie；内容仅保存在本机配置，不会写入外部 eh.db"),
+            self.tr("建议粘贴完整 Cookie；内容仅保存在本机配置，不会写入导出的 eh.db"),
             self.onlineGroup,
             password=True,
             placeholder="ipb_member_id=...; ipb_pass_hash=...; igneous=...",
@@ -363,7 +397,7 @@ class SettingInterface(ScrollArea):
             FIF.VIEW,
             self.tr("默认展示视图"),
             self.tr("在线资源页切换视图时会同时更新此默认设置"),
-            texts=[self.tr("卡片"), "Extended"],
+            texts=[self.tr("卡片"), self.tr("精简列表"), "Extended"],
             parent=self.onlineGroup,
         )
         self.onlineThumbnailConcurrencyCard = OptionsSettingCard(
@@ -586,7 +620,9 @@ class SettingInterface(ScrollArea):
 
         cfg.themeChanged.connect(setTheme)
         self.themeColorCard.colorChanged.connect(lambda c: setThemeColor(c))
-        self.ehViewerDatabaseCard.pathChanged.connect(self.dataSourceChanged)
+        self.ehViewerDatabaseCard.exportRequested.connect(
+            self.ehViewerExportRequested
+        )
         self.ehViewerMangaRootCard.pathChanged.connect(self.dataSourceChanged)
         cfg.onlineEhProxyMode.valueChanged.connect(self._updateManualProxyEnabled)
 

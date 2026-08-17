@@ -79,6 +79,7 @@ from app.workers.similar_manga_worker import SimilarMangaWorker
 
 
 ORIGINAL_PENDING_BORDER_COLOR = "#B8860B"
+ORIGINAL_FALLBACK_BADGE_COLOR = "#A855F7"
 
 
 class FluentSplitterHandle(QSplitterHandle):
@@ -193,13 +194,38 @@ class CoverLabel(QWidget):
             self._pixmap = QPixmap()
         else:
             self._pixmap = QPixmap(str(image_path))
+        self._display_pixmap = QPixmap()
         self._loading = defer_load and image is None
         self.setMinimumSize(72, 96)
+        self._rebuildDisplayPixmap()
 
     def setImage(self, image):
         self._loading = False
         self._pixmap = QPixmap.fromImage(image) if not image.isNull() else QPixmap()
+        self._rebuildDisplayPixmap()
         self.update()
+
+    def resizeEvent(self, event):
+        self._rebuildDisplayPixmap()
+        super().resizeEvent(event)
+
+    def _rebuildDisplayPixmap(self):
+        if self._pixmap.isNull() or self.width() <= 0 or self.height() <= 0:
+            self._display_pixmap = QPixmap()
+            return
+        scaled = self._pixmap.scaled(
+            self.size(),
+            Qt.KeepAspectRatioByExpanding,
+            Qt.SmoothTransformation,
+        )
+        source_x = max(0, (scaled.width() - self.width()) // 2)
+        source_y = max(0, (scaled.height() - self.height()) // 2)
+        self._display_pixmap = scaled.copy(
+            source_x,
+            source_y,
+            self.width(),
+            self.height(),
+        )
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -210,7 +236,7 @@ class CoverLabel(QWidget):
         path.addRoundedRect(self.rect(), 8, 8)
         painter.setClipPath(path)
 
-        if self._pixmap.isNull():
+        if self._display_pixmap.isNull():
             placeholder = self.palette().color(QPalette.AlternateBase)
             painter.fillRect(self.rect(), placeholder)
             painter.setPen(self.palette().color(QPalette.PlaceholderText))
@@ -218,14 +244,7 @@ class CoverLabel(QWidget):
             painter.drawText(self.rect(), Qt.AlignCenter, text)
             return
 
-        scaled = self._pixmap.scaled(
-            self.size(),
-            Qt.KeepAspectRatioByExpanding,
-            Qt.SmoothTransformation,
-        )
-        source_x = max(0, (scaled.width() - self.width()) // 2)
-        source_y = max(0, (scaled.height() - self.height()) // 2)
-        painter.drawPixmap(0, 0, scaled, source_x, source_y, self.width(), self.height())
+        painter.drawPixmap(0, 0, self._display_pixmap)
 
 
 def visible_tags(item: MangaItem) -> str:
@@ -275,6 +294,36 @@ def paint_manga_download_state(card):
         painter.drawEllipse(card.width() - 22, 10, 11, 11)
 
 
+
+class OriginalFallbackBadge(QWidget):
+    """Paint above card children so the source limitation marker stays visible."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(15, 15)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor("#F3E8FF"), 1.5))
+        painter.setBrush(QColor(ORIGINAL_FALLBACK_BADGE_COLOR))
+        painter.drawEllipse(self.rect().adjusted(1, 1, -1, -1))
+
+
+def update_original_fallback_badge(card):
+    visible = bool(card.item.original_fallback_to_standard)
+    card.originalFallbackBadge.setVisible(visible)
+    if not visible:
+        return
+    left = 40 if card.selectionMode else 10
+    card.originalFallbackBadge.move(left, 10)
+    card.originalFallbackBadge.setToolTip(
+        card.tr("部分页面没有原图；这些页面已使用基础图")
+    )
+    card.originalFallbackBadge.raise_()
+
+
 class MangaGridCard(CardWidget):
     """大封面漫画卡片。"""
 
@@ -302,6 +351,7 @@ class MangaGridCard(CardWidget):
         self.selectionCheckBox.clicked.connect(self._handleSelectionClick)
         self.selectionCheckBox.move(14, 14)
         self.selectionCheckBox.raise_()
+        self._updateDownloadStateToolTip()
         self.coverLabel = CoverLabel(
             item.cover_image_path,
             image=cover_image,
@@ -327,11 +377,27 @@ class MangaGridCard(CardWidget):
         self.layout.addWidget(self.englishTitleLabel)
         self.layout.addWidget(self.metaLabel)
         self.selectionCheckBox.raise_()
+        self.originalFallbackBadge = OriginalFallbackBadge(self)
+        self._updateDownloadStateBadge()
 
     def setItem(self, item: MangaItem):
         self.item = item
+        self.titleLabel.setText(item.display_title)
+        self.englishTitleLabel.setText(item.secondary_title)
         self.metaLabel.setText(manga_metadata_text(item, self.tr))
+        self._updateDownloadStateToolTip()
+        self._updateDownloadStateBadge()
         self.update()
+
+    def _updateDownloadStateToolTip(self):
+        self.setToolTip(
+            self.tr("部分页面没有原图；这些页面已使用基础图")
+            if self.item.original_fallback_to_standard
+            else ""
+        )
+
+    def _updateDownloadStateBadge(self):
+        update_original_fallback_badge(self)
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -344,6 +410,8 @@ class MangaGridCard(CardWidget):
         self.selectionCheckBox.blockSignals(False)
         self.selectionCheckBox.setVisible(self.selectionMode)
         self.selectionCheckBox.raise_()
+        self._updateDownloadStateToolTip()
+        self._updateDownloadStateBadge()
 
     def _handleCardClick(self):
         if self.selectionMode and self.selectionCallback is not None:
@@ -406,6 +474,7 @@ class MangaListCard(CardWidget):
         self.selectionCheckBox.clicked.connect(self._handleSelectionClick)
         self.selectionCheckBox.move(14, 14)
         self.selectionCheckBox.raise_()
+        self._updateDownloadStateToolTip()
         self.setFixedHeight(116)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
@@ -443,11 +512,28 @@ class MangaListCard(CardWidget):
         self.layout.addWidget(self.coverLabel)
         self.layout.addLayout(text_layout, 1)
         self.selectionCheckBox.raise_()
+        self.originalFallbackBadge = OriginalFallbackBadge(self)
+        self._updateDownloadStateBadge()
 
     def setItem(self, item: MangaItem):
         self.item = item
+        self.titleLabel.setText(item.display_title)
+        self.englishTitleLabel.setText(item.secondary_title)
         self.metaLabel.setText(manga_metadata_text(item, self.tr))
+        self.tagsLabel.setText(visible_tags(item))
+        self._updateDownloadStateToolTip()
+        self._updateDownloadStateBadge()
         self.update()
+
+    def _updateDownloadStateToolTip(self):
+        self.setToolTip(
+            self.tr("部分页面没有原图；这些页面已使用基础图")
+            if self.item.original_fallback_to_standard
+            else ""
+        )
+
+    def _updateDownloadStateBadge(self):
+        update_original_fallback_badge(self)
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -460,6 +546,7 @@ class MangaListCard(CardWidget):
         self.selectionCheckBox.blockSignals(False)
         self.selectionCheckBox.setVisible(self.selectionMode)
         self.selectionCheckBox.raise_()
+        self._updateDownloadStateBadge()
 
     def _handleCardClick(self):
         if self.selectionMode and self.selectionCallback is not None:
@@ -577,51 +664,7 @@ class MangaLoadWorker(QRunnable):
     def run(self):
         try:
             items = self.source.list_local_manga()
-            assignments = self.user_repository.labels_for_manga(
-                [item.gid for item in items]
-            )
-            taxonomy_assignments = self.user_repository.taxonomy_for_mangas(
-                [item.gid for item in items]
-            )
-            progress = self.user_repository.progress_for_mangas(
-                [item.gid for item in items]
-            )
-            online_downloads = self.user_repository.online_gallery_downloads_for_mangas(
-                [item.gid for item in items]
-            )
-            original_states = self.user_repository.gallery_original_states_for_mangas(
-                [item.gid for item in items]
-            )
-            sync_records = self.user_repository.gallery_sync_records_for_mangas(
-                [item.gid for item in items]
-            )
-            favorite_gids = set(
-                self.user_repository.favorite_gids([item.gid for item in items])
-            )
-            items = [
-                self._mergeUserState(
-                    item,
-                    online_downloads.get(item.gid),
-                    original_states.get(item.gid),
-                    sync_records.get(item.gid),
-                    multiple_labels=assignments.get(item.gid, ()),
-                    progress_page_index=progress.get(item.gid),
-                    is_favorite=item.gid in favorite_gids,
-                    taxonomy_label_ids=tuple(
-                        label_id
-                        for label_id, _name in taxonomy_assignments.get(
-                            item.gid, ()
-                        )
-                    ),
-                    taxonomy_labels=tuple(
-                        name
-                        for _label_id, name in taxonomy_assignments.get(
-                            item.gid, ()
-                        )
-                    ),
-                )
-                for item in items
-            ]
+            items = self.enrichItems(self.user_repository, items)
             if not self.cancelled:
                 try:
                     self.signals.loaded.emit(
@@ -640,6 +683,45 @@ class MangaLoadWorker(QRunnable):
                     self.signals.failed.emit(str(error))
                 except RuntimeError:
                     pass
+
+    @classmethod
+    def enrichItems(cls, user_repository, items):
+        items = list(items)
+        gids = [item.gid for item in items]
+        assignments = user_repository.labels_for_manga(gids)
+        taxonomy_assignments = user_repository.taxonomy_for_mangas(gids)
+        progress = user_repository.progress_for_mangas(gids)
+        online_downloads = user_repository.online_gallery_downloads_for_mangas(gids)
+        original_states = user_repository.gallery_original_states_for_mangas(gids)
+        sync_records = user_repository.gallery_sync_records_for_mangas(gids)
+        favorite_gids = set(user_repository.favorite_gids(gids))
+        return [
+            cls._mergeUserState(
+                item,
+                online_downloads.get(item.gid),
+                original_states.get(item.gid),
+                sync_records.get(item.gid),
+                multiple_labels=assignments.get(item.gid, ()),
+                progress_page_index=progress.get(item.gid),
+                is_favorite=item.gid in favorite_gids,
+                taxonomy_label_ids=tuple(
+                    label_id
+                    for label_id, _name in taxonomy_assignments.get(item.gid, ())
+                ),
+                taxonomy_labels=tuple(
+                    name
+                    for _label_id, name in taxonomy_assignments.get(item.gid, ())
+                ),
+            )
+            for item in items
+        ]
+
+    @classmethod
+    def loadItem(cls, source, user_repository, gid, folder=None):
+        item = source.load_local_manga(gid, folder)
+        if item is None:
+            return None
+        return cls.enrichItems(user_repository, (item,))[0]
 
     @staticmethod
     def _onlineMetadata(item, record, sync_record=None):
@@ -672,7 +754,7 @@ class MangaLoadWorker(QRunnable):
         rating = metadata.get("rating")
         if rating is not None:
             values["rating"] = float(rating)
-        if record is not None and record.state == "completed":
+        if record is not None and int(record.page_count) > 0:
             values["page_count"] = max(0, int(record.page_count))
         return values
 
@@ -692,6 +774,13 @@ class MangaLoadWorker(QRunnable):
                 "original_state": original_state.state if original_state else "",
                 "original_completed_pages": (
                     original_state.completed_pages if original_state else 0
+                ),
+                "original_fallback_to_standard": bool(
+                    original_state is not None
+                    and original_state.fallback_to_standard
+                ),
+                "original_page_modes": (
+                    original_state.page_modes if original_state is not None else ()
                 ),
                 "standard_download_pending": bool(
                     download_record is not None
@@ -1020,6 +1109,7 @@ class LocalMangaInterface(QWidget):
     favoriteChanged = Signal(object, bool)
     metadataSyncRequested = Signal(object)
     trashRequested = Signal(object)
+    folderOpenRequested = Signal(object)
 
     def __init__(
         self,
@@ -1041,6 +1131,7 @@ class LocalMangaInterface(QWidget):
         self.searchHistoryService = search_history_service
         self._all_items: List[MangaItem] = []
         self._filtered_items: List[MangaItem] = []
+        self._pending_item_upserts: Dict[int, MangaItem] = {}
         self._cards: List[QWidget] = []
         self._empty_label: Optional[BodyLabel] = None
         self._layout_mode = self.GRID_MODE
@@ -1073,6 +1164,7 @@ class LocalMangaInterface(QWidget):
         self._similar_reference_title = ""
         self._search_hover_widgets = set()
         self._search_opened_by_hover = False
+        self._search_pinned = False
 
         title = {
             "favorites": self.tr("收藏"),
@@ -1396,6 +1488,7 @@ class LocalMangaInterface(QWidget):
     def setSource(self, source: EhViewerDataSource):
         self.source = source
         if not self._collection_kind:
+            self._pending_item_upserts.clear()
             self._cover_cache.clear()
             self.reload()
 
@@ -1412,6 +1505,95 @@ class LocalMangaInterface(QWidget):
 
     def allItems(self):
         return tuple(self._all_items)
+
+    def upsertItem(self, item: MangaItem) -> bool:
+        """Update one card in place, rebuilding only when it is newly visible."""
+
+        gid = int(item.gid)
+        if self._collection_kind and gid not in self._collection_order:
+            return False
+        if self._load_worker is not None:
+            self._pending_item_upserts[gid] = item
+        existing_index = next(
+            (
+                index
+                for index, current in enumerate(self._all_items)
+                if int(current.gid) == gid
+            ),
+            None,
+        )
+        if existing_index is None:
+            self._all_items.append(item)
+            if not self._itemMatchesCurrentFilters(item):
+                if self._collection_kind:
+                    self.resultLabel.setText(
+                        self.tr("显示 {} 部漫画").format(
+                            len(self._filtered_items)
+                        )
+                    )
+                else:
+                    self.resultLabel.setText(
+                        self.tr("显示 {} / {} 部漫画").format(
+                            len(self._filtered_items),
+                            len(self._all_items),
+                        )
+                    )
+                self._updatePagination()
+                return True
+            scroll_position = self.scrollArea.verticalScrollBar().value()
+            self.applyFilters(reset_page=False)
+            QTimer.singleShot(
+                0,
+                lambda value=scroll_position: (
+                    self.scrollArea.verticalScrollBar().setValue(value)
+                ),
+            )
+            return True
+
+        previous = self._all_items[existing_index]
+        self._all_items[existing_index] = item
+        filter_identity = lambda value: (
+            value.english_title,
+            value.original_title,
+            value.tags,
+            value.primary_label,
+            value.multiple_labels,
+            value.taxonomy_label_ids,
+            value.added_time,
+        )
+        if filter_identity(previous) != filter_identity(item):
+            self.applyFilters(reset_page=False)
+            return True
+
+        for index, current in enumerate(self._filtered_items):
+            if int(current.gid) == gid:
+                self._filtered_items[index] = item
+                break
+        for card in self._cards:
+            if int(card.item.gid) == gid:
+                card.setItem(item)
+                break
+        return True
+
+    def _itemMatchesCurrentFilters(self, item: MangaItem) -> bool:
+        if self._similar_result_gids is not None:
+            return item.gid in self._similar_result_gids
+        query = self.searchEdit.text().strip()
+        query_terms = (
+            self.tagSearchIndex.local_query_terms(query)
+            if self.tagSearchIndex is not None
+            else tuple(word.casefold() for word in query.split() if word)
+        )
+        if not item.matches_terms(query_terms):
+            return False
+        if self._collection_kind:
+            return True
+        taxonomy_label_ids = (
+            self._activeTaxonomyLabelIds()
+            if self._tag_mode == self.TAG_TAXONOMY and not self._show_all_manga
+            else set()
+        )
+        return self._matchesActiveTag(item, taxonomy_label_ids)
 
     def tagMetadata(self):
         return (
@@ -1471,6 +1653,16 @@ class LocalMangaInterface(QWidget):
             taxonomy_labels = []
         else:
             self._all_items, primary_labels, playlists, taxonomy_labels = payload
+        if self._pending_item_upserts:
+            pending = dict(self._pending_item_upserts)
+            self._pending_item_upserts.clear()
+            loaded_gids = {int(item.gid) for item in self._all_items}
+            self._all_items = [
+                pending.get(int(item.gid), item) for item in self._all_items
+            ]
+            self._all_items.extend(
+                item for gid, item in pending.items() if gid not in loaded_gids
+            )
         tag_mode = self._tag_mode
         show_all_manga = self._show_all_manga
         valid_gids = {item.gid for item in self._all_items}
@@ -1911,6 +2103,13 @@ class LocalMangaInterface(QWidget):
             lambda: self._setMangaFavorite(target_gids, favorite)
         )
         menu.addAction(favorite_action)
+        open_folder_action = QAction(
+            FIF.FOLDER.icon(), self.tr("在资源管理器中打开"), menu
+        )
+        open_folder_action.triggered.connect(
+            lambda _checked=False, current=item: self.folderOpenRequested.emit(current)
+        )
+        menu.addAction(open_folder_action)
         if self._collection_kind is None:
             sync_action = QAction(self.tr("同步在线信息"), menu)
             sync_action.triggered.connect(
@@ -2198,6 +2397,7 @@ class LocalMangaInterface(QWidget):
         self._scheduleSearch()
         if (
             cfg.get(cfg.mangaSearchHoverEnabled)
+            and not self._search_pinned
             and not self.searchEdit.text().strip()
             and not self._isPointerInSearchArea()
         ):
@@ -2282,8 +2482,17 @@ class LocalMangaInterface(QWidget):
         self.applyFilters(reset_page=True)
 
     def toggleSearch(self):
-        if self.searchPanel.isVisible():
-            self._hideSearchPanel()
+        if self._search_pinned:
+            self._search_pinned = False
+            if cfg.get(cfg.mangaSearchHoverEnabled):
+                self._search_opened_by_hover = True
+                if (
+                    not self._isPointerInSearchArea()
+                    and not self.searchEdit.text().strip()
+                ):
+                    self.searchHoverTimer.start()
+            else:
+                self._hideSearchPanel()
         else:
             self.openSearch()
 
@@ -2297,7 +2506,10 @@ class LocalMangaInterface(QWidget):
                 ):
                     self._showSearchPanel(focus=False, opened_by_hover=True)
             elif event.type() in (QEvent.Leave, QEvent.HoverLeave):
-                if cfg.get(cfg.mangaSearchHoverEnabled):
+                if (
+                    cfg.get(cfg.mangaSearchHoverEnabled)
+                    and not self._search_pinned
+                ):
                     self.searchHoverTimer.start()
         return super().eventFilter(watched, event)
 
@@ -2310,6 +2522,7 @@ class LocalMangaInterface(QWidget):
     def _finishSearchHover(self):
         if (
             not cfg.get(cfg.mangaSearchHoverEnabled)
+            or self._search_pinned
             or self._isPointerInSearchArea()
             or self.searchEdit.text().strip()
         ):
@@ -2320,7 +2533,11 @@ class LocalMangaInterface(QWidget):
         if enabled:
             return
         self.searchHoverTimer.stop()
-        if self._search_opened_by_hover and not self.searchEdit.text().strip():
+        if (
+            not self._search_pinned
+            and self._search_opened_by_hover
+            and not self.searchEdit.text().strip()
+        ):
             self._hideSearchPanel()
 
     def toggleClassification(self):
@@ -2362,6 +2579,7 @@ class LocalMangaInterface(QWidget):
         self.searchPanel.show()
         self.searchButton.setIcon(FIF.UP)
         self._search_opened_by_hover = bool(opened_by_hover)
+        self._search_pinned = not opened_by_hover
         if focus:
             self.searchEdit.setFocus(Qt.ShortcutFocusReason)
             self.searchEdit.selectAll()
@@ -2371,6 +2589,7 @@ class LocalMangaInterface(QWidget):
         self.searchPanel.hide()
         self.searchButton.setIcon(FIF.SEARCH)
         self._search_opened_by_hover = False
+        self._search_pinned = False
 
     def applyFilters(self, reset_page=False):
         query = self.searchEdit.text().strip()

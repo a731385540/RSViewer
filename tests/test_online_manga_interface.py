@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QCoreApplication, QEvent, QPoint, Qt
+from PySide6.QtCore import QCoreApplication, QDate, QEvent, QPoint, Qt
 from PySide6.QtGui import QContextMenuEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -17,6 +17,7 @@ from app.domain.online_gallery import OnlineGallery, OnlineGalleryPage
 from app.view.online_manga_interface import (
     OnlineGalleryCard,
     OnlineGalleryExtendedCard,
+    OnlineGalleryListCard,
     OnlineMangaInterface,
 )
 from app.view.setting_interface import SettingInterface
@@ -222,7 +223,7 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
             interface.close()
             interface.deleteLater()
 
-    def test_downloaded_badge_uses_local_gids_in_both_view_modes(self):
+    def test_downloaded_badge_uses_local_gids_in_all_view_modes(self):
         interface = OnlineMangaInterface(
             provider_factory=_FakeOnlineProvider,
             auto_load_on_show=False,
@@ -261,6 +262,12 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
                 for x in range(icon.width())
             )
         )
+
+        cfg.set(cfg.onlineEhViewMode, "list")
+        interface._setItems(items)
+        self.assertIsInstance(interface._cards[0], OnlineGalleryListCard)
+        self.assertFalse(interface._cards[0].downloadedBadge.isHidden())
+        self.assertTrue(interface._cards[1].downloadedBadge.isHidden())
 
         cfg.set(cfg.onlineEhViewMode, "extended")
         interface._setItems(items)
@@ -412,7 +419,7 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
         interface.show()
         QApplication.processEvents()
 
-        for view_mode in ("card", "extended"):
+        for view_mode in ("card", "list", "extended"):
             with self.subTest(view_mode=view_mode):
                 cfg.set(cfg.onlineEhViewMode, view_mode)
                 interface._setItems((item,))
@@ -433,7 +440,92 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
                 ):
                     QApplication.sendEvent(card, event)
 
-        self.assertEqual([(item, provider, b""), (item, provider, b"")], requested)
+        self.assertEqual(
+            [(item, provider, b""), (item, provider, b""), (item, provider, b"")],
+            requested,
+        )
+        interface.deleteLater()
+
+    def test_gallery_url_panel_validates_and_opens_with_current_site(self):
+        interface = OnlineMangaInterface(
+            provider_factory=_FakeOnlineProvider,
+            auto_load_on_show=False,
+        )
+        activated = []
+        interface.galleryActivated.connect(
+            lambda item, provider, data: activated.append((item, provider, data))
+        )
+
+        self.assertTrue(interface.galleryUrlPanel.isHidden())
+        interface.galleryUrlToggleButton.click()
+        self.assertFalse(interface.galleryUrlPanel.isHidden())
+
+        interface.galleryUrlEdit.setText(
+            "https://e-hentai.org/s/pagetoken/123-1"
+        )
+        with patch("app.view.online_manga_interface.InfoBar.error") as error_bar:
+            interface.galleryUrlOpenButton.click()
+        error_bar.assert_called_once()
+        self.assertEqual([], activated)
+        self.assertIn("地址无效", interface.resultLabel.text())
+
+        interface.galleryUrlEdit.setText(
+            "https://exhentai.org/g/987/deadbeef01/"
+        )
+        interface.galleryUrlOpenButton.click()
+
+        self.assertEqual(1, len(activated))
+        gallery, provider, cover_data = activated[0]
+        self.assertEqual((987, "deadbeef01"), (gallery.gid, gallery.token))
+        self.assertEqual(
+            "https://e-hentai.org/g/987/deadbeef01/",
+            gallery.url,
+        )
+        self.assertEqual("ehentai", provider.settings.site)
+        self.assertEqual(b"", cover_data)
+        interface.deleteLater()
+
+    def test_downloaded_card_context_menu_opens_only_its_local_folder(self):
+        interface = OnlineMangaInterface(
+            provider_factory=_FakeOnlineProvider,
+            auto_load_on_show=False,
+        )
+        provider = interface._makeProvider("ehentai")
+        item = provider.search(
+            type("Query", (), {"keyword": "", "cursor": ""})()
+        ).items[0]
+        opened = []
+        interface.localFolderOpenRequested.connect(opened.append)
+        interface.setDownloadedGids((item.gid,))
+        interface._setItems((item,))
+        card = interface._cards[0]
+        event = QContextMenuEvent(
+            QContextMenuEvent.Mouse,
+            QPoint(10, 10),
+            card.mapToGlobal(QPoint(10, 10)),
+        )
+
+        with patch(
+            "app.view.online_manga_interface.RoundMenu.exec",
+            lambda menu, _position: next(
+                action
+                for action in menu.actions()
+                if action.text() == "在资源管理器中打开"
+            ).trigger(),
+        ):
+            QApplication.sendEvent(card, event)
+
+        self.assertEqual([item.gid], opened)
+        interface.setDownloadedGids(())
+        menu_actions = []
+        with patch(
+            "app.view.online_manga_interface.RoundMenu.exec",
+            lambda menu, _position: menu_actions.extend(
+                action.text() for action in menu.actions()
+            ),
+        ):
+            QApplication.sendEvent(card, event)
+        self.assertNotIn("在资源管理器中打开", menu_actions)
         interface.deleteLater()
 
     def test_cover_pool_concurrency_updates_immediately(self):
@@ -457,8 +549,19 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
         request_count = len(_FakeOnlineProvider.queries)
         card_icon = interface.viewModeButton.icon().pixmap(16, 16).toImage()
         self.assertEqual(
-            "extended", interface.viewModeButton.property("targetViewMode")
+            "list", interface.viewModeButton.property("targetViewMode")
         )
+
+        interface.viewModeButton.click()
+        self.app.processEvents()
+
+        self.assertEqual("list", cfg.get(cfg.onlineEhViewMode))
+        self.assertEqual("extended", interface.viewModeButton.property("targetViewMode"))
+        self.assertIsInstance(interface._cards[0], OnlineGalleryListCard)
+        self.assertEqual(116, interface._cards[0].height())
+        self.assertEqual("tester", interface._cards[0].uploaderLabel.text())
+        self.assertEqual(request_count, len(_FakeOnlineProvider.queries))
+        self.assertEqual([], _FakeOnlineProvider.display_modes)
 
         interface.viewModeButton.click()
         self.assertTrue(self._wait_until(lambda: interface._search_worker is None))
@@ -477,7 +580,7 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
         cfg.set(cfg.onlineEhViewMode, "card")
         self.assertTrue(self._wait_until(lambda: interface._search_worker is None))
         self.assertEqual(
-            "extended", interface.viewModeButton.property("targetViewMode")
+            "list", interface.viewModeButton.property("targetViewMode")
         )
         self.assertEqual(
             card_icon,
@@ -522,6 +625,14 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
         )
 
         interface.viewModeButton.click()
+        self.app.processEvents()
+
+        self.assertIsInstance(interface._cards[0], OnlineGalleryListCard)
+        self.assertFalse(hasattr(interface._cards[0], "coverLabel"))
+        self.assertEqual(1, cache.get_calls)
+        self.assertEqual(1, _CoverOnlineProvider.cover_calls)
+
+        interface.viewModeButton.click()
         self.assertTrue(self._wait_until(lambda: interface._search_worker is None))
 
         self.assertIsInstance(interface._cards[0], OnlineGalleryExtendedCard)
@@ -551,6 +662,24 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
         interface.cancelLoad()
         interface.searchThreadPool.waitForDone(1000)
         interface.close()
+        interface.deleteLater()
+
+    def test_date_search_preserves_keyword_and_passes_seek_date(self):
+        interface = OnlineMangaInterface(
+            provider_factory=_FakeOnlineProvider,
+            auto_load_on_show=False,
+        )
+        interface.searchEdit.setText("artist:tester")
+        interface.timeSearchPicker.setDate(QDate(2026, 8, 1))
+
+        interface.seekDate()
+
+        self.assertTrue(self._wait_until(lambda: interface._search_worker is None))
+        _site, query = _FakeOnlineProvider.queries[-1]
+        self.assertEqual("artist:tester", query.keyword)
+        self.assertEqual("2026-08-01", query.seek_date)
+        self.assertEqual("2026-08-01", interface.currentState.seek_date)
+        self.assertIn("定位 2026-08-01", interface.resultLabel.text())
         interface.deleteLater()
 
     def test_extended_view_explains_missing_minimal_labels(self):

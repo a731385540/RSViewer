@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import List, Optional, Tuple
 
-from PySide6.QtCore import QThreadPool, QTimer, Qt, Signal
+from PySide6.QtCore import QDate, QThreadPool, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QGridLayout,
@@ -15,9 +15,13 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import (
     BodyLabel,
+    CalendarPicker,
     CaptionLabel,
     CardWidget,
     FlowLayout,
+    InfoBar,
+    InfoBarPosition,
+    LineEdit,
     PushButton,
     RoundMenu,
     ScrollArea,
@@ -29,24 +33,27 @@ from qfluentwidgets import FluentIcon as FIF
 
 from app.common.config import cfg
 from app.common.style_sheet import StyleSheet
-from app.domain.online_gallery import OnlineGalleryPage, OnlineGalleryQuery
+from app.domain.online_gallery import OnlineGallery, OnlineGalleryPage, OnlineGalleryQuery
 from app.services.online_thumbnail_cache import OnlineThumbnailCache
 from app.sources.eh_online_source import (
     EhOnlineError,
     EhOnlineSettings,
+    build_eh_gallery_url,
     create_eh_online_provider,
+    parse_eh_gallery_url,
 )
 from app.view.eh_tag_search_line_edit import EhTagSearchLineEdit
 from app.workers.eh_online_worker import OnlineCoverWorker, OnlineSearchWorker
 
 
-PageCacheKey = Tuple[str, str, str]
+PageCacheKey = Tuple[str, str, str, str]
 MAX_MEMORY_PAGES_PER_SITE = 64
 
 
 @dataclass
 class OnlinePageRequest:
     keyword: str = ""
+    seek_date: str = ""
     cursor: str = ""
     page_number: int = 1
     cursor_history: Tuple[str, ...] = ()
@@ -59,6 +66,7 @@ class OnlineSiteState:
 
     search_text: str = ""
     keyword: str = ""
+    seek_date: str = ""
     current_cursor: str = ""
     page_number: int = 1
     cursor_history: List[str] = field(default_factory=list)
@@ -209,10 +217,13 @@ class _OnlineGalleryCardBase(CardWidget):
         parent=None,
         open_callback=None,
         download_callback=None,
+        open_folder_callback=None,
     ):
         super().__init__(parent)
         self.item = item
         self.downloadCallback = download_callback
+        self.openFolderCallback = open_folder_callback
+        self.isDownloaded = False
         self.setCursor(Qt.PointingHandCursor)
         if open_callback is not None:
             self.clicked.connect(lambda: open_callback(item))
@@ -221,7 +232,7 @@ class _OnlineGalleryCardBase(CardWidget):
         self.downloadedBadge.setFixedSize(28, 28)
         self.downloadedBadge.setAlignment(Qt.AlignCenter)
         self.downloadedBadge.setAttribute(Qt.WA_TransparentForMouseEvents)
-        self.downloadedBadge.setToolTip(self.tr("已下载到本地资源"))
+        self.downloadedBadge.setToolTip(self.tr("已加入下载或已在本地资源中"))
         self.downloadedBadge.setPixmap(
             FIF.DOWNLOAD.icon(color=QColor("#2dbb68")).pixmap(16, 16)
         )
@@ -229,12 +240,15 @@ class _OnlineGalleryCardBase(CardWidget):
         self.downloadedBadge.hide()
 
     def setDownloaded(self, downloaded):
+        self.isDownloaded = bool(downloaded)
         self.downloadedBadge.setVisible(bool(downloaded))
         if downloaded:
             self.downloadedBadge.raise_()
 
     def setCoverData(self, data: bytes):
-        self.coverLabel.setCoverData(data)
+        cover_label = getattr(self, "coverLabel", None)
+        if cover_label is not None:
+            cover_label.setCoverData(data)
 
     def contextMenuEvent(self, event):
         menu = RoundMenu(self.tr("在线画廊"), self)
@@ -249,6 +263,16 @@ class _OnlineGalleryCardBase(CardWidget):
                 lambda _checked=False: self.downloadCallback(self.item)
             )
         menu.addAction(download_action)
+        if self.isDownloaded and self.openFolderCallback is not None:
+            open_folder_action = QAction(
+                FIF.FOLDER.icon(),
+                self.tr("在资源管理器中打开"),
+                menu,
+            )
+            open_folder_action.triggered.connect(
+                lambda _checked=False: self.openFolderCallback(self.item)
+            )
+            menu.addAction(open_folder_action)
         menu.exec(event.globalPos())
         event.accept()
 
@@ -267,8 +291,15 @@ class OnlineGalleryCard(_OnlineGalleryCardBase):
         is_downloaded=False,
         open_callback=None,
         download_callback=None,
+        open_folder_callback=None,
     ):
-        super().__init__(item, parent, open_callback, download_callback)
+        super().__init__(
+            item,
+            parent,
+            open_callback,
+            download_callback,
+            open_folder_callback,
+        )
         self.setObjectName("onlineGalleryCard")
         self.setFixedWidth(254)
         self.setMinimumHeight(408)
@@ -333,6 +364,65 @@ class OnlineGalleryCard(_OnlineGalleryCardBase):
         self.setDownloaded(is_downloaded)
 
 
+class OnlineGalleryListCard(_OnlineGalleryCardBase):
+    """Compact text-only row matching the local list-card geometry."""
+
+    def __init__(
+        self,
+        item,
+        parent=None,
+        is_downloaded=False,
+        open_callback=None,
+        download_callback=None,
+        open_folder_callback=None,
+    ):
+        super().__init__(
+            item,
+            parent,
+            open_callback,
+            download_callback,
+            open_folder_callback,
+        )
+        self.setObjectName("onlineGalleryListCard")
+        self.setFixedHeight(116)
+        self.setMinimumWidth(520)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        self.titleLabel = BodyLabel(item.title, self)
+        self.titleLabel.setObjectName("onlineGalleryListTitle")
+        self.titleLabel.setWordWrap(True)
+        self.titleLabel.setMaximumHeight(44)
+        self.titleLabel.setToolTip(item.title)
+
+        self.categoryLabel = CaptionLabel(item.category or self.tr("类型未知"), self)
+        _configure_category_label(self.categoryLabel, item.category)
+        self.uploaderLabel = CaptionLabel(item.uploader or "-", self)
+        self.uploaderLabel.setObjectName("onlineGalleryUploader")
+        self.uploaderLabel.setToolTip(item.uploader)
+        self.pageCountLabel = CaptionLabel(
+            self.tr("{} 页").format(item.page_count)
+            if item.page_count
+            else self.tr("页数未知"),
+            self,
+        )
+        self.pageCountLabel.setObjectName("onlineGalleryPageCount")
+
+        metadata_layout = QHBoxLayout()
+        metadata_layout.setContentsMargins(0, 0, 0, 0)
+        metadata_layout.setSpacing(10)
+        metadata_layout.addWidget(self.categoryLabel)
+        metadata_layout.addWidget(self.uploaderLabel)
+        metadata_layout.addStretch(1)
+        metadata_layout.addWidget(self.pageCountLabel)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(7)
+        layout.addWidget(self.titleLabel)
+        layout.addLayout(metadata_layout)
+        self.setDownloaded(is_downloaded)
+
+
 class OnlineGalleryExtendedCard(_OnlineGalleryCardBase):
     def __init__(
         self,
@@ -341,8 +431,15 @@ class OnlineGalleryExtendedCard(_OnlineGalleryCardBase):
         is_downloaded=False,
         open_callback=None,
         download_callback=None,
+        open_folder_callback=None,
     ):
-        super().__init__(item, parent, open_callback, download_callback)
+        super().__init__(
+            item,
+            parent,
+            open_callback,
+            download_callback,
+            open_folder_callback,
+        )
         self.setObjectName("onlineGalleryExtendedCard")
         self.setMinimumWidth(520)
         self.setMinimumHeight(188)
@@ -429,6 +526,7 @@ class OnlineMangaInterface(QWidget):
 
     galleryActivated = Signal(object, object, bytes)
     galleryDownloadRequested = Signal(object, object, bytes)
+    localFolderOpenRequested = Signal(int)
 
     def __init__(
         self,
@@ -447,6 +545,7 @@ class OnlineMangaInterface(QWidget):
         self._activated = False
         self._rendered_site = None
         self._current_site = cfg.get(cfg.onlineEhSite)
+        self._view_mode = cfg.get(cfg.onlineEhViewMode)
         self._site_states = {
             "ehentai": OnlineSiteState(),
             "exhentai": OnlineSiteState(),
@@ -499,8 +598,66 @@ class OnlineMangaInterface(QWidget):
         self.searchButton = PushButton(FIF.SEARCH, self.tr("搜索"), self)
         self.searchButton.clicked.connect(self.search)
         self.searchButton.clicked.connect(self.searchEdit.recordCurrentSearch)
+        self.galleryUrlToggleButton = ToolButton(FIF.LINK, self)
+        self.galleryUrlToggleButton.setFixedSize(36, 36)
+        self.galleryUrlToggleButton.setToolTip(self.tr("按画廊网址打开"))
+        self.galleryUrlToggleButton.setAccessibleName(self.tr("按画廊网址打开"))
+        self.galleryUrlToggleButton.clicked.connect(self.toggleGalleryUrlPanel)
+        self.timeSearchToggleButton = ToolButton(FIF.CALENDAR, self)
+        self.timeSearchToggleButton.setFixedSize(36, 36)
+        self.timeSearchToggleButton.setToolTip(self.tr("按日期定位画廊"))
+        self.timeSearchToggleButton.setAccessibleName(self.tr("按日期定位画廊"))
+        self.timeSearchToggleButton.clicked.connect(self.toggleTimeSearchPanel)
         self.refreshButton = PushButton(FIF.SYNC, self.tr("刷新"), self)
         self.refreshButton.clicked.connect(self.refresh)
+
+        self.galleryUrlPanel = QWidget(self)
+        self.galleryUrlPanel.setObjectName("onlineGalleryUrlPanel")
+        gallery_url_layout = QHBoxLayout(self.galleryUrlPanel)
+        gallery_url_layout.setContentsMargins(0, 0, 0, 0)
+        gallery_url_layout.setSpacing(8)
+        self.galleryUrlEdit = LineEdit(self.galleryUrlPanel)
+        self.galleryUrlEdit.setPlaceholderText(
+            self.tr("输入完整的 E-Hentai / ExHentai 画廊地址")
+        )
+        self.galleryUrlEdit.setClearButtonEnabled(True)
+        self.galleryUrlEdit.returnPressed.connect(self.openGalleryUrl)
+        self.galleryUrlOpenButton = PushButton(
+            FIF.RIGHT_ARROW,
+            self.tr("打开画廊"),
+            self.galleryUrlPanel,
+        )
+        self.galleryUrlOpenButton.clicked.connect(self.openGalleryUrl)
+        gallery_url_layout.addWidget(self.galleryUrlEdit, 1)
+        gallery_url_layout.addWidget(self.galleryUrlOpenButton)
+        self.galleryUrlPanel.hide()
+
+        self.timeSearchPanel = QWidget(self)
+        self.timeSearchPanel.setObjectName("onlineTimeSearchPanel")
+        time_search_layout = QHBoxLayout(self.timeSearchPanel)
+        time_search_layout.setContentsMargins(0, 0, 0, 0)
+        time_search_layout.setSpacing(8)
+        self.timeSearchPicker = CalendarPicker(self.timeSearchPanel)
+        self.timeSearchPicker.setDateFormat("yyyy-MM-dd")
+        self.timeSearchPicker.setDate(QDate.currentDate())
+        self.timeSearchPicker.setMinimumWidth(180)
+        self.timeSearchButton = PushButton(
+            FIF.SEARCH,
+            self.tr("定位到日期"),
+            self.timeSearchPanel,
+        )
+        self.timeSearchButton.clicked.connect(self.seekDate)
+        self.latestButton = PushButton(
+            FIF.HOME,
+            self.tr("回到最新"),
+            self.timeSearchPanel,
+        )
+        self.latestButton.clicked.connect(self.showLatest)
+        time_search_layout.addWidget(self.timeSearchPicker)
+        time_search_layout.addWidget(self.timeSearchButton)
+        time_search_layout.addWidget(self.latestButton)
+        time_search_layout.addStretch(1)
+        self.timeSearchPanel.hide()
 
         header = QHBoxLayout()
         header.addWidget(self.titleLabel)
@@ -511,6 +668,8 @@ class OnlineMangaInterface(QWidget):
         search_row = QHBoxLayout()
         search_row.addWidget(self.searchEdit, 1)
         search_row.addWidget(self.searchButton)
+        search_row.addWidget(self.timeSearchToggleButton)
+        search_row.addWidget(self.galleryUrlToggleButton)
         search_row.addWidget(self.refreshButton)
 
         self.resultLabel = BodyLabel(
@@ -551,6 +710,8 @@ class OnlineMangaInterface(QWidget):
         layout.setSpacing(12)
         layout.addLayout(header)
         layout.addLayout(search_row)
+        layout.addWidget(self.timeSearchPanel)
+        layout.addWidget(self.galleryUrlPanel)
         layout.addWidget(self.resultLabel)
         layout.addWidget(self.scrollArea, 1)
         layout.addLayout(footer)
@@ -603,7 +764,7 @@ class OnlineMangaInterface(QWidget):
         cfg.set(cfg.onlineEhSite, site)
 
     def setViewMode(self, mode):
-        if mode not in ("card", "extended"):
+        if mode not in ("card", "list", "extended"):
             return
         if mode == cfg.get(cfg.onlineEhViewMode):
             self._updateViewModeButton(mode)
@@ -612,11 +773,14 @@ class OnlineMangaInterface(QWidget):
 
     def toggleViewMode(self):
         mode = cfg.get(cfg.onlineEhViewMode)
-        self.setViewMode("extended" if mode == "card" else "card")
+        modes = ("card", "list", "extended")
+        self.setViewMode(modes[(modes.index(mode) + 1) % len(modes)])
 
     def _syncViewMode(self, mode):
-        if mode not in ("card", "extended"):
+        if mode not in ("card", "list", "extended"):
             return
+        previous_mode = self._view_mode
+        self._view_mode = mode
         self._updateViewModeButton(mode)
         state = self.currentState
         if state.current_page is None or self._rendered_site != self._current_site:
@@ -627,16 +791,29 @@ class OnlineMangaInterface(QWidget):
         self._restoreScrollPosition(self._current_site, position)
         request = OnlinePageRequest(
             keyword=state.keyword,
+            seek_date=state.seek_date,
             cursor=state.current_cursor,
             page_number=state.page_number,
             cursor_history=tuple(state.cursor_history),
             scroll_position=position,
         )
+        previous_site_mode = self._siteDisplayMode(previous_mode)
+        site_mode = self._siteDisplayMode(mode)
+        if previous_site_mode == site_mode:
+            if mode != "list":
+                provider = self._site_providers.get(self._current_site)
+                if provider is not None:
+                    self._startCoverLoads(
+                        self._current_site,
+                        provider,
+                        state.current_page.items,
+                    )
+            return
         self._requestPage(
             self._current_site,
             request,
             force_network=True,
-            display_mode=self._siteDisplayMode(mode),
+            display_mode=site_mode,
         )
 
     def _updateViewModeButton(self, mode):
@@ -644,10 +821,14 @@ class OnlineMangaInterface(QWidget):
             icon = FIF.TILES
             target_mode = "card"
             tool_tip = self.tr("切换到卡片布局")
-        else:
-            icon = FIF.MENU
+        elif mode == "list":
+            icon = FIF.VIEW
             target_mode = "extended"
             tool_tip = self.tr("切换到 Extended 布局")
+        else:
+            icon = FIF.MENU
+            target_mode = "list"
+            tool_tip = self.tr("切换到精简列表")
         self.viewModeButton.setIcon(icon)
         self.viewModeButton.setProperty("targetViewMode", target_mode)
         self.viewModeButton.setToolTip(tool_tip)
@@ -660,6 +841,10 @@ class OnlineMangaInterface(QWidget):
         self._rendered_site = site
         self.siteSwitch.setCurrentItem(site)
         self.searchEdit.setText(state.search_text or state.keyword)
+        active_date = QDate.fromString(state.seek_date, "yyyy-MM-dd")
+        self.timeSearchPicker.setDate(
+            active_date if active_date.isValid() else QDate.currentDate()
+        )
         if state.current_page is not None:
             self._displayPage(site, state, state.current_page)
             return
@@ -715,6 +900,56 @@ class OnlineMangaInterface(QWidget):
         )
         return self._provider_factory(settings)
 
+    def toggleGalleryUrlPanel(self):
+        visible = self.galleryUrlPanel.isHidden()
+        self.galleryUrlPanel.setVisible(visible)
+        if visible:
+            self.galleryUrlEdit.setFocus()
+            self.galleryUrlEdit.selectAll()
+
+    def toggleTimeSearchPanel(self):
+        visible = self.timeSearchPanel.isHidden()
+        self.timeSearchPanel.setVisible(visible)
+        if visible:
+            state = self.currentState
+            date = QDate.fromString(state.seek_date, "yyyy-MM-dd")
+            self.timeSearchPicker.setDate(
+                date if date.isValid() else QDate.currentDate()
+            )
+
+    def galleryTarget(self, gid, token):
+        site = self._current_site
+        provider = self._site_providers.get(site)
+        if provider is None:
+            provider = self._makeProvider(site)
+            self._site_providers[site] = provider
+        gallery = OnlineGallery(
+            gid=int(gid),
+            token=str(token),
+            url=build_eh_gallery_url(site, gid, token),
+            title=self.tr("GID {}").format(int(gid)),
+        )
+        return gallery, provider
+
+    def openGalleryUrl(self):
+        try:
+            address = parse_eh_gallery_url(self.galleryUrlEdit.text())
+            gallery, provider = self.galleryTarget(address.gid, address.token)
+        except (EhOnlineError, TypeError, ValueError) as error:
+            message = str(error) or self.tr("请输入有效的画廊地址")
+            self.resultLabel.setText(self.tr("地址无效：{}").format(message))
+            InfoBar.error(
+                title=self.tr("画廊地址无效"),
+                content=message,
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=3500,
+                parent=self,
+            )
+            return
+        self.galleryActivated.emit(gallery, provider, b"")
+
     def search(self, *_args):
         site = self._current_site
         state = self.currentState
@@ -725,6 +960,36 @@ class OnlineMangaInterface(QWidget):
         request = OnlinePageRequest(keyword=keyword, cursor="", page_number=1)
         self._requestPage(site, request)
 
+    def seekDate(self, *_args):
+        date = self.timeSearchPicker.date
+        if not date.isValid():
+            self._showError(self.tr("请选择有效日期"))
+            return
+        site = self._current_site
+        self._activated = True
+        self._rendered_site = site
+        keyword = self.searchEdit.text().strip()
+        self.currentState.search_text = keyword
+        request = OnlinePageRequest(
+            keyword=keyword,
+            seek_date=date.toString("yyyy-MM-dd"),
+            cursor="",
+            page_number=1,
+        )
+        self._requestPage(site, request, force_network=True)
+
+    def showLatest(self, *_args):
+        site = self._current_site
+        self._activated = True
+        self._rendered_site = site
+        keyword = self.searchEdit.text().strip()
+        self.currentState.search_text = keyword
+        self._requestPage(
+            site,
+            OnlinePageRequest(keyword=keyword, cursor="", page_number=1),
+            force_network=True,
+        )
+
     def refresh(self, *_args):
         site = self._current_site
         state = self.currentState
@@ -733,6 +998,7 @@ class OnlineMangaInterface(QWidget):
         state.search_text = self.searchEdit.text()
         request = OnlinePageRequest(
             keyword=state.keyword if state.current_page is not None else state.search_text.strip(),
+            seek_date=state.seek_date if state.current_page is not None else "",
             cursor=state.current_cursor if state.current_page is not None else "",
             page_number=state.page_number if state.current_page is not None else 1,
             cursor_history=tuple(state.cursor_history),
@@ -749,7 +1015,11 @@ class OnlineMangaInterface(QWidget):
     ):
         self.cancelLoad()
         state = self._site_states[site]
-        cache_key = self._pageCacheKey(request.keyword, request.cursor)
+        cache_key = self._pageCacheKey(
+            request.keyword,
+            request.cursor,
+            request.seek_date,
+        )
         if not force_network and cache_key in state.pages:
             page = state.pages.pop(cache_key)
             state.pages[cache_key] = page
@@ -764,6 +1034,7 @@ class OnlineMangaInterface(QWidget):
             return
         query = OnlineGalleryQuery(
             keyword=request.keyword,
+            seek_date=request.seek_date,
             cursor=request.cursor,
             page_number=request.page_number,
             filters=dict(self._filters),
@@ -795,6 +1066,7 @@ class OnlineMangaInterface(QWidget):
     def _applyPage(self, site, cache_key, request, page, provider=None):
         state = self._site_states[site]
         state.keyword = request.keyword
+        state.seek_date = request.seek_date
         state.current_cursor = request.cursor
         state.page_number = request.page_number
         state.cursor_history = list(request.cursor_history)
@@ -815,11 +1087,18 @@ class OnlineMangaInterface(QWidget):
     def _displayPage(self, site, state, page, provider=None):
         self._setLoading(False)
         self.nextButton.setEnabled(bool(page.next_cursor))
-        self.previousButton.setEnabled(bool(state.cursor_history))
+        self.previousButton.setEnabled(
+            bool(state.cursor_history or page.previous_cursor)
+        )
         self.pageLabel.setText(self.tr("第 {} 页").format(state.page_number))
+        date_text = (
+            self.tr(" · 定位 {} ").format(state.seek_date)
+            if state.seek_date
+            else ""
+        )
         self.resultLabel.setText(
-            self.tr("{} · 本页 {} 个画廊；点击卡片查看详情。").format(
-                self._siteName(site), len(page.items)
+            self.tr("{}{}· 本页 {} 个画廊；点击卡片查看详情。").format(
+                self._siteName(site), date_text, len(page.items)
             )
         )
         self._retainCurrentPageCovers(site, page.items)
@@ -853,6 +1132,8 @@ class OnlineMangaInterface(QWidget):
 
     def _setLoading(self, loading):
         self.searchButton.setEnabled(not loading)
+        self.timeSearchButton.setEnabled(not loading)
+        self.latestButton.setEnabled(not loading)
         self.refreshButton.setEnabled(not loading)
         if loading:
             self.previousButton.setEnabled(False)
@@ -864,11 +1145,11 @@ class OnlineMangaInterface(QWidget):
             if item.widget():
                 item.widget().hide()
                 item.widget().deleteLater()
-        card_class = (
-            OnlineGalleryExtendedCard
-            if cfg.get(cfg.onlineEhViewMode) == "extended"
-            else OnlineGalleryCard
-        )
+        card_class = {
+            "card": OnlineGalleryCard,
+            "list": OnlineGalleryListCard,
+            "extended": OnlineGalleryExtendedCard,
+        }.get(self._view_mode, OnlineGalleryCard)
         self._cards = [
             card_class(
                 item,
@@ -876,6 +1157,7 @@ class OnlineMangaInterface(QWidget):
                 is_downloaded=item.gid in self._downloaded_gids,
                 open_callback=self._openGallery,
                 download_callback=self._downloadGallery,
+                open_folder_callback=self._openDownloadedFolder,
             )
             for item in items
         ]
@@ -915,8 +1197,14 @@ class OnlineMangaInterface(QWidget):
         cover_data = self._cover_data.get(self._coverMemoryKey(site, item), b"")
         self.galleryDownloadRequested.emit(item, provider, cover_data)
 
+    def _openDownloadedFolder(self, item):
+        if int(item.gid) in self._downloaded_gids:
+            self.localFolderOpenRequested.emit(int(item.gid))
+
     def _startCoverLoads(self, site, provider, items):
         self._cancelCoverLoads()
+        if self._view_mode == "list":
+            return
         cache_hours = int(cfg.get(cfg.onlineEhThumbnailCacheHours))
         for item in items:
             if not item.thumbnail_url:
@@ -987,7 +1275,7 @@ class OnlineMangaInterface(QWidget):
         for column in range(self.gridLayout.columnCount()):
             self.gridLayout.setColumnStretch(column, 0)
 
-        if cfg.get(cfg.onlineEhViewMode) == "extended":
+        if self._view_mode in {"list", "extended"}:
             self.gridLayout.setColumnStretch(0, 1)
             for index, card in enumerate(self._cards):
                 self.gridLayout.addWidget(card, index, 0)
@@ -1023,6 +1311,7 @@ class OnlineMangaInterface(QWidget):
         history = tuple(state.cursor_history + [state.next_cursor])
         request = OnlinePageRequest(
             keyword=state.keyword,
+            seek_date=state.seek_date,
             cursor=state.next_cursor,
             page_number=state.page_number + 1,
             cursor_history=history,
@@ -1031,12 +1320,19 @@ class OnlineMangaInterface(QWidget):
 
     def previousPage(self):
         state = self.currentState
-        if not state.cursor_history:
+        if not state.cursor_history and not (
+            state.current_page and state.current_page.previous_cursor
+        ):
             return
-        history = tuple(state.cursor_history[:-1])
-        cursor = history[-1] if history else ""
+        if state.cursor_history:
+            history = tuple(state.cursor_history[:-1])
+            cursor = history[-1] if history else ""
+        else:
+            history = ()
+            cursor = state.current_page.previous_cursor
         request = OnlinePageRequest(
             keyword=state.keyword,
+            seek_date=state.seek_date,
             cursor=cursor,
             page_number=max(1, state.page_number - 1),
             cursor_history=history,
@@ -1049,8 +1345,13 @@ class OnlineMangaInterface(QWidget):
             self._search_worker = None
         self._cancelCoverLoads()
 
-    def _pageCacheKey(self, keyword, cursor):
-        return keyword, cursor, repr(self._freezeCacheValue(self._filters))
+    def _pageCacheKey(self, keyword, cursor, seek_date=""):
+        return (
+            keyword,
+            seek_date,
+            cursor,
+            repr(self._freezeCacheValue(self._filters)),
+        )
 
     @classmethod
     def _freezeCacheValue(cls, value):

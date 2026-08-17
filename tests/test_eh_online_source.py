@@ -15,8 +15,11 @@ from app.sources.eh_online_source import (
     EhOnlineError,
     EhOnlineProvider,
     EhOnlineSettings,
+    OriginalImageUnavailableError,
     RefactoredEhOnlineProvider,
+    build_eh_gallery_url,
     create_eh_online_provider,
+    parse_eh_gallery_url,
 )
 
 
@@ -41,6 +44,39 @@ class _FilteringProvider(EhOnlineProvider):
 
 
 class EhOnlineProviderContractTests(unittest.TestCase):
+    def test_gallery_url_parser_requires_an_exact_eh_or_ex_gallery_address(self):
+        eh = parse_eh_gallery_url(
+            "https://e-hentai.org/g/123/abcdef0123/"
+        )
+        ex = parse_eh_gallery_url(
+            "https://exhentai.org/g/456/ABCDEF9876"
+        )
+        self.assertEqual(("ehentai", 123, "abcdef0123"), (
+            eh.source_site,
+            eh.gid,
+            eh.token,
+        ))
+        self.assertEqual(("exhentai", 456, "ABCDEF9876"), (
+            ex.source_site,
+            ex.gid,
+            ex.token,
+        ))
+        self.assertEqual(
+            "https://exhentai.org/g/123/abcdef0123/",
+            build_eh_gallery_url("exhentai", eh.gid, eh.token),
+        )
+        for invalid in (
+            "https://e-hentai.org/",
+            "https://e-hentai.org/g/123/",
+            "https://e-hentai.org/s/token/123-1",
+            "https://example.com/g/123/abcdef0123/",
+            "http://e-hentai.org/g/123/abcdef0123/",
+            "https://e-hentai.org/g/123/abcdef0123/?p=1",
+            "not a url",
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(EhOnlineError):
+                parse_eh_gallery_url(invalid)
+
     def test_real_requests_socket_is_interrupted_without_waiting_for_server(self):
         response_started = Event()
         release_server = Event()
@@ -127,6 +163,47 @@ class EhOnlineProviderContractTests(unittest.TestCase):
         self.assertEqual(200, status)
         self.assertTrue(request.kwargs["stream"])
         self.assertEqual((15, 15), request.kwargs["timeout"])
+
+    def test_streaming_download_reports_speed_every_half_second(self):
+        provider = RefactoredEhOnlineProvider(
+            EhOnlineSettings.create(proxy_mode="direct")
+        )
+
+        class FakeResponse:
+            ok = True
+            status_code = 200
+
+            def iter_content(self, chunk_size):
+                self.chunk_size = chunk_size
+                yield b"a" * 10
+                yield b"b" * 10
+                yield b"c" * 10
+
+            def close(self):
+                pass
+
+        provider._crawler = type(
+            "Crawler",
+            (),
+            {"req": type("Request", (), {"get": lambda *_args, **_kwargs: FakeResponse()})()},
+        )()
+        speeds = []
+
+        with patch(
+            "app.sources.eh_online_source.time.monotonic",
+            side_effect=(0.0, 0.2, 0.5, 0.7, 0.7),
+        ):
+            data, status = provider._request_bytes_cancellable(
+                "https://exhentai.org/fullimg/1/1/key/page.jpg",
+                lambda: False,
+                progress_callback=speeds.append,
+            )
+
+        self.assertEqual(b"a" * 10 + b"b" * 10 + b"c" * 10, data)
+        self.assertEqual(200, status)
+        self.assertEqual(2, len(speeds))
+        self.assertAlmostEqual(40.0, speeds[0])
+        self.assertAlmostEqual(50.0, speeds[1])
 
     @staticmethod
     def _capture_error(errors, operation):
@@ -252,11 +329,15 @@ class EhOnlineProviderContractTests(unittest.TestCase):
         class FakeCrawler:
             def __init__(self):
                 self.search = None
+                self.seek_date = None
                 self.url = None
                 self.mode = None
+                self.main_calls = []
 
-            def getMain(self, search=None):
+            def getMain(self, search=None, time=None):
                 self.search = search
+                self.seek_date = time
+                self.main_calls.append((search, time))
                 return {
                     "data": [
                         {
@@ -303,6 +384,16 @@ class EhOnlineProviderContractTests(unittest.TestCase):
             OnlineGalleryQuery(cursor="https://e-hentai.org/?next=100")
         )
         self.assertEqual("https://e-hentai.org/?next=100", crawler.url)
+        provider.search(
+            OnlineGalleryQuery(
+                keyword="artist:someone",
+                seek_date="2026-08-01",
+            )
+        )
+        self.assertEqual(
+            [("artist:someone", None), (None, "2026-08-01")],
+            crawler.main_calls[-2:],
+        )
         provider.set_display_mode("extended")
         self.assertEqual("extended", crawler.mode)
 
@@ -349,7 +440,11 @@ class EhOnlineProviderContractTests(unittest.TestCase):
             <div class="c1"><div class="c2">
               <div class="c3">Posted on 15 August 2026, 10:30 by: <a>reader</a></div>
               <div class="c4 nosel">[ Vote+ ]</div><div class="c5 nosel">Score +3</div>
-            </div><div class="c6" id="comment_123">first line<br/>second line</div></div>
+            </div><div class="c6" id="comment_123">
+              first line<br/>second line
+              <a href="/g/321/deadbeef01/">Prequel</a>
+              <a href="https://example.com/g/999/abcdef0123/">Foreign</a>
+            </div></div>
             <div class="c1"><div class="c2">
               <div class="c3">Posted on 15 August 2026, 10:20 by: <a>uploader-name</a></div>
               <div class="c4 nosel">Uploader Comment</div>
@@ -391,11 +486,20 @@ class EhOnlineProviderContractTests(unittest.TestCase):
         self.assertEqual(16, detail.rating_count)
         self.assertEqual(("artist:someone",), detail.tags)
         self.assertEqual(2, len(detail.comments))
-        self.assertEqual(("reader", 3, "first line\nsecond line"), (
+        self.assertEqual(("reader", 3), (
             detail.comments[0].author,
             detail.comments[0].score,
-            detail.comments[0].text,
         ))
+        self.assertIn("first line\nsecond line", detail.comments[0].text)
+        self.assertEqual(1, len(detail.comments[0].gallery_links))
+        self.assertEqual(
+            (321, "deadbeef01", "Prequel"),
+            (
+                detail.comments[0].gallery_links[0].gid,
+                detail.comments[0].gallery_links[0].token,
+                detail.comments[0].gallery_links[0].text,
+            ),
+        )
         self.assertTrue(detail.comments[1].is_uploader)
         self.assertEqual("https://ehgt.org/cover.webp", detail.cover_url)
         self.assertEqual(1, len(detail.previews))
@@ -523,6 +627,12 @@ class EhOnlineProviderContractTests(unittest.TestCase):
             b'<a href="https://e-hentai.org/fullimg/999/21/key/021.jpg">original</a>'
         )
         with self.assertRaises(EhOnlineError):
+            provider.load_gallery_page_original(gallery, page.items[0])
+
+        provider._crawler.req.get = lambda _url: FakeResponse(
+            b'<div id="i3"><img id="img" src="https://b.hath.network/page.png"/></div>'
+        )
+        with self.assertRaises(OriginalImageUnavailableError):
             provider.load_gallery_page_original(gallery, page.items[0])
 
 

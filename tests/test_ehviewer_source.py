@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
 from app.sources.ehviewer_source import EhViewerDataSource
 
@@ -80,6 +81,21 @@ class EhViewerDataSourceTests(unittest.TestCase):
 
         self.assertEqual([84, 42], [item.gid for item in items])
         self.assertEqual([99, 1], [item.added_time for item in items])
+
+    def test_single_gallery_lookup_uses_known_folder_without_root_scan(self):
+        source = EhViewerDataSource(self.database, self.manga_root)
+        folder = self.manga_root / "42-sample"
+
+        with patch.object(
+            source,
+            "_index_download_folders",
+            side_effect=AssertionError("root scan should not run"),
+        ):
+            item = source.load_local_manga(42, folder)
+
+        self.assertEqual(42, item.gid)
+        self.assertEqual(folder.resolve(), item.folder)
+        self.assertEqual("主标签", item.primary_label)
 
     def test_primary_label_write_updates_only_requested_downloads(self):
         with closing(sqlite3.connect(self.database)) as connection:
@@ -228,7 +244,7 @@ class EhViewerDataSourceTests(unittest.TestCase):
         self.assertEqual(12, len(loaded.page_tokens))
 
     def test_missing_configuration_has_actionable_error(self):
-        with self.assertRaisesRegex(ValueError, "EhViewer 数据库"):
+        with self.assertRaisesRegex(ValueError, "RSViewer 自有漫画数据库"):
             EhViewerDataSource("", "").list_local_manga()
 
 

@@ -1,11 +1,17 @@
 import os
+import sqlite3
+import tempfile
 import unittest
 from collections import deque
+from contextlib import closing
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QByteArray, QBuffer, QIODevice
+from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication, QWidget
 from PySide6.QtTest import QTest
 from qfluentwidgets import FluentWindow
@@ -13,6 +19,14 @@ from qfluentwidgets import FluentWindow
 from app.common.config import cfg
 from app.domain.gallery_update import GalleryUpdateRecord, UPDATE_QUEUED
 from app.domain.online_download import OnlineGalleryDownloadRecord
+from app.domain.online_gallery import (
+    OnlineGallery,
+    OnlineGalleryDetail,
+    OnlineGalleryLink,
+)
+from app.repositories.user_library_repository import UserLibraryRepository
+from app.services.online_gallery_memory_cache import OnlineGalleryMemoryCache
+from app.sources.ehviewer_source import EhViewerDataSource
 from app.view.main_window import MAX_ONLINE_DOWNLOAD_CONCURRENCY, MainWindow
 from app.workers.gallery_trash_worker import GalleryTrashWorker
 
@@ -27,6 +41,16 @@ class FakeSignal:
     def emit(self, *args):
         for callback in tuple(self.callbacks):
             callback(*args)
+
+
+def image_bytes(color):
+    image = QImage(12, 16, QImage.Format_RGB32)
+    image.fill(QColor(color))
+    data = QByteArray()
+    buffer = QBuffer(data)
+    buffer.open(QIODevice.WriteOnly)
+    image.save(buffer, "PNG")
+    return bytes(data)
 
 
 class FakeSyncWorker:
@@ -288,6 +312,59 @@ class MainWindowNavigationTests(unittest.TestCase):
             self.window.stackedWidget.currentWidget(),
         )
 
+    def test_comment_gallery_link_pushes_and_restores_detail_history(self):
+        window = self.window
+        detail_widget = QWidget(window)
+        detail_widget.setObjectName("sharedDetailInterface")
+        detail_widget.isOnlineGallery = True
+        window.mangaDetailInterface = detail_widget
+        window.mangaReaderInterface = QWidget(window)
+        window.stackedWidget.addWidget(detail_widget)
+        window.switchTo(detail_widget)
+        previous_gallery = OnlineGallery(
+            123,
+            "abcdef0123",
+            "https://e-hentai.org/g/123/abcdef0123/",
+            "Previous",
+        )
+        target_gallery = OnlineGallery(
+            456,
+            "deadbeef01",
+            "https://e-hentai.org/g/456/deadbeef01/",
+            "Target",
+        )
+        provider = SimpleNamespace(settings=SimpleNamespace(site="ehentai"))
+        window._detailNavigationHistory = deque()
+        window._currentDetailNavigationEntry = lambda: (
+            "online",
+            previous_gallery,
+            provider,
+            b"previous-cover",
+        )
+        window.onlineMangaInterface.galleryTarget = (
+            lambda gid, token: (target_gallery, provider)
+        )
+        window.openOnlineMangaDetail = MagicMock()
+
+        window.openLinkedOnlineMangaDetail(
+            OnlineGalleryLink(456, "deadbeef01", "Sequel")
+        )
+
+        self.assertEqual(1, len(window._detailNavigationHistory))
+        window.openOnlineMangaDetail.assert_called_once_with(
+            target_gallery,
+            provider,
+        )
+        window.openOnlineMangaDetail.reset_mock()
+
+        self.assertTrue(window.navigateBack())
+        window.openOnlineMangaDetail.assert_called_once_with(
+            previous_gallery,
+            provider,
+            b"previous-cover",
+        )
+        self.assertEqual(0, len(window._detailNavigationHistory))
+
     def test_batch_metadata_sync_runs_two_at_once_and_reloads_once(self):
         window = self.window
         window._localMetadataSyncWorker = None
@@ -411,6 +488,10 @@ class MainWindowNavigationTests(unittest.TestCase):
         window._setCurrentDownloadState = lambda *args: states.append(args)
         window._refreshDownloadManager = lambda: refreshed.append(True)
         window._startPreparedOnlineGalleryDownload = lambda *args: started.append(args)
+        window._prepareOnlineDownloadTarget = (
+            lambda record, *_args: (record, Path("download"), True)
+        )
+        window._announceOnlineDownloadRegistration = lambda *_args: None
         old_label = cfg.get(cfg.onlineEhDownloadLabel)
         cfg.set(cfg.onlineEhDownloadLabel, "自动下载")
         try:
@@ -433,6 +514,173 @@ class MainWindowNavigationTests(unittest.TestCase):
             )
         finally:
             cfg.set(cfg.onlineEhDownloadLabel, old_label)
+
+    def test_list_download_creates_local_target_before_detail_worker_runs(self):
+        window = self.window
+        markers = []
+        reloads = []
+        published = []
+        pool = FakeThreadPool()
+        cover = image_bytes("green")
+        gallery = OnlineGallery(
+            gid=654321,
+            token="deadbeef01",
+            url="https://e-hentai.org/g/654321/deadbeef01/",
+            title="Queued from list",
+            category="Manga",
+            thumbnail_url="https://ehgt.org/thumb.jpg",
+            posted="today",
+            page_count=24,
+            tags=("artist:tester",),
+            uploader="tester",
+            rating=4.0,
+        )
+        provider = SimpleNamespace(settings=SimpleNamespace(site="ehentai"))
+        old_root = cfg.get(cfg.ehViewerMangaRoot)
+        old_label = cfg.get(cfg.onlineEhDownloadLabel)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manga_root = root / "downloads"
+            manga_root.mkdir()
+            repository = UserLibraryRepository(root / "rsviewer.db")
+            window.userLibraryRepository = repository
+            window.windowCoordinator = None
+            window._onlineDownloadWorkers = {}
+            window._localDownloadPrepareWorkers = {}
+            window._libraryItems = []
+            window.onlineDetailThreadPool = pool
+            window.onlineGalleryCache = SimpleNamespace(
+                put_cover_data=lambda *_args: None,
+                get_detail=lambda *_args: None,
+            )
+            window.onlineMangaInterface.setGalleryDownloaded = markers.append
+            window.localMangaInterface.reload = lambda: reloads.append(True)
+            window._publishSharedState = lambda *args: published.append(args)
+            window._setCurrentDownloadState = MagicMock()
+            window._refreshDownloadManager = MagicMock()
+            cfg.set(cfg.ehViewerMangaRoot, str(manga_root))
+            cfg.set(cfg.onlineEhDownloadLabel, "")
+            try:
+                with patch(
+                    "app.view.main_window.OnlineDetailWorker", FakeBootstrapWorker
+                ), patch("app.view.main_window.InfoBar.success"):
+                    window.prepareOnlineGalleryDownload(gallery, provider, cover)
+
+                record = repository.online_gallery_download(gallery.gid)
+                folder = manga_root / record.dirname
+                self.assertEqual("queued", record.state)
+                self.assertEqual(gallery.title, record.title)
+                self.assertTrue(folder.is_dir())
+                self.assertEqual(cover, (folder / ".thumb").read_bytes())
+                self.assertFalse((folder / ".ehviewer").exists())
+                with closing(sqlite3.connect(str(repository.database_path))) as connection:
+                    row = connection.execute(
+                        "SELECT TOKEN, TITLE FROM DOWNLOADS WHERE GID = ?",
+                        (gallery.gid,),
+                    ).fetchone()
+                    dirname = connection.execute(
+                        "SELECT DIRNAME FROM DOWNLOAD_DIRNAME WHERE GID = ?",
+                        (gallery.gid,),
+                    ).fetchone()
+                self.assertEqual((gallery.token, gallery.title), row)
+                self.assertEqual(record.dirname, dirname[0])
+                listed = EhViewerDataSource(
+                    repository.database_path,
+                    manga_root,
+                ).list_local_manga()
+                self.assertEqual([gallery.gid], [item.gid for item in listed])
+                self.assertEqual([gallery.gid], markers)
+                self.assertEqual([True], reloads)
+                self.assertIn(("library_refresh",), published)
+                self.assertEqual(1, len(pool.started))
+            finally:
+                cfg.set(cfg.ehViewerMangaRoot, old_root)
+                cfg.set(cfg.onlineEhDownloadLabel, old_label)
+
+    def test_online_markers_include_queued_tasks_before_library_reload(self):
+        marked = []
+        queued = OnlineGalleryDownloadRecord(
+            gid=200,
+            site="ehentai",
+            token="token",
+            title="Queued",
+            dirname="200-Queued",
+            page_count=10,
+        )
+        window = SimpleNamespace(
+            _libraryItems=(SimpleNamespace(gid=100),),
+            userLibraryRepository=SimpleNamespace(
+                incomplete_online_gallery_downloads=lambda: (queued,)
+            ),
+            onlineMangaInterface=SimpleNamespace(
+                setDownloadedGids=lambda gids: marked.append(set(gids))
+            ),
+        )
+
+        MainWindow._syncOnlineGalleryDownloadMarkers(window)
+
+        self.assertEqual([{100, 200}], marked)
+
+    def test_detail_download_preregisters_before_download_pool_starts(self):
+        window = self.window
+        markers = []
+        reloads = []
+        pool = FakeThreadPool()
+        cover = image_bytes("blue")
+        gallery = OnlineGallery(
+            gid=765432,
+            token="abcdef0123",
+            url="https://exhentai.org/g/765432/abcdef0123/",
+            title="Detail title",
+            category="Image Set",
+            thumbnail_url="https://ehgt.org/detail.jpg",
+            page_count=8,
+        )
+        detail = OnlineGalleryDetail(
+            gallery=gallery,
+            title=gallery.title,
+            category=gallery.category,
+            cover_url=gallery.thumbnail_url,
+            page_count=gallery.page_count,
+        )
+        provider = SimpleNamespace(settings=SimpleNamespace(site="exhentai"))
+        old_root = cfg.get(cfg.ehViewerMangaRoot)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manga_root = root / "downloads"
+            manga_root.mkdir()
+            repository = UserLibraryRepository(root / "rsviewer.db")
+            window.userLibraryRepository = repository
+            window.windowCoordinator = None
+            window._onlineDownloadWorkers = {}
+            window._localDownloadPrepareWorkers = {}
+            window._onlineDownloadSpeeds = {}
+            window._libraryItems = []
+            window.onlineDownloadThreadPool = pool
+            window.onlineGalleryCache = OnlineGalleryMemoryCache()
+            window.onlineMangaInterface.setGalleryDownloaded = markers.append
+            window.localMangaInterface.reload = lambda: reloads.append(True)
+            window._publishSharedState = lambda *_args: None
+            window._setCurrentDownloadState = MagicMock()
+            window._refreshDownloadManager = MagicMock()
+            cfg.set(cfg.ehViewerMangaRoot, str(manga_root))
+            try:
+                window._queueOnlineGalleryDownload(detail, provider, cover)
+
+                record = repository.online_gallery_download(gallery.gid)
+                folder = manga_root / record.dirname
+                self.assertTrue(folder.is_dir())
+                self.assertEqual(cover, (folder / ".thumb").read_bytes())
+                self.assertFalse((folder / ".ehviewer").exists())
+                self.assertEqual([gallery.gid], markers)
+                self.assertEqual([True], reloads)
+                self.assertEqual(1, len(pool.started))
+                self.assertIs(
+                    window._onlineDownloadWorkers[gallery.gid],
+                    pool.started[0],
+                )
+            finally:
+                cfg.set(cfg.ehViewerMangaRoot, old_root)
 
     def test_missing_sidecar_falls_back_to_online_bootstrap(self):
         window = self.window
@@ -524,6 +772,51 @@ class MainWindowNavigationTests(unittest.TestCase):
         window._registerDownloadedGallery(object(), gid, "folder")
         self.assertEqual([True], reloads)
 
+    def test_download_completion_updates_one_gallery_without_revealing_or_reloading(self):
+        gid = 4120990
+        worker = object()
+        record = OnlineGalleryDownloadRecord(
+            gid=gid,
+            site="ehentai",
+            token="token",
+            title="Completed",
+            dirname="4120990-Completed",
+            page_count=18,
+            completed_pages=18,
+            state="completed",
+        )
+        refreshed = []
+        reloads = []
+        window = SimpleNamespace(
+            _onlineDownloadWorkers={gid: worker},
+            _onlineDownloadSpeeds={gid: 1.0},
+            _pendingDownloadDeletes=set(),
+            userLibraryRepository=SimpleNamespace(
+                online_gallery_download=lambda _gid: record,
+                gallery_update=lambda _gid: None,
+            ),
+            localMangaInterface=SimpleNamespace(
+                reload=lambda *args, **kwargs: reloads.append((args, kwargs))
+            ),
+            mangaDetailInterface=SimpleNamespace(
+                reloadCurrentMangaPages=lambda: None
+            ),
+            _setCurrentDownloadState=lambda *args: None,
+            _refreshDownloadManager=lambda: None,
+            _refreshLocalGalleryItem=lambda target_gid, folder=None: (
+                refreshed.append((target_gid, folder)) or True
+            ),
+            _syncCurrentDownload=lambda _gid: None,
+            _refreshUpdateManager=lambda: None,
+        )
+
+        MainWindow._finishOnlineGalleryDownload(
+            window, worker, gid, Path("download-folder")
+        )
+
+        self.assertEqual([(gid, Path("download-folder"))], refreshed)
+        self.assertEqual([], reloads)
+
     def test_second_gallery_update_stays_queued_while_one_is_running(self):
         record = GalleryUpdateRecord(
             source_gid=2,
@@ -590,6 +883,82 @@ class MainWindowNavigationTests(unittest.TestCase):
             MainWindow._startNextGalleryUpdate(window)
 
         self.assertEqual([1], started)
+
+    def test_delete_gallery_update_routes_to_owner_or_removes_idle_record(self):
+        owner = SimpleNamespace(
+            _pendingUpdateDeletes=set(),
+            pauseGalleryUpdate=MagicMock(),
+        )
+        routed = SimpleNamespace(_updateOwner=lambda _gid: owner)
+
+        MainWindow.deleteGalleryUpdate(routed, 42)
+
+        self.assertEqual({42}, owner._pendingUpdateDeletes)
+        owner.pauseGalleryUpdate.assert_called_once_with(42)
+
+        repository = SimpleNamespace(delete_gallery_update=MagicMock())
+        idle = SimpleNamespace(
+            _updateOwner=lambda _gid: None,
+            _pendingUpdateDeletes=set(),
+            userLibraryRepository=repository,
+            _refreshUpdateManager=MagicMock(),
+            _syncCurrentGalleryUpdate=MagicMock(),
+            _startNextGalleryUpdate=MagicMock(),
+        )
+
+        MainWindow.deleteGalleryUpdate(idle, 43)
+
+        repository.delete_gallery_update.assert_called_once_with(43)
+        idle._refreshUpdateManager.assert_called_once_with()
+        idle._syncCurrentGalleryUpdate.assert_called_once_with(43)
+        idle._startNextGalleryUpdate.assert_called_once_with()
+
+    def test_completed_update_progress_cannot_restore_running_state(self):
+        record = GalleryUpdateRecord(
+            source_gid=42,
+            source_token="source",
+            site="ehentai",
+            title="Completed",
+            folder="folder",
+            latest_url="https://e-hentai.org/g/43/target/",
+            status=6,
+            state="completed",
+            completed_pages=10,
+            page_count=10,
+        )
+        repository = SimpleNamespace(
+            gallery_update=lambda _gid: record,
+            update_gallery_update_state=MagicMock(),
+        )
+        worker = object()
+        window = SimpleNamespace(
+            _galleryUpdateWorkers={42: worker},
+            userLibraryRepository=repository,
+            _refreshUpdateManager=MagicMock(),
+            _syncCurrentGalleryUpdate=MagicMock(),
+        )
+
+        MainWindow._updateGalleryUpdateProgress(window, worker, 42, 10, 10)
+
+        repository.update_gallery_update_state.assert_not_called()
+
+    def test_open_gallery_folder_uses_system_file_manager(self):
+        folder = Path(__file__).parent.resolve()
+        window = SimpleNamespace(
+            _libraryItems=[SimpleNamespace(gid=42, folder=folder)],
+            _showGalleryFolderError=MagicMock(),
+        )
+
+        with patch(
+            "app.view.main_window.QDesktopServices.openUrl",
+            return_value=True,
+        ) as open_url:
+            MainWindow.openGalleryFolder(window, 42)
+
+        opened_url = open_url.call_args.args[0]
+        self.assertTrue(opened_url.isLocalFile())
+        self.assertEqual(folder.resolve(), Path(opened_url.toLocalFile()))
+        window._showGalleryFolderError.assert_not_called()
 
     def test_download_concurrency_is_hard_capped_at_three(self):
         pool = FakeThreadPool()

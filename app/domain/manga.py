@@ -92,6 +92,8 @@ class MangaItem:
     original_state: str = ""
     original_page_paths: Tuple[Path, ...] = ()
     original_completed_pages: int = 0
+    original_fallback_to_standard: bool = False
+    original_page_modes: Tuple[str, ...] = ()
     standard_download_pending: bool = False
 
     @property

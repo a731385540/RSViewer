@@ -61,7 +61,7 @@ def natural_page_key(path: Path) -> Tuple[int, object]:
 
 
 class EhViewerDataSource:
-    """默认只读访问 EhViewer；仅显式分类操作可更新 LABEL。"""
+    """Read the EhViewer-compatible gallery index stored in RSViewer SQLite."""
 
     def __init__(self, database_path: Path, manga_root: Path):
         self.database_path = self._configured_path(database_path)
@@ -82,33 +82,61 @@ class EhViewerDataSource:
                 folder = self._resolve_folder(row, folders_by_gid, folders_by_name)
                 if folder is None:
                     continue
-
-                # 列表阶段不枚举页面。大型 NAS 库逐本扫描会产生数百万次
-                # 文件处理，页面只在用户打开某一本详情时按需读取。
-                thumbnail = folder / ".thumb"
-
-                items.append(
-                    MangaItem(
-                        gid=int(row["GID"]),
-                        english_title=(row["TITLE"] or "").strip(),
-                        original_title=(row["TITLE_JPN"] or "").strip(),
-                        category=int(row["CATEGORY"]),
-                        category_name=CATEGORY_NAMES.get(
-                            int(row["CATEGORY"]), f"分类 {row['CATEGORY']}"
-                        ),
-                        primary_label=(row["LABEL"] or "").strip(),
-                        multiple_labels=(),
-                        tags=self._collect_tags(row),
-                        folder=folder,
-                        cover_path=thumbnail,
-                        thumbnail_path=thumbnail,
-                        page_paths=(),
-                        page_count=0,
-                        added_time=int(row["TIME"] or 0),
-                    )
-                )
+                items.append(self._item_from_row(row, folder))
 
         return items
+
+    def load_local_manga(self, gid: int, folder=None) -> Optional[MangaItem]:
+        """Read one registered gallery without rescanning the whole root."""
+
+        self._validate_configuration()
+        if not self.database_path.is_file():
+            raise FileNotFoundError(f"找不到漫画数据库：{self.database_path}")
+        gid = int(gid)
+        with closing(self._connect_read_only()) as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                f"SELECT * FROM ({self._LOCAL_MANGA_QUERY}) WHERE GID = ?",
+                (gid,),
+            ).fetchone()
+        if row is None:
+            return None
+
+        resolved_folder = Path(folder).resolve() if folder is not None else None
+        if resolved_folder is None or not resolved_folder.is_dir():
+            dirname = str(row["DIRNAME"] or "").strip()
+            candidate = self.manga_root / dirname if dirname else Path()
+            if dirname and candidate.is_dir():
+                resolved_folder = candidate.resolve()
+            else:
+                folders_by_gid, folders_by_name = self._index_download_folders()
+                resolved_folder = self._resolve_folder(
+                    row, folders_by_gid, folders_by_name
+                )
+        if resolved_folder is None:
+            return None
+        return self._item_from_row(row, resolved_folder)
+
+    def _item_from_row(self, row: sqlite3.Row, folder: Path) -> MangaItem:
+        # List metadata is deliberately lazy; pages are read only in details.
+        thumbnail = folder / ".thumb"
+        category = int(row["CATEGORY"])
+        return MangaItem(
+            gid=int(row["GID"]),
+            english_title=(row["TITLE"] or "").strip(),
+            original_title=(row["TITLE_JPN"] or "").strip(),
+            category=category,
+            category_name=CATEGORY_NAMES.get(category, f"分类 {category}"),
+            primary_label=(row["LABEL"] or "").strip(),
+            multiple_labels=(),
+            tags=self._collect_tags(row),
+            folder=folder,
+            cover_path=thumbnail,
+            thumbnail_path=thumbnail,
+            page_paths=(),
+            page_count=0,
+            added_time=int(row["TIME"] or 0),
+        )
 
     def load_pages(self, item: MangaItem) -> MangaItem:
         """按需读取单本漫画页面；只在用户打开详情时调用。"""
@@ -384,7 +412,7 @@ class EhViewerDataSource:
 
     def _validate_configuration(self):
         if self.database_path == Path():
-            raise ValueError("请先在设置中选择 EhViewer 数据库")
+            raise ValueError("RSViewer 自有漫画数据库路径无效")
         if self.manga_root == Path():
             raise ValueError("请先在设置中选择本地漫画根目录")
 

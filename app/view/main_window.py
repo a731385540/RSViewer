@@ -2,8 +2,8 @@ from collections import deque
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QSize, QThreadPool, QTimer, Qt
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtCore import QEvent, QSize, QThreadPool, QTimer, Qt, QUrl
+from PySide6.QtGui import QDesktopServices, QImage, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QLineEdit,
@@ -40,6 +40,7 @@ from app.domain.online_download import (
     ORIGINAL_STATE_FAILED,
     ORIGINAL_STATE_PAUSED,
     ORIGINAL_STATE_QUEUED,
+    ORIGINAL_PAGE_MODE_BASE,
 )
 from app.domain.gallery_update import (
     GalleryUpdateRecord,
@@ -58,6 +59,7 @@ from app.repositories.ehviewer_download_repository import (
 from app.repositories.user_library_repository import UserLibraryRepository
 from app.services.eh_tag_search import EhTagSearchIndex
 from app.services.online_download_builder import (
+    build_online_detail_from_gallery,
     build_online_gallery_from_download_record,
     build_online_gallery_from_local,
     build_online_detail_from_local,
@@ -67,13 +69,14 @@ from app.services.online_gallery_memory_cache import OnlineGalleryMemoryCache
 from app.services.search_history import SearchHistoryService
 from app.services.multi_window_coordinator import application_window_coordinator
 from app.sources.eh_online_source import (
+    EhOnlineError,
     EhOnlineSettings,
     create_eh_online_provider,
 )
 from app.sources.ehviewer_source import EhViewerDataSource
 from app.view.download_manager_interface import DownloadManagerInterface
 from app.view.library_organizer_interface import LibraryOrganizerInterface
-from app.view.local_manga_interface import LocalMangaInterface
+from app.view.local_manga_interface import LocalMangaInterface, MangaLoadWorker
 from app.view.manga_detail_interface import MangaDetailInterface, PageDiscoveryWorker
 from app.view.manga_history_interface import MangaHistoryInterface
 from app.view.manga_reader_interface import MangaReaderInterface
@@ -100,6 +103,7 @@ from app.workers.library_organizer_worker import (
     LibraryOrganizerScanWorker,
 )
 from app.workers.gallery_trash_worker import GalleryTrashWorker
+from app.workers.ehviewer_database_worker import EhViewerDatabaseExportWorker
 
 
 MAX_ONLINE_DOWNLOAD_CONCURRENCY = 3
@@ -117,10 +121,11 @@ class MainWindow(FluentWindow):
         self.initWindow()
         self.themeListener = SystemThemeListener(self)
 
-        self.mangaSource = self._createMangaSource()
         self.userLibraryRepository = UserLibraryRepository(
             PROJECT_ROOT / "app" / "data" / "rsviewer.db"
         )
+        self.userLibraryRepository.initialize()
+        self.mangaSource = self._createMangaSource()
         if self.windowCoordinator.claimStartupRecovery():
             self.userLibraryRepository.mark_interrupted_online_downloads()
             self.userLibraryRepository.mark_interrupted_gallery_updates()
@@ -182,6 +187,7 @@ class MainWindow(FluentWindow):
         self.trashThreadPool = self.windowCoordinator.trashThreadPool
         self._onlineDetailWorker = None
         self._onlineDetailProvider = None
+        self._detailNavigationHistory = deque(maxlen=32)
         self._localMetadataSyncWorker = None
         self._localMetadataBatchQueue = deque()
         self._localMetadataBatchWorkers = {}
@@ -196,9 +202,11 @@ class MainWindow(FluentWindow):
         self._localDownloadPrepareWorkers = {}
         self._galleryUpdateWorkers = {}
         self._galleryUpdateSpeeds = {}
+        self._pendingUpdateDeletes = set()
         self._originalFileWorkers = {}
         self._organizerWorker = None
         self._trashWorker = None
+        self._ehViewerExportWorker = None
         self._pendingProgress = {}
         self.progressSaveTimer = QTimer(self)
         self.progressSaveTimer.setSingleShot(True)
@@ -230,6 +238,7 @@ class MainWindow(FluentWindow):
                 lambda: self._publishSharedState("library_refresh")
             )
             interface.trashRequested.connect(self.trashLocalGalleries)
+            interface.folderOpenRequested.connect(self.openGalleryFolder)
         self.favoriteMangaInterface.mangaActivated.connect(self.openMangaDetail)
         self.mangaHistoryInterface.localHistoryInterface.mangaActivated.connect(
             self.openMangaDetail
@@ -266,6 +275,12 @@ class MainWindow(FluentWindow):
         self.mangaDetailInterface.galleryUpdateRequested.connect(
             self.requestGalleryUpdate
         )
+        self.mangaDetailInterface.folderOpenRequested.connect(
+            self.openGalleryFolder
+        )
+        self.mangaDetailInterface.onlineGalleryLinkRequested.connect(
+            self.openLinkedOnlineMangaDetail
+        )
         self.mangaDetailInterface.localMangaResolved.connect(
             self._syncLocalDownloadState
         )
@@ -294,10 +309,13 @@ class MainWindow(FluentWindow):
             search_history_service=self.searchHistoryService,
         )
         self.onlineMangaInterface.galleryActivated.connect(
-            self.openOnlineMangaDetail
+            self._openOnlineMangaDetailFromBrowser
         )
         self.onlineMangaInterface.galleryDownloadRequested.connect(
             self.prepareOnlineGalleryDownload
+        )
+        self.onlineMangaInterface.localFolderOpenRequested.connect(
+            self.openGalleryFolder
         )
         self.downloadManagerInterface = DownloadManagerInterface(self)
         self.downloadManagerInterface.startRequested.connect(
@@ -318,6 +336,7 @@ class MainWindow(FluentWindow):
         self.updateManagerInterface = UpdateManagerInterface(self)
         self.updateManagerInterface.startRequested.connect(self.startGalleryUpdate)
         self.updateManagerInterface.pauseRequested.connect(self.pauseGalleryUpdate)
+        self.updateManagerInterface.deleteRequested.connect(self.deleteGalleryUpdate)
         self.libraryOrganizerInterface = LibraryOrganizerInterface(self)
         self.libraryOrganizerInterface.scanRequested.connect(
             self.scanUnregisteredGalleryFolders
@@ -343,6 +362,9 @@ class MainWindow(FluentWindow):
         )
         self.settingInterface = SettingInterface(self)
         self.settingInterface.dataSourceChanged.connect(self.reloadMangaSource)
+        self.settingInterface.ehViewerExportRequested.connect(
+            self.exportEhViewerDatabase
+        )
         cfg.onlineEhDownloadConcurrency.valueChanged.connect(
             self._updateOnlineDownloadConcurrency
         )
@@ -526,7 +548,9 @@ class MainWindow(FluentWindow):
     def _onSharedStateChanged(self, source, scope, payload):
         if self._closing or source is self:
             return
-        if scope == "library_snapshot":
+        if scope == "library_item":
+            self._applyLocalGalleryItem(payload, publish=False)
+        elif scope == "library_snapshot":
             if payload != self._sharedLibrarySignature:
                 self.localMangaInterface.reload()
         elif scope == "library_refresh":
@@ -586,7 +610,7 @@ class MainWindow(FluentWindow):
 
     def _createMangaSource(self):
         return EhViewerDataSource(
-            cfg.get(cfg.ehViewerDatabase),
+            self.userLibraryRepository.database_path,
             cfg.get(cfg.ehViewerMangaRoot),
         )
 
@@ -659,6 +683,57 @@ class MainWindow(FluentWindow):
         if publish:
             self._publishSharedState("source")
 
+    def exportEhViewerDatabase(self, destination_path):
+        if self._ehViewerExportWorker is not None:
+            return
+        worker = EhViewerDatabaseExportWorker(
+            self.userLibraryRepository,
+            destination_path,
+        )
+        worker.signals.completed.connect(
+            lambda path, count: self._finishEhViewerDatabaseExport(
+                worker, path, count
+            )
+        )
+        worker.signals.failed.connect(
+            lambda message: self._failEhViewerDatabaseExport(worker, message)
+        )
+        self._ehViewerExportWorker = worker
+        self.settingInterface.ehViewerDatabaseCard.setExporting(True)
+        QThreadPool.globalInstance().start(worker)
+
+    def _finishEhViewerDatabaseExport(self, worker, path, gallery_count):
+        if self._ehViewerExportWorker is not worker:
+            return
+        self._ehViewerExportWorker = None
+        self.settingInterface.ehViewerDatabaseCard.setExporting(False)
+        InfoBar.success(
+            title=self.tr("EhViewer 数据库已导出"),
+            content=self.tr("已写入 {} 个画廊：{}").format(
+                int(gallery_count), path
+            ),
+            orient=Qt.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP_RIGHT,
+            duration=5000,
+            parent=self.settingInterface,
+        )
+
+    def _failEhViewerDatabaseExport(self, worker, message):
+        if self._ehViewerExportWorker is not worker:
+            return
+        self._ehViewerExportWorker = None
+        self.settingInterface.ehViewerDatabaseCard.setExporting(False)
+        InfoBar.error(
+            title=self.tr("导出 EhViewer 数据库失败"),
+            content=str(message),
+            orient=Qt.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP_RIGHT,
+            duration=6000,
+            parent=self.settingInterface,
+        )
+
     def scanUnregisteredGalleryFolders(self):
         if self._organizerWorker is not None:
             return
@@ -666,7 +741,7 @@ class MainWindow(FluentWindow):
         if coordinator is not None and coordinator.organizerBusy():
             return
         worker = LibraryOrganizerScanWorker(
-            cfg.get(cfg.ehViewerDatabase),
+            self.userLibraryRepository.database_path,
             cfg.get(cfg.ehViewerMangaRoot),
             self.userLibraryRepository,
             cfg.get(cfg.onlineEhSite),
@@ -731,7 +806,7 @@ class MainWindow(FluentWindow):
         worker = LibraryOrganizerActionWorker(
             action,
             entries,
-            cfg.get(cfg.ehViewerDatabase),
+            self.userLibraryRepository.database_path,
             cfg.get(cfg.ehViewerMangaRoot),
             self.userLibraryRepository,
         )
@@ -867,7 +942,7 @@ class MainWindow(FluentWindow):
             action,
             entries,
             EhViewerDownloadRepository(
-                cfg.get(cfg.ehViewerDatabase),
+                self.userLibraryRepository.database_path,
                 cfg.get(cfg.ehViewerMangaRoot),
             ),
             self.userLibraryRepository,
@@ -956,9 +1031,7 @@ class MainWindow(FluentWindow):
 
     def _onLibraryLoaded(self, items):
         self._libraryItems = list(items)
-        self.onlineMangaInterface.setDownloadedGids(
-            item.gid for item in self._libraryItems
-        )
+        self._syncOnlineGalleryDownloadMarkers()
         tag_metadata = self.localMangaInterface.tagMetadata()
         self.settingInterface.setOnlineDownloadLabels(tag_metadata[0])
         self.favoriteMangaInterface.setTagMetadata(*tag_metadata)
@@ -977,6 +1050,9 @@ class MainWindow(FluentWindow):
         )
         detail = self.mangaDetailInterface.currentOnlineDetail
         if detail is not None:
+            self.mangaDetailInterface.setFolderOpenTarget(
+                MainWindow._localGalleryItem(self, detail.gallery.gid)
+            )
             self._syncOnlineDownloadState(detail)
         self._refreshDownloadManager()
         self._refreshUpdateManager()
@@ -989,6 +1065,58 @@ class MainWindow(FluentWindow):
         )
         self._publishSharedState(
             "library_snapshot", self._sharedLibrarySignature
+        )
+
+    def _loadLocalGalleryItem(self, gid, folder=None):
+        repository = getattr(self, "userLibraryRepository", None)
+        if repository is None:
+            return None
+        try:
+            source = EhViewerDataSource(
+                repository.database_path,
+                cfg.get(cfg.ehViewerMangaRoot),
+            )
+            return MangaLoadWorker.loadItem(
+                source,
+                repository,
+                int(gid),
+                folder,
+            )
+        except Exception:
+            return None
+
+    def _applyLocalGalleryItem(self, item, publish=True):
+        upsert = getattr(self.localMangaInterface, "upsertItem", None)
+        if item is None or upsert is None or not upsert(item):
+            return False
+        self._libraryItems = list(self.localMangaInterface.allItems())
+        for interface in (
+            getattr(self, "favoriteMangaInterface", None),
+            getattr(
+                getattr(self, "mangaHistoryInterface", None),
+                "localHistoryInterface",
+                None,
+            ),
+        ):
+            collection_upsert = getattr(interface, "upsertItem", None)
+            if collection_upsert is not None:
+                collection_upsert(item)
+        self.onlineMangaInterface.setGalleryDownloaded(item.gid)
+        detail = self.mangaDetailInterface.currentOnlineDetail
+        if detail is not None and int(detail.gallery.gid) == int(item.gid):
+            self.mangaDetailInterface.setFolderOpenTarget(item)
+        self._sharedLibrarySignature = (
+            tuple(self._libraryItems),
+            repr(self.localMangaInterface.tagMetadata()),
+        )
+        if publish:
+            self._publishSharedState("library_item", item)
+        return True
+
+    def _refreshLocalGalleryItem(self, gid, folder=None, publish=True):
+        return self._applyLocalGalleryItem(
+            self._loadLocalGalleryItem(gid, folder),
+            publish=publish,
         )
 
     def _onFavoriteChanged(self, gids, favorite):
@@ -1049,6 +1177,47 @@ class MainWindow(FluentWindow):
         self._syncCurrentGalleryUpdate(item.gid)
         self.switchTo(self.mangaDetailInterface)
 
+    def openGalleryFolder(self, item_or_gid):
+        item = (
+            item_or_gid
+            if hasattr(item_or_gid, "folder")
+            else MainWindow._localGalleryItem(self, item_or_gid)
+        )
+        if item is None:
+            self._showGalleryFolderError(self.tr("找不到该画廊的本地目录记录"))
+            return
+        folder = Path(item.folder)
+        if not folder.is_dir():
+            self._showGalleryFolderError(
+                self.tr("画廊目录不存在或当前无法访问：{}").format(folder)
+            )
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder.resolve()))):
+            self._showGalleryFolderError(
+                self.tr("系统资源管理器无法打开目录：{}").format(folder)
+            )
+
+    def _localGalleryItem(self, gid):
+        return next(
+            (
+                current
+                for current in self._libraryItems
+                if int(current.gid) == int(gid)
+            ),
+            None,
+        )
+
+    def _showGalleryFolderError(self, message):
+        InfoBar.error(
+            title=self.tr("打开画廊目录失败"),
+            content=str(message),
+            orient=Qt.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP_RIGHT,
+            duration=5000,
+            parent=self,
+        )
+
     def openPlaylistMangaDetail(self, item, playlist_id, items, position):
         self._cancelOnlineDetailLoad()
         self._cancelLocalMetadataSync()
@@ -1059,6 +1228,48 @@ class MainWindow(FluentWindow):
         self.mangaDetailInterface.setManga(item)
         self._syncCurrentGalleryUpdate(item.gid)
         self.switchTo(self.mangaDetailInterface)
+
+    def _openOnlineMangaDetailFromBrowser(self, item, provider, cover_data=b""):
+        self._detailNavigationHistory.clear()
+        self.openOnlineMangaDetail(item, provider, cover_data)
+
+    def _currentDetailNavigationEntry(self):
+        if self.stackedWidget.currentWidget() is not self.mangaDetailInterface:
+            return None
+        if self.mangaDetailInterface.isOnlineGallery:
+            detail = self.mangaDetailInterface.currentOnlineDetail
+            provider = self._onlineDetailProvider
+            if detail is None or provider is None:
+                return None
+            cover_data = self.onlineGalleryCache.cover_data(
+                provider.settings.site,
+                detail.gallery,
+            )
+            return ("online", detail.gallery, provider, cover_data)
+        item = self.mangaDetailInterface.currentItem
+        return ("local", item) if item is not None else None
+
+    def openLinkedOnlineMangaDetail(self, link):
+        previous = self._currentDetailNavigationEntry()
+        try:
+            item, provider = self.onlineMangaInterface.galleryTarget(
+                link.gid,
+                link.token,
+            )
+        except (EhOnlineError, TypeError, ValueError) as error:
+            InfoBar.error(
+                title=self.tr("无法打开画廊"),
+                content=str(error) or self.tr("画廊地址无效"),
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=3500,
+                parent=self.mangaDetailInterface,
+            )
+            return
+        if previous is not None:
+            self._detailNavigationHistory.append(previous)
+        self.openOnlineMangaDetail(item, provider)
 
     def openOnlineMangaDetail(self, item, provider, cover_data=b""):
         self._cancelOnlineDetailLoad()
@@ -1075,6 +1286,9 @@ class MainWindow(FluentWindow):
             cover_data = self.onlineGalleryCache.cover_data(site, item)
         self.mangaDetailInterface.setOnlineLoading(
             item, provider, self.onlineGalleryCache, cover_data
+        )
+        self.mangaDetailInterface.setFolderOpenTarget(
+            MainWindow._localGalleryItem(self, item.gid)
         )
         self.switchTo(self.mangaDetailInterface)
         cached_detail = self.onlineGalleryCache.get_detail(site, item)
@@ -1143,7 +1357,10 @@ class MainWindow(FluentWindow):
         if self._isGalleryTrashed(gid):
             return
         original = self.userLibraryRepository.gallery_original_state(gid)
-        if original is not None and original.state == ORIGINAL_STATE_ACTIVE:
+        if (
+            original is not None
+            and original.state == ORIGINAL_STATE_ACTIVE
+        ):
             return
         if self._downloadOwner(gid) is not None:
             return
@@ -1162,13 +1379,22 @@ class MainWindow(FluentWindow):
                 "failed", 0, detail.page_count, str(error)
             )
             return
-        self._queueOnlineGalleryDownload(
-            detail,
-            provider,
-            self.onlineGalleryCache.cover_data(
-                provider.settings.site, detail.gallery
-            ),
-        )
+        try:
+            self._queueOnlineGalleryDownload(
+                detail,
+                provider,
+                self.onlineGalleryCache.cover_data(
+                    provider.settings.site, detail.gallery
+                ),
+            )
+        except Exception as error:
+            self._markManagedDownloadFailed(gid, str(error))
+            self.mangaDetailInterface.setOnlineDownloadState(
+                ONLINE_DOWNLOAD_FAILED,
+                0,
+                detail.page_count,
+                str(error),
+            )
 
     def startOnlineOriginalGalleryDownload(self, detail):
         gid = int(detail.gallery.gid)
@@ -1213,6 +1439,12 @@ class MainWindow(FluentWindow):
                 existing_folder=existing_folder,
             )
         except Exception as error:
+            failed_record = self.userLibraryRepository.online_gallery_download(gid)
+            if (
+                failed_record is not None
+                and failed_record.download_mode != DOWNLOAD_MODE_STANDARD
+            ):
+                self._markManagedDownloadFailed(gid, str(error))
             self.mangaDetailInterface.setOriginalDownloadState(message=str(error))
 
     def prepareOnlineGalleryDownload(self, item, provider, cover_data=b""):
@@ -1229,7 +1461,10 @@ class MainWindow(FluentWindow):
             )
             return
         original = self.userLibraryRepository.gallery_original_state(gid)
-        if original is not None and original.state == ORIGINAL_STATE_ACTIVE:
+        if (
+            original is not None
+            and original.state == ORIGINAL_STATE_ACTIVE
+        ):
             return
         if self._downloadOwner(gid) is not None:
             InfoBar.info(
@@ -1286,6 +1521,19 @@ class MainWindow(FluentWindow):
             record,
             existing_comments,
         )
+        try:
+            record, folder, newly_registered = self._prepareOnlineDownloadTarget(
+                record,
+                build_online_detail_from_gallery(item),
+                cover_data,
+                target_label,
+                existing_comments,
+            )
+        except Exception as error:
+            self._markManagedDownloadFailed(gid, str(error))
+            self._showOnlineDownloadPreparationError(str(error))
+            return
+        self._announceOnlineDownloadRegistration(gid, newly_registered, folder)
         self._setCurrentDownloadState(
             gid,
             ONLINE_DOWNLOAD_QUEUED,
@@ -1296,6 +1544,16 @@ class MainWindow(FluentWindow):
 
         if cover_data:
             self.onlineGalleryCache.put_cover_data(site, item, cover_data)
+        label_text = target_label or self.tr("未分类")
+        InfoBar.success(
+            title=self.tr("已加入下载"),
+            content=self.tr("画廊将保存到分类：{}").format(label_text),
+            orient=Qt.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP_RIGHT,
+            duration=3000,
+            parent=self.onlineMangaInterface,
+        )
         cached_detail = self.onlineGalleryCache.get_detail(site, item)
         if cached_detail is not None:
             self._startPreparedOnlineGalleryDownload(
@@ -1358,16 +1616,6 @@ class MainWindow(FluentWindow):
             self._markManagedDownloadFailed(gid, str(error))
             self._showOnlineDownloadPreparationError(str(error))
             return
-        label_text = target_label or self.tr("未分类")
-        InfoBar.success(
-            title=self.tr("已加入下载"),
-            content=self.tr("画廊将保存到分类：{}").format(label_text),
-            orient=Qt.Horizontal,
-            isClosable=True,
-            position=InfoBarPosition.TOP_RIGHT,
-            duration=3000,
-            parent=self.onlineMangaInterface,
-        )
 
     def _failOnlineDownloadPreparation(self, worker, gid, message):
         gid = int(gid)
@@ -1393,7 +1641,10 @@ class MainWindow(FluentWindow):
         if self._isGalleryTrashed(gid):
             return
         original = self.userLibraryRepository.gallery_original_state(gid)
-        if original is not None and original.state == ORIGINAL_STATE_ACTIVE:
+        if (
+            original is not None
+            and original.state == ORIGINAL_STATE_ACTIVE
+        ):
             return
         update_record = self.userLibraryRepository.gallery_update(gid)
         if (
@@ -1507,6 +1758,10 @@ class MainWindow(FluentWindow):
             cfg.get(cfg.ehViewerMangaRoot),
             self.userLibraryRepository,
             action,
+            EhViewerDownloadRepository(
+                self.userLibraryRepository.database_path,
+                cfg.get(cfg.ehViewerMangaRoot),
+            ),
         )
         worker.signals.stageChanged.connect(
             lambda message: self._updateOriginalFileOperation(worker, gid, message)
@@ -1619,7 +1874,7 @@ class MainWindow(FluentWindow):
             detail, provider = self._createLocalOnlineContext(item)
             original_state = self.userLibraryRepository.gallery_original_state(gid)
             repository = EhViewerDownloadRepository(
-                cfg.get(cfg.ehViewerDatabase),
+                self.userLibraryRepository.database_path,
                 cfg.get(cfg.ehViewerMangaRoot),
             )
             worker = LocalGalleryPageDownloadWorker(
@@ -1633,6 +1888,11 @@ class MainWindow(FluentWindow):
                 original=(
                     original_state is not None
                     and original_state.state == ORIGINAL_STATE_ACTIVE
+                    and (
+                        page_index >= len(original_state.page_modes)
+                        or original_state.page_modes[page_index]
+                        != ORIGINAL_PAGE_MODE_BASE
+                    )
                 ),
             )
         except Exception as error:
@@ -1891,7 +2151,7 @@ class MainWindow(FluentWindow):
             provider,
             gallery,
             EhViewerDownloadRepository(
-                cfg.get(cfg.ehViewerDatabase),
+                self.userLibraryRepository.database_path,
                 cfg.get(cfg.ehViewerMangaRoot),
             ),
             self.userLibraryRepository,
@@ -2053,7 +2313,11 @@ class MainWindow(FluentWindow):
         if MainWindow._updateOwner(self, source_gid) is not None:
             return
         record = self.userLibraryRepository.gallery_update(source_gid)
-        if record is None or record.state == UPDATE_COMPLETED:
+        if (
+            record is None
+            or record.state == UPDATE_COMPLETED
+            or int(record.status) >= 6
+        ):
             return
         if record.state == UPDATE_WAITING_DOWNLOAD:
             item = next(
@@ -2081,7 +2345,7 @@ class MainWindow(FluentWindow):
                 provider=provider,
                 gallery_cache=self.onlineGalleryCache,
                 ehviewer_repository=EhViewerDownloadRepository(
-                    cfg.get(cfg.ehViewerDatabase),
+                    self.userLibraryRepository.database_path,
                     cfg.get(cfg.ehViewerMangaRoot),
                 ),
                 user_repository=self.userLibraryRepository,
@@ -2149,11 +2413,26 @@ class MainWindow(FluentWindow):
         self._refreshUpdateManager()
         self._syncCurrentGalleryUpdate(source_gid)
 
+    def deleteGalleryUpdate(self, source_gid):
+        source_gid = int(source_gid)
+        owner = self._updateOwner(source_gid)
+        if owner is not None:
+            owner._pendingUpdateDeletes.add(source_gid)
+            owner.pauseGalleryUpdate(source_gid)
+            return
+        self.userLibraryRepository.delete_gallery_update(source_gid)
+        self._pendingUpdateDeletes.discard(source_gid)
+        self._refreshUpdateManager()
+        self._syncCurrentGalleryUpdate(source_gid)
+        self._startNextGalleryUpdate()
+
     def _updateGalleryUpdateStage(self, worker, source_gid, message):
         if self._galleryUpdateWorkers.get(int(source_gid)) is not worker:
             return
         record = self.userLibraryRepository.gallery_update(source_gid)
-        if record is not None:
+        if record is not None and (
+            record.state != UPDATE_COMPLETED and int(record.status) < 6
+        ):
             self.userLibraryRepository.update_gallery_update_state(
                 source_gid,
                 UPDATE_RUNNING,
@@ -2168,6 +2447,10 @@ class MainWindow(FluentWindow):
         if self._galleryUpdateWorkers.get(int(source_gid)) is not worker:
             return
         record = self.userLibraryRepository.gallery_update(source_gid)
+        if record is None or record.state == UPDATE_COMPLETED or int(record.status) >= 6:
+            self._refreshUpdateManager()
+            self._syncCurrentGalleryUpdate(source_gid)
+            return
         self.userLibraryRepository.update_gallery_update_state(
             source_gid,
             UPDATE_RUNNING,
@@ -2191,6 +2474,9 @@ class MainWindow(FluentWindow):
             return
         self._galleryUpdateWorkers.pop(source_gid, None)
         self._galleryUpdateSpeeds.pop(source_gid, None)
+        if source_gid in self._pendingUpdateDeletes:
+            self._pendingUpdateDeletes.discard(source_gid)
+            self.userLibraryRepository.delete_gallery_update(source_gid)
         self._refreshUpdateManager()
         current = self.mangaDetailInterface.currentItem
         if current is not None and int(current.gid) == source_gid:
@@ -2204,6 +2490,9 @@ class MainWindow(FluentWindow):
             return
         self._galleryUpdateWorkers.pop(source_gid, None)
         self._galleryUpdateSpeeds.pop(source_gid, None)
+        if source_gid in self._pendingUpdateDeletes:
+            self._pendingUpdateDeletes.discard(source_gid)
+            self.userLibraryRepository.delete_gallery_update(source_gid)
         self._refreshUpdateManager()
         self.refreshRecycleBin()
         self._syncCurrentGalleryUpdate(source_gid)
@@ -2252,6 +2541,8 @@ class MainWindow(FluentWindow):
         if item is None or int(item.gid) != int(gid):
             return
         record = self.userLibraryRepository.gallery_update(gid)
+        if record is not None and int(record.status) >= 6:
+            record = None
         active_gids, speeds = self._activeUpdateState()
         self.mangaDetailInterface.setGalleryUpdateState(
             record,
@@ -2264,7 +2555,11 @@ class MainWindow(FluentWindow):
         if lookup is None:
             return False
         record = lookup(int(gid))
-        return record is not None and record.state != UPDATE_COMPLETED
+        return (
+            record is not None
+            and record.state != UPDATE_COMPLETED
+            and int(record.status) < 6
+        )
 
     def _failLocalMetadataSync(self, worker, message):
         if self._localMetadataSyncWorker is not worker:
@@ -2307,6 +2602,50 @@ class MainWindow(FluentWindow):
             timeout_seconds=cfg.get(cfg.onlineEhRequestTimeout),
         )
         return create_eh_online_provider(settings)
+
+    def _prepareOnlineDownloadTarget(
+        self,
+        record,
+        detail,
+        cover_data=b"",
+        target_label="",
+        comments=(),
+        existing_folder=None,
+    ):
+        """Create the visible local target before a worker gets a thread slot."""
+
+        previous_dirname = str(record.dirname or "")
+        if record.download_mode == DOWNLOAD_MODE_ORIGINAL_LOCAL:
+            if existing_folder is None:
+                raise FileNotFoundError("找不到本地画廊目录，无法下载原图")
+            root = Path(cfg.get(cfg.ehViewerMangaRoot)).resolve()
+            folder = Path(existing_folder).resolve()
+            dirname = str(folder.relative_to(root))
+        else:
+            repository = EhViewerDownloadRepository(
+                self.userLibraryRepository.database_path,
+                cfg.get(cfg.ehViewerMangaRoot),
+            )
+            dirname, folder = repository.prepare_download(detail, target_label)
+            thumbnail = bytes(cover_data or b"")
+            if thumbnail and not QImage.fromData(thumbnail).isNull():
+                repository.write_thumbnail(folder, thumbnail)
+        prepared = replace(record, dirname=dirname)
+        self.userLibraryRepository.save_online_gallery_download(
+            prepared,
+            comments,
+        )
+        return prepared, folder, not previous_dirname
+
+    def _announceOnlineDownloadRegistration(
+        self, gid, reload_library=False, folder=None
+    ):
+        gid = int(gid)
+        self.onlineMangaInterface.setGalleryDownloaded(gid)
+        refreshed = self._refreshLocalGalleryItem(gid, folder)
+        if reload_library and not refreshed:
+            self.localMangaInterface.reload()
+            self._publishSharedState("library_refresh")
 
     def _queueOnlineGalleryDownload(
         self,
@@ -2363,6 +2702,14 @@ class MainWindow(FluentWindow):
             record,
             detail.comments,
         )
+        record, folder, newly_registered = self._prepareOnlineDownloadTarget(
+            record,
+            detail,
+            cover_data,
+            target_label,
+            detail.comments,
+            existing_folder,
+        )
         if download_mode in {
             DOWNLOAD_MODE_ORIGINAL_DIRECT,
             DOWNLOAD_MODE_ORIGINAL_LOCAL,
@@ -2381,19 +2728,29 @@ class MainWindow(FluentWindow):
                     state=ORIGINAL_STATE_QUEUED,
                     completed_pages=record.completed_pages,
                     page_count=int(detail.page_count),
+                    fallback_to_standard=bool(
+                        existing_original is not None
+                        and existing_original.fallback_to_standard
+                    ),
+                    page_modes=(
+                        existing_original.page_modes
+                        if existing_original is not None
+                        else ()
+                    ),
                     metadata=record.metadata,
                     created_at=(
                         existing_original.created_at if existing_original else 0
                     ),
                 )
             )
+        self._announceOnlineDownloadRegistration(gid, newly_registered, folder)
         worker = OnlineGalleryDownloadWorker(
             provider=provider,
             detail=detail,
             cover_data=cover_data,
             gallery_cache=self.onlineGalleryCache,
             ehviewer_repository=EhViewerDownloadRepository(
-                cfg.get(cfg.ehViewerDatabase),
+                self.userLibraryRepository.database_path,
                 cfg.get(cfg.ehViewerMangaRoot),
             ),
             user_repository=self.userLibraryRepository,
@@ -2441,8 +2798,8 @@ class MainWindow(FluentWindow):
             )
         )
         worker.signals.completed.connect(
-            lambda completed_gid, _folder: self._finishOnlineGalleryDownload(
-                worker, completed_gid
+            lambda completed_gid, folder: self._finishOnlineGalleryDownload(
+                worker, completed_gid, folder
             )
         )
         worker.signals.failed.connect(
@@ -2732,12 +3089,13 @@ class MainWindow(FluentWindow):
             )
         self._refreshDownloadManager()
 
-    def _registerDownloadedGallery(self, worker, gid, _folder):
+    def _registerDownloadedGallery(self, worker, gid, folder):
         gid = int(gid)
         if self._onlineDownloadWorkers.get(gid) is not worker:
             return
         self.onlineMangaInterface.setGalleryDownloaded(gid)
-        self.localMangaInterface.reload()
+        if not self._refreshLocalGalleryItem(gid, folder):
+            self.localMangaInterface.reload()
 
     def _refreshPreparedLocalGallery(self, worker, gid, _folder):
         gid = int(gid)
@@ -2775,7 +3133,7 @@ class MainWindow(FluentWindow):
             page_count,
         )
 
-    def _finishOnlineGalleryDownload(self, worker, gid):
+    def _finishOnlineGalleryDownload(self, worker, gid, folder=None):
         if self._onlineDownloadWorkers.get(int(gid)) is not worker:
             return
         self._onlineDownloadWorkers.pop(int(gid), None)
@@ -2795,11 +3153,10 @@ class MainWindow(FluentWindow):
             gid, ONLINE_DOWNLOAD_COMPLETED, total, total
         )
         self._refreshDownloadManager()
-        if download_mode == DOWNLOAD_MODE_ORIGINAL_LOCAL:
+        if not self._refreshLocalGalleryItem(gid, folder):
             self.localMangaInterface.reload()
+        if download_mode == DOWNLOAD_MODE_ORIGINAL_LOCAL:
             self.mangaDetailInterface.reloadCurrentMangaPages()
-        else:
-            self.localMangaInterface.reload(reveal_gid=gid)
         self._syncCurrentDownload(gid)
         update_record = self.userLibraryRepository.gallery_update(gid)
         if (
@@ -2828,7 +3185,8 @@ class MainWindow(FluentWindow):
         else:
             self._syncCurrentDownload(gid, message)
         self._refreshDownloadManager()
-        self.localMangaInterface.reload()
+        if not self._refreshLocalGalleryItem(gid):
+            self.localMangaInterface.reload()
 
     def _pauseOnlineGalleryDownload(self, worker, gid):
         if self._onlineDownloadWorkers.get(int(gid)) is not worker:
@@ -2844,7 +3202,8 @@ class MainWindow(FluentWindow):
         else:
             self._syncCurrentDownload(gid)
         self._refreshDownloadManager()
-        self.localMangaInterface.reload()
+        if not self._refreshLocalGalleryItem(gid):
+            self.localMangaInterface.reload()
 
     def _syncOnlineDownloadState(self, detail):
         gid = int(detail.gallery.gid)
@@ -3074,17 +3433,31 @@ class MainWindow(FluentWindow):
             self.userLibraryRepository.delete_gallery_original_state(gid)
         self._onlineDownloadSpeeds.pop(gid, None)
         self._refreshDownloadManager()
-        self.localMangaInterface.reload()
+        if not self._refreshLocalGalleryItem(gid):
+            self.localMangaInterface.reload()
 
     def _refreshDownloadManager(self, publish=True):
         active_gids, speeds = self._activeDownloadState()
+        records = self.userLibraryRepository.incomplete_online_gallery_downloads()
         self.downloadManagerInterface.setRecords(
-            self.userLibraryRepository.incomplete_online_gallery_downloads(),
+            records,
             active_gids,
             speeds,
         )
+        self._syncOnlineGalleryDownloadMarkers(records)
         if publish:
             self._publishSharedState("downloads")
+
+    def _syncOnlineGalleryDownloadMarkers(self, incomplete_records=None):
+        if incomplete_records is None:
+            incomplete_records = (
+                self.userLibraryRepository.incomplete_online_gallery_downloads()
+            )
+        gids = {
+            int(item.gid) for item in getattr(self, "_libraryItems", ())
+        }
+        gids.update(int(record.gid) for record in incomplete_records)
+        self.onlineMangaInterface.setDownloadedGids(gids)
 
     def _updateOnlineDownloadConcurrency(self, value):
         coordinator = getattr(self, "windowCoordinator", None)
@@ -3340,7 +3713,17 @@ class MainWindow(FluentWindow):
             return True
         if current is self.mangaDetailInterface:
             if self.mangaDetailInterface.isOnlineGallery:
+                history = getattr(self, "_detailNavigationHistory", None)
+                if history:
+                    entry = history.pop()
+                    if entry[0] == "online":
+                        self.openOnlineMangaDetail(*entry[1:])
+                    else:
+                        self.openMangaDetail(entry[1])
+                    return True
                 self._cancelOnlineDetailLoad()
+                if history is not None:
+                    history.clear()
                 self._setNavigationMode("manga", switch_page=False)
                 self.switchTo(self.onlineMangaInterface)
                 self.navigationInterface.setCurrentItem(
