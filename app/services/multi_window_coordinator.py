@@ -1,5 +1,9 @@
 from PySide6.QtCore import QObject, QThreadPool, Signal
 
+from app.services.gallery_page_download_scheduler import (
+    GalleryPageDownloadScheduler,
+)
+
 
 class MultiWindowCoordinator(QObject):
     """Own process-wide workers and relay state changes between windows."""
@@ -12,6 +16,7 @@ class MultiWindowCoordinator(QObject):
         self._startupRecoveryClaimed = False
         self.onlineDownloadThreadPool = QThreadPool(self)
         self.onlineDownloadThreadPool.setMaxThreadCount(3)
+        self.galleryPageDownloadScheduler = GalleryPageDownloadScheduler(6, self)
         self.downloadRegistrationThreadPool = QThreadPool(self)
         self.downloadRegistrationThreadPool.setMaxThreadCount(1)
         self.galleryUpdateThreadPool = QThreadPool(self)
@@ -49,6 +54,9 @@ class MultiWindowCoordinator(QObject):
         self.onlineDownloadThreadPool.setMaxThreadCount(
             min(3, max(1, int(count)))
         )
+
+    def setPageDownloadThreads(self, count):
+        self.galleryPageDownloadScheduler.setThreadCount(count)
 
     def downloadOwner(self, gid):
         gid = int(gid)

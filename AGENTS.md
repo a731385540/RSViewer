@@ -1,6 +1,6 @@
 # RSViewer 项目维护指南
 
-本文档面向未来接手本仓库的 AI 助手和开发者。开始任何工作前，请先完整阅读本文、`README.md` 和 `CHANGELOG.md`，然后执行 `git status --short`。本文描述的是 2026-08-17 的工作区现状；若代码与本文冲突，以代码为准，并在本次修改中同步修正文档。
+本文档面向未来接手本仓库的 AI 助手和开发者。开始任何工作前，请先完整阅读本文、`README.md` 和 `CHANGELOG.md`，然后执行 `git status --short`。本文描述的是 2026-08-18 的工作区现状；若代码与本文冲突，以代码为准，并在本次修改中同步修正文档。
 
 ## 1. 项目背景与边界
 
@@ -65,6 +65,7 @@ RSViewer/
    ├─ services/search_history.py     # 本地/在线共享的持久化搜索历史服务
    ├─ services/manga_classification_index.py # 分类/播放列表/归类到 GID 的内存倒排索引
    ├─ services/multi_window_coordinator.py # 多窗口事件总线、共享线程池与任务所有权
+   ├─ services/gallery_page_download_scheduler.py # 活动画廊共用的公平页面下载调度器
    ├─ services/ehviewer_database_transfer.py # 旧库只读导入与兼容库原子导出
    ├─ services/library_organizer.py  # 未登记本地目录扫描、同步与回收站边界
    ├─ services/gallery_trash.py      # 画廊软删除、原位还原与永久清理事务
@@ -131,6 +132,7 @@ RSViewer/
 - `onlineEhViewMode`：在线结果的默认视图，支持 `card`、`list` 与 `extended`；`card`/`list` 共用站点 Compact 数据，只有切入或切出 `extended` 时才分别通过原列表页 `inline_set=dm_l` / `inline_set=dm_e` 同步远端账户模式并重取字段。
 - `onlineEhThumbnailConcurrency`：在线封面专用线程池的最大并发请求数，支持 1/2/4/6/8/12，默认 6。
 - `onlineEhDownloadConcurrency`：同时运行的画廊下载任务数，支持 1–3，默认 2；修改后即时更新下载线程池，运行时也必须硬限制为最多 3。
+- `onlineEhDownloadThreads`：所有活动画廊共用的页面图片下载线程数，支持 1–6，默认 6；它不控制画廊任务数，修改后即时更新进程级页面调度器。
 - `onlineEhDownloadLabel`：新建在线下载条目的默认 EhViewer 分类，空字符串表示未分类；设置页选项必须来自当前 `DOWNLOAD_LABELS`，已有 GID 继续下载时不得覆盖原 `LABEL`。
 - `onlineEhThumbnailCacheHours`：在线封面本地缓存有效期，支持 1 小时至 30 天，默认 7 天。
 - `readerBackgroundColor`：阅读画布背景色。
@@ -192,11 +194,11 @@ RSViewer 自有 SQLite 使用 `PRAGMA user_version` 执行可重复迁移。版�
 
 在线详情必须沿用当前列表页 provider 的同一 `requests.Session`，直接 GET 对应 `/g/{gid}/{token}/` HTML，并在后台解析完整元数据、标签、20 张缩略预览及 `.c1` 评论。详情页 `#gnd` 中同站 `/g/{gid}/{token}/` 链接表示当前画廊存在更新版本，是判断“旧父画廊”的唯一依据；`Parent` 字段只表示当前画廊的上游版本，不得单独据此反向判旧。评论正文的 `<a href>` 只有解析为精确 EH/EX HTTPS `/g/{gid}/{token}/` 地址时才转换为 `OnlineGalleryLink`，相对链接先基于当前画廊 URL 解析，外站、搜索页、单图页、缺 token、带 query/fragment 的目标都不能成为应用内按钮。后续预览分页直接请求画廊 `?p=N` HTML；EH/EX 的多个预览可能共享同一张横向精灵图，必须保留每个节点的 CSS `width`、`height` 和 `background-position`，下载共享图片后按各自区域裁剪，不能把整张精灵图直接交给预览控件。每个预览还必须保留 `/s/{page-token}/{gid}-{page}` 中的 page token，下载任务据此生成 EhViewer `VERSION2` sidecar。在线阅读和基础下载先请求该 `/s` 单图 HTML，再读取其中 `#img` 的站点展示图；原图下载从同一单图 HTML 提取 `fullimg` 链接。原图链接只允许当前 EH/EX 站点，并必须严格匹配当前 GID 与一基页码；合法单图页不存在链接时必须抛出专用 `OriginalImageUnavailableError`，供原图任务持久降级，网络、超时、无效页面或异域链接仍是普通失败，绝不能误判为可降级。所有链路均不调用 API。请求前严格校验当前站点、GID、token、page token、单图页页码及 EH/EX/ehgt/H@H 图片主机；当前评论区只读，不实现发表评论或投票。
 
-`EhOnlineProvider` 是在线爬虫的稳定边界。UI 将 `OnlineGalleryQuery(keyword, seek_date, cursor, page_number, filters)` 交给 provider；基类先调用 `fetch_page()`，再调用可覆盖的 `filter_items()`，最后返回统一的 `OnlineGalleryPage`。`seek_date` 为空或严格使用 `YYYY-MM-DD`，由 `eh_tool_refactored.py` 的原生 Seek 定位；同时存在关键词时必须先加载关键词列表建立含 `f_search` 的导航上下文，再执行 Seek。`create_eh_online_provider()` 当前返回 `RefactoredEhOnlineProvider`，它只适配用户提供的根目录 `eh_tool_refactored.py`：沿用 `requests.Session`、EH/EX HTML 列表页、`f_search`、页面生成的 next/prev URL 以及 BeautifulSoup+lxml 的多显示模式解析，不得擅自替换成其他 API 或站点接口。脚本输出的 gid/token、URL、标题、分类、封面、上传时间、页数、上传者、评分、源显示模式和分命名空间标签转换为领域模型；评分必须从文本或 EH 半星精灵图的 `background-position` 转换为 `0–5` 数值，绝不能把 CSS 样式传给 UI。缩略图仍通过同一会话下载。
+`EhOnlineProvider` 是在线爬虫的稳定边界。UI 将 `OnlineGalleryQuery(keyword, seek_date, cursor, filters)` 交给 provider；基类先调用 `fetch_page()`，再调用可覆盖的 `filter_items()`，最后返回统一的 `OnlineGalleryPage`。EH/EX 列表没有稳定的数字页码，领域查询和在线列表 UI 均不得伪造“第 N 页”；“上一页”“下一页”按钮必须分别且只根据本次 `OnlineGalleryPage.previous_cursor` / `next_cursor` 是否存在来启用，点击后直接请求对应响应游标。尤其日期 Seek 结果不是第一页，若响应同时提供新旧两个方向就必须同时允许翻页。`seek_date` 为空或严格使用 `YYYY-MM-DD`，由 `eh_tool_refactored.py` 的原生 Seek 定位；同时存在关键词时必须先加载关键词列表建立含 `f_search` 的导航上下文，再执行 Seek。`create_eh_online_provider()` 当前返回 `RefactoredEhOnlineProvider`，它只适配用户提供的根目录 `eh_tool_refactored.py`：沿用 `requests.Session`、EH/EX HTML 列表页、`f_search`、页面生成的 next/prev URL 以及 BeautifulSoup+lxml 的多显示模式解析，不得擅自替换成其他 API 或站点接口。脚本输出的 gid/token、URL、标题、分类、封面、上传时间、页数、上传者、评分、源显示模式和分命名空间标签转换为领域模型；评分必须从文本或 EH 半星精灵图的 `background-position` 转换为 `0–5` 数值，绝不能把 CSS 样式传给 UI。缩略图仍通过同一会话下载。
 
 `EhOnlineSettings` 统一提供站点基址、规范化 Cookie、代理模式/映射和请求超时。Cookie 可粘贴完整 `ipb_member_id=...; ipb_pass_hash=...; igneous=...` 字符串，单独裸 token 按 `igneous` 兼容，并从 settings 的 `repr` 中排除。系统代理由标准库发现；Windows 把单一无 scheme 代理端点展开为同地址的 `http://` 与 `https://` 时，必须规范化为同一个 HTTP CONNECT 代理供 `requests` 使用。直连关闭 session 环境代理，手动模式验证并补全 HTTP(S) URL。源码中不得硬编码 Cookie 或本机代理；`eh_tool_refactored.py` 的全局默认凭据和代理必须保持为空，运行值仅由设置注入。列表翻页 URL 只允许当前 EH/EX 主机，缩略图只允许 EH/EX 与 `ehgt.org` HTTPS 主机。
 
-`OnlineMangaInterface` 为 `ehentai` 与 `exhentai` 分别维护独立的 `OnlineSiteState` 内存容器，保存搜索词、日期定位、当前页、翻页游标历史、滚动位置及最近 64 个页面结果。切换站点先恢复其容器，容器为空才请求该站首页；工具栏“刷新”始终绕过页面内存缓存重取当前页。搜索栏旁的日历按钮展开日期定位面板，链接图标按钮展开独立画廊网址输入框；网址必须通过统一的严格 EH/EX 画廊地址解析，取得 GID/token 后忽略输入地址所属站点，按当前 `_current_site` 重新生成目标 URL，并复用当前站点 provider 打开详情。结果支持 `card`、`list` 与 `extended` 三种视图，顶部图标按钮按该顺序循环且图标表示点击后的目标布局。`list` 是与本地标题列表同为 116px 高的无封面行，只展示标题、分类、上传者和页数；Card/List 只重建当前内存页，不得请求封面或切换远端模式。切入或切出 Extended 才由 `OnlineSearchWorker` 调用 `set_display_mode()`，沿用 `eh_tool_refactored.py` 会话请求 `inline_set=dm_l/dm_e` 并重取当前关键词、日期或游标页。当前页已成功加载的封面必须跨卡片重建复用，不得重新读取磁盘或下载。三类卡片右键菜单都提供“下载”，只允许鼠标左键触发详情；每张卡片通过 GID 判断本地是否已有画廊，命中时在左上角显示绿色下载图标。默认 Card 显示大封面、类型/评分、悬停滚动长标题、发布时间/上传者/页数；Extended 使用横向信息行和可换行标签，Minimal/Minimal+ 标签为空时显示缺省说明。类别色块统一使用 EH ct1–cta 渐变。列表请求使用独立搜索线程池，封面按单项任务提交到由 `onlineEhThumbnailConcurrency` 控制的专用线程池；`OnlineThumbnailCache` 按站点保存过期磁盘缓存。
+`OnlineMangaInterface` 为 `ehentai` 与 `exhentai` 分别维护独立的 `OnlineSiteState` 内存容器，保存搜索词、日期定位、当前响应游标、滚动位置及最近 64 个页面结果。切换站点先恢复其容器，容器为空才请求该站首页；工具栏“刷新”始终绕过页面内存缓存重取当前游标结果。搜索栏旁的日历按钮展开日期定位面板，链接图标按钮展开独立画廊网址输入框；网址必须通过统一的严格 EH/EX 画廊地址解析，取得 GID/token 后忽略输入地址所属站点，按当前 `_current_site` 重新生成目标 URL，并复用当前站点 provider 打开详情。结果支持 `card`、`list` 与 `extended` 三种视图，顶部图标按钮按该顺序循环且图标表示点击后的目标布局。`list` 是与本地标题列表同为 116px 高的无封面行，只展示标题、分类、上传者和页数；Card/List 只重建当前内存结果，不得请求封面或切换远端模式。切入或切出 Extended 才由 `OnlineSearchWorker` 调用 `set_display_mode()`，沿用 `eh_tool_refactored.py` 会话请求 `inline_set=dm_l/dm_e` 并重取当前关键词、日期或游标结果。当前结果已成功加载的封面必须跨卡片重建复用，不得重新读取磁盘或下载。三类卡片右键菜单都提供“下载”，只允许鼠标左键触发详情；每张卡片通过 GID 判断本地是否已有画廊，命中时在左上角显示绿色下载图标。默认 Card 显示大封面、类型/评分、悬停滚动长标题、发布时间/上传者/页数；Extended 使用横向信息行和可换行标签，Minimal/Minimal+ 标签为空时显示缺省说明。类别色块统一使用 EH ct1–cta 渐变。列表请求使用独立搜索线程池，封面按单项任务提交到由 `onlineEhThumbnailConcurrency` 控制的专用线程池；`OnlineThumbnailCache` 按站点保存过期磁盘缓存。
 
 在线列表点击下载后必须立即在内存中占用该 GID 并标绿；SQLite 任务写入、兼容表更新、目录创建、封面落盘和本地条目读取必须进入 `MultiWindowCoordinator` 持有的共享单线程预登记池，禁止在 GUI 线程执行。预登记成功后再获取完整详情并进入统一下载 Worker，详情请求和下载线程排队期间均须保留可恢复任务记录。
 
@@ -204,13 +206,13 @@ RSViewer 自有 SQLite 使用 `PRAGMA user_version` 执行可重复迁移。版�
 
 列表右键或详情点击下载时必须在提交详情 Worker/下载 Worker 前同步完成预登记：先保存当前已知的标题、GID、token、分类、页数等扩展任务和 EhViewer 兼容行，确定并创建目录，有可解码封面数据时原子写入 `.thumb`；不得为不完整页面 token 伪造 `.ehviewer`。在线绿色图标消费本地资源 GID 与全部未完成下载任务 GID 的并集，并通过 `downloads` 事件跨窗口同步，因此任务即使仍在排队或详情获取失败，也保持“已加入下载”的明确标记。后续 Worker 必须复用同一目录并以完整详情覆盖补齐元数据、评论、sidecar 和图片。
 
-在线下载由所有任务共享的专用 `QThreadPool` 执行，`onlineEhDownloadConcurrency` 的 1–3 只表示同时运行的画廊 Worker 数量，任何配置或旧值都不得让运行时超过 3；每个 `OnlineGalleryDownloadWorker` 内部仍按页面单线程顺序请求，不能误解或改成每个任务各自创建 N 个线程。任务顺序固定为：自有库 EhViewer 兼容元数据、RSViewer 扩展任务和评论、封面、全部预览/page token、`.ehviewer`，最后逐页图片。下载管理页提供单项及“全部开始/全部暂停”，批量开始只提交当前未活动记录，批量暂停必须覆盖详情准备、sidecar 准备和图片下载阶段。Worker 在每张图片请求结束后用图片字节数/请求耗时计算瞬时速度并做指数平滑，任务卡片显示各自速度，标题区汇总活动任务速度；速度仅存内存，暂停、失败、完成或删除时清除，不得写入 SQLite。`EhViewerDownloadRepository` 只能事务 upsert 既有 `DOWNLOADS`、`DOWNLOAD_DIRNAME`、`Gallery_Tags` 内容，必须保留已有 `LABEL`、`TIME` 与 `ARCHIVE_URI`，并在写前校验所需表列；兼容表 DDL 只属于 `UserLibraryRepository` migration，业务 Repository 不得执行 DDL。新 GID 使用任务记录中的 `download_label` 写入 `LABEL`，非空值必须先确认存在于 `DOWNLOAD_LABELS`，无效分类应在创建目录前失败；已有 GID 无论默认设置如何都保留原 `LABEL`。本地详情的元数据同步只更新已有 GID 的兼容字段与 `Gallery_Tags`，必须保留 `STATE`、`LEGACY`、`LABEL`、`TIME`、`ARCHIVE_URI`，且不得创建下载目录或下载页面图片。目录优先复用 `DOWNLOAD_DIRNAME`，否则使用现有同 GID 前缀目录，再否则按 EhViewer 的 `gid-title` 规则清理 Windows 非法字符。
+在线下载的画廊任务由所有窗口共享的专用 `QThreadPool` 执行，`onlineEhDownloadConcurrency` 的 1–3 只表示同时运行的画廊 Worker 数量，任何配置或旧值都不得让运行时超过 3；例如配置为 1 并加入 10 个画廊时，只允许 1 个画廊执行，另外 9 个必须排队。页面图片请求使用 `MultiWindowCoordinator` 持有的单一 `GalleryPageDownloadScheduler`，所有活动画廊公平共用 `onlineEhDownloadThreads` 配置的 1–6 个线程；不得给每个画廊各建一组页面线程，也不得把页面线程数误用为画廊任务数。只有一个活动画廊且页面线程配置为 6 时，该画廊应能同时下载最多 6 页。任务顺序固定为：自有库 EhViewer 兼容元数据、RSViewer 扩展任务和评论、封面、全部预览/page token、`.ehviewer`，最后并发下载缺失图片；逐页文件仍独立原子写入，数据库断点、进度信号和最终状态由画廊 Worker 串行汇总。下载管理页提供单项及“全部开始/全部暂停”，批量开始只提交当前未活动记录，批量暂停必须覆盖详情准备、sidecar 准备和图片下载阶段。Worker 汇总各活动页面线程的速度，任务卡片显示画廊总速度，标题区再汇总全部活动画廊速度；速度仅存内存，暂停、失败、完成或删除时清除，不得写入 SQLite。`EhViewerDownloadRepository` 只能事务 upsert 既有 `DOWNLOADS`、`DOWNLOAD_DIRNAME`、`Gallery_Tags` 内容，必须保留已有 `LABEL`、`TIME` 与 `ARCHIVE_URI`，并在写前校验所需表列；兼容表 DDL 只属于 `UserLibraryRepository` migration，业务 Repository 不得执行 DDL。新 GID 使用任务记录中的 `download_label` 写入 `LABEL`，非空值必须先确认存在于 `DOWNLOAD_LABELS`，无效分类应在创建目录前失败；已有 GID 无论默认设置如何都保留原 `LABEL`。本地详情的元数据同步只更新已有 GID 的兼容字段与 `Gallery_Tags`，必须保留 `STATE`、`LEGACY`、`LABEL`、`TIME`、`ARCHIVE_URI`，且不得创建下载目录或下载页面图片。目录优先复用 `DOWNLOAD_DIRNAME`，否则使用现有同 GID 前缀目录，再否则按 EhViewer 的 `gid-title` 规则清理 Windows 非法字符。
 
 图片文件使用一基、八位十进制页码；`.ehviewer` 使用 `VERSION2`、gallery token、预览分页参数和每页 page token，不能把 page token 写入数据库。所有文件先写同目录临时文件再原子替换；只有新图片验证可解码并成功替换后才可删除同页旧后缀。开始或继续任务时必须校验现有图片，跳过有效页并重下缺失/损坏页；单页网络请求短暂失败最多重试三次，取消、失败和应用关闭均保留目录、自有任务和评论，下次从断点继续。逐页落盘事件只允许更新对应预览格、阅读缓存、下载页数和速度，不得重绘详情元数据或重建整个当前预览分页。若中断发生在兼容 `DOWNLOADS` 条目、下载目录或完整 `.ehviewer` 创建之前，继续任务必须从 RSViewer 自有下载记录恢复站点与 GID/token，后台重新请求详情，然后重新执行兼容元数据、目录和 sidecar 初始化，不能依赖本地资源列表先出现该 GID。兼容 `DOWNLOADS.STATE` 使用 EhViewer 的 downloading/finish/failed 数值，扩展任务表区分 queued/downloading/paused/failed/completed。预登记、外部注册、暂停、失败、完成和任务删除都应按单个 GID 读取并增量 upsert 本地条目，通过 `library_item` 事件同步其他窗口；正常路径不得整库 `reload()`，不得清空搜索、切到显示全部、改变当前分类/播放列表/归类、页码或滚动位置。只有单条读取失败时可退回普通刷新。
 
 原图下载继续复用同一下载线程池和逐页原子写入规则。全新在线画廊使用 `original_direct`，下载内容直接写根目录并在完成后进入 `active`；已经存在本地目录时必须使用 `original_local`，只写 `original/`，不得覆盖根目录基础图或重写 `.ehviewer`。完整暂存后详情提供标准/原图预览与阅读来源切换。每页先按原图接口请求；只有合法单图页明确不存在原图目标时，才先把该页模式持久化为 `base`，随后下载基础图。网络、超时、无效页面或异域链接必须继续按失败/重试处理，不能误判为基础图回退。断点恢复只跳过已校验且已有页模式的文件；未知模式文件必须重下，避免崩溃发生在文件落盘与页模式 checkpoint 之间时误认内容。`original_local` 的原图和基础回退页都暂存于 `original/`，完成后保持 `staged`，允许正常预览和原图替换。流式图片请求的连接与响应体无数据超时均不得超过 15 秒；超时必须关闭 response、清除陈旧速度并进入统一的最多三次重试，不能让任务只能依靠手动暂停恢复。列表和详情等非流式请求仍使用用户配置的请求超时。`OriginalGalleryFileWorker` 先校验 `original/` 的完整下载集合，再持久化 `replacing_base` 并把根目录数字页移到 `history/del/`，随后持久化 `replacing_original` 并把暂存内容提升到根目录，最终标记 `active`；每次恢复都以数据库阶段和实际文件共同判断。压缩图备份绝不自动删除，只有用户二次确认后进入 `cleaning` 并清理精确的 `history/del/`。非 active 的原图阶段不得启动画廊版本更新；active 原图下载画廊必须保留 `image_mode=original`。更新时按 page token 迁移已存在页的类型，新页面继续优先调用原图接口，缺失原图的单页回退基础图并写入目标 `target_page_modes` checkpoint。
 
-下载 Worker 在兼容条目、目录和封面完成后必须上报本地注册事件，主窗口据此按 GID 增量 upsert 本地库并即时更新在线卡片标记；新条目不符合当前分类或搜索时不得重建当前卡片页。完整 `.ehviewer` 写入后还须单独上报 sidecar 就绪事件，让已打开的同 GID 本地详情重新读取总页数和 page token。续传或补齐任务每成功原子写入一页后，Worker 必须上报真实页索引和文件路径；当前本地详情把路径增量合并到 `MangaItem` 并只替换命中的预览格，已打开的本地阅读器同步更新对应全局页码。不能只更新进度数字或只在最终完成时重载资源列表，否则本地列表、在线标记、详情与阅读器会分别持有不同阶段的旧状态。图片响应流按 0.5 秒区间上报速度，标准下载、原图下载、单页补图和版本更新共用该节奏；页完成时仍须补发末段速度，重试、暂停、失败和完成时清除旧值。Worker 在兼容元数据初始化之前暂停或失败时，也必须更新已提前创建的 RSViewer 自有任务记录，不能让非活动任务残留为 queued/downloading。
+下载 Worker 在兼容条目、目录和封面完成后必须上报本地注册事件，主窗口据此按 GID 增量 upsert 本地库并即时更新在线卡片标记；新条目不符合当前分类或搜索时不得重建当前卡片页。完整 `.ehviewer` 写入后还须单独上报 sidecar 就绪事件，让已打开的同 GID 本地详情重新读取总页数和 page token。续传或补齐任务每成功原子写入一页后，Worker 必须上报真实页索引和文件路径；当前本地详情把路径增量合并到 `MangaItem` 并只替换命中的预览格，已打开的本地阅读器同步更新对应全局页码。不能只更新进度数字或只在最终完成时重载资源列表，否则本地列表、在线标记、详情与阅读器会分别持有不同阶段的旧状态。图片响应流约每 1 秒上报一次速度并在页完成时补发末段速度；活动任务尚未取得首个有效值时显示“测速中”，取得后在页面切换和重试间隙保留最近一次有效速度，禁止因内部汇总短暂归零而反复切回“测速中”。暂停、失败和完成时再由主窗口清除速度。Worker 在兼容元数据初始化之前暂停或失败时，也必须更新已提前创建的 RSViewer 自有任务记录，不能让非活动任务残留为 queued/downloading。
 
 ### `app/workers/gallery_update_worker.py` 与更新管理
 
@@ -234,7 +236,7 @@ RSViewer 自有 SQLite 使用 `PRAGMA user_version` 执行可重复迁移。版�
 
 ### `app/view/local_manga_interface.py`
 
-本地资源页标签栏默认隐藏，通过工具栏“标签”按钮展开；其中“分类”“播放列表”“归类”三个面板互斥，各自带新增加号，顶部另有“显示全部漫画”。分隔条可拖动但标签栏最多占页面宽度 30%；使用 `FluentSplitterHandle` 提供 7 像素命中区和 1 像素主题色细线，透明度规则应与 `NavigationResizeHandle` 一致，不得恢复 Qt 默认实心手柄。展开、收起或拖动后必须等待 `QSplitter` 几何更新并主动调用卡片重排，不能依赖主窗口 `resizeEvent`。分类为单选并记忆选择，默认未分类；播放列表和树状归类为多对多。三个树都提供右键删除并必须二次确认；未分类不可删除，分类删除时关联漫画先回到未分类，归类父节点删除会级联整个子树。播放列表按持久顺序展示，提供播放、继续上一次，以及拖拽、上下移动、置顶/置底编排；编排保存必须绑定打开窗口时的播放列表 ID。
+本地资源页标签栏默认隐藏，通过工具栏“标签”按钮展开；其中“分类”“播放列表”“归类”三个面板互斥，各自带新增加号，顶部另有“显示全部漫画”。页面标题必须跟随当前筛选：分类和播放列表显示所选名称，树状归类显示 `父级/子级/...` 完整路径，“显示全部漫画”显示“本地资源”；收藏和历史集合页继续保留各自标题。分隔条可拖动但标签栏最多占页面宽度 30%；使用 `FluentSplitterHandle` 提供 7 像素命中区和 1 像素主题色细线，透明度规则应与 `NavigationResizeHandle` 一致，不得恢复 Qt 默认实心手柄。展开、收起或拖动后必须等待 `QSplitter` 几何更新并主动调用卡片重排，不能依赖主窗口 `resizeEvent`。分类为单选并记忆选择，默认未分类；播放列表和树状归类为多对多。三个树都提供右键删除并必须二次确认；未分类不可删除，分类删除时关联漫画先回到未分类，归类父节点删除会级联整个子树。播放列表按持久顺序展示，提供播放、继续上一次，以及拖拽、上下移动、置顶/置底编排；编排保存必须绑定打开窗口时的播放列表 ID。
 
 搜索栏支持按钮、全局快捷键和可配置的鼠标悬停展开。悬停模式不得主动抢占键盘焦点；鼠标离开搜索按钮与搜索输入区域后延迟检查，只有搜索词为空才自动收起，有内容必须保持。悬停临时展开后点击搜索按钮会切换为常驻并聚焦输入框，再点击一次只解除常驻，鼠标随后移出时恢复悬停收起逻辑；按钮从隐藏状态打开、全局快捷键和“搜索相似画廊”均属于显式常驻。关闭悬停配置后不得响应鼠标进入，显式常驻不受该配置影响。
 
@@ -425,7 +427,7 @@ NAS 第一阶段按普通文件系统路径处理，包括已挂载盘符和可�
 - 在线画廊卡片在应用内打开共享详情页；详情 Worker 复用当前 provider 会话直接请求同站画廊 HTML，展示完整元数据、标签、20 张一页的缩略预览与只读评论。点击预览或“开始在线阅读”后复用漫画阅读器，按需解析 `/s` 单图 HTML 并加载 `#img` 站点展示图，返回时恢复在线详情及列表状态。
 - 在线详情页支持后台下载、暂停和断点继续：任务在自有 SQLite 中写兼容元数据、评论和额外信息，再收集全部 page token，按 EhViewer 规则生成目录、`.thumb`、`VERSION2` `.ehviewer` 和八位页码站点展示图；已有有效页会跳过，缺失或损坏页会补下，完成后自动刷新本地库。
 - 在线详情、预览和阅读使用最近访问 20 个画廊的线程安全内存 LRU；详情、封面、已访问的预览分页与缩略图可直接复用，阅读图片每画廊最多缓存 5 页并受 128 MiB 总预算约束。
-- 在线资源已把用户提供的 `eh_tool_refactored.py` 接入 provider 和后台 UI/Worker：支持关键词、日期 Seek、next/prev URL 翻页、多显示模式元数据解析和封面加载；两个站点各自保存关键词、日期、当前页、翻页历史、滚动位置和最近 64 页结果。在线结果支持 Card、116px 精简 List 与 Extended 三种本地视图；List 不加载封面，Card/List 互切不产生网络请求。封面使用可配置并发线程池及按站点隔离、可配置过期时间的磁盘缓存，浅色/深色三类结果卡片均纳入 Fluent QSS。
+- 在线资源已把用户提供的 `eh_tool_refactored.py` 接入 provider 和后台 UI/Worker：支持关键词、日期 Seek、next/prev URL 翻页、多显示模式元数据解析和封面加载；两个站点各自保存关键词、日期、当前响应游标、滚动位置和最近 64 个结果。列表不显示虚构数字页码，上一页/下一页只消费当前响应对应的游标。在线结果支持 Card、116px 精简 List 与 Extended 三种本地视图；List 不加载封面，Card/List 互切不产生网络请求。封面使用可配置并发线程池及按站点隔离、可配置过期时间的磁盘缓存，浅色/深色三类结果卡片均纳入 Fluent QSS。
 - 快捷键设置采用点击捕获交互，支持单键和 `Ctrl+S` 等组合键即时确认，`Esc` 取消。
 - 大型库采用列表元数据与详情页面两级惰性加载；21,389 部真实漫画列表读取约 0.42 秒，加入自有进度批量读取约 0.483 秒，完整首屏约 1.33 秒。
 - RSViewer 自有 SQLite v19 同时保存完整 EhViewer v7 兼容画廊索引、分类，以及播放列表、树状归类、收藏、本地浏览历史、阅读进度、导入的 EH 标签快照、共享搜索历史、在线下载状态、原图资源阶段、本地画廊同步记录、评论、评论内站点画廊引用和额外元数据；运行时不依赖外部数据库。

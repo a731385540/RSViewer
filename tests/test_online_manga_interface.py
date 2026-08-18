@@ -34,6 +34,18 @@ class _FakeOnlineProvider:
 
     def search(self, query):
         self.__class__.queries.append((self.settings.site, query))
+        if query.cursor == "cursor-2":
+            next_cursor = ""
+            previous_cursor = "cursor-latest"
+        elif query.cursor == "cursor-newer":
+            next_cursor = "cursor-date"
+            previous_cursor = ""
+        elif getattr(query, "seek_date", "") and not query.cursor:
+            next_cursor = "cursor-date"
+            previous_cursor = "cursor-newer"
+        else:
+            next_cursor = "cursor-2"
+            previous_cursor = ""
         return OnlineGalleryPage(
             (
                 OnlineGallery(
@@ -50,7 +62,8 @@ class _FakeOnlineProvider:
                     source_mode="Compact",
                 ),
             ),
-            next_cursor="cursor-2" if not query.cursor else "",
+            next_cursor=next_cursor,
+            previous_cursor=previous_cursor,
         )
 
     def load_thumbnail(self, _url):
@@ -320,21 +333,23 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
         self.assertTrue(self._wait_until(lambda: interface._search_worker is None))
         interface.nextPage()
         self.assertTrue(self._wait_until(lambda: interface._search_worker is None))
-        self.assertEqual(2, interface.currentState.page_number)
+        self.assertEqual("cursor-2", interface.currentState.current_cursor)
+        self.assertTrue(interface.previousButton.isEnabled())
+        self.assertFalse(interface.nextButton.isEnabled())
         eh_state = interface.currentState
 
         interface.setSite("exhentai")
         self.assertTrue(self._wait_until(lambda: interface._search_worker is None))
         self.assertEqual("exhentai", interface._current_site)
-        self.assertEqual(1, interface.currentState.page_number)
+        self.assertEqual("", interface.currentState.current_cursor)
         self.assertIsNot(eh_state, interface.currentState)
         request_count = len(_FakeOnlineProvider.queries)
 
         interface.setSite("ehentai")
         self.app.processEvents()
         self.assertIs(eh_state, interface.currentState)
-        self.assertEqual(2, interface.currentState.page_number)
-        self.assertEqual("第 2 页", interface.pageLabel.text())
+        self.assertEqual("cursor-2", interface.currentState.current_cursor)
+        self.assertFalse(hasattr(interface, "pageLabel"))
         self.assertEqual(request_count, len(_FakeOnlineProvider.queries))
 
         interface.refresh()
@@ -664,6 +679,29 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
         interface.close()
         interface.deleteLater()
 
+    def test_previous_and_next_use_only_response_cursors(self):
+        interface = OnlineMangaInterface(
+            provider_factory=_FakeOnlineProvider,
+            auto_load_on_show=False,
+        )
+        interface.search()
+        self.assertTrue(self._wait_until(lambda: interface._search_worker is None))
+        self.assertFalse(interface.previousButton.isEnabled())
+        self.assertTrue(interface.nextButton.isEnabled())
+
+        interface.nextPage()
+        self.assertTrue(self._wait_until(lambda: interface._search_worker is None))
+        self.assertEqual("cursor-2", _FakeOnlineProvider.queries[-1][1].cursor)
+        self.assertTrue(interface.previousButton.isEnabled())
+        self.assertFalse(interface.nextButton.isEnabled())
+
+        interface.previousPage()
+        self.assertTrue(self._wait_until(lambda: interface._search_worker is None))
+        self.assertEqual("cursor-latest", _FakeOnlineProvider.queries[-1][1].cursor)
+        self.assertFalse(interface.previousButton.isEnabled())
+        self.assertTrue(interface.nextButton.isEnabled())
+        interface.deleteLater()
+
     def test_date_search_preserves_keyword_and_passes_seek_date(self):
         interface = OnlineMangaInterface(
             provider_factory=_FakeOnlineProvider,
@@ -680,6 +718,8 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
         self.assertEqual("2026-08-01", query.seek_date)
         self.assertEqual("2026-08-01", interface.currentState.seek_date)
         self.assertIn("定位 2026-08-01", interface.resultLabel.text())
+        self.assertTrue(interface.previousButton.isEnabled())
+        self.assertTrue(interface.nextButton.isEnabled())
         interface.deleteLater()
 
     def test_extended_view_explains_missing_minimal_labels(self):

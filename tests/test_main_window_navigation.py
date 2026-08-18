@@ -985,6 +985,31 @@ class MainWindowNavigationTests(unittest.TestCase):
         self.assertEqual(3, MAX_ONLINE_DOWNLOAD_CONCURRENCY)
         self.assertEqual([3], pool.max_thread_counts)
 
+    def test_page_download_threads_are_hard_capped_at_six(self):
+        scheduler = MagicMock()
+        window = SimpleNamespace(galleryPageDownloadScheduler=scheduler)
+
+        MainWindow._updateOnlinePageDownloadThreads(window, 20)
+
+        scheduler.setThreadCount.assert_called_once_with(6)
+
+    def test_zero_speed_keeps_last_measured_download_speed(self):
+        worker = object()
+        repository = MagicMock()
+        repository.online_gallery_download.return_value = None
+        window = SimpleNamespace(
+            _onlineDownloadWorkers={42: worker},
+            _onlineDownloadSpeeds={42: 2 * 1024 * 1024},
+            userLibraryRepository=repository,
+            _refreshDownloadManager=MagicMock(),
+        )
+
+        MainWindow._updateOnlineDownloadSpeed(window, worker, 42, 0)
+
+        self.assertEqual(2 * 1024 * 1024, window._onlineDownloadSpeeds[42])
+        repository.online_gallery_download.assert_not_called()
+        window._refreshDownloadManager.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -55,8 +55,6 @@ class OnlinePageRequest:
     keyword: str = ""
     seek_date: str = ""
     cursor: str = ""
-    page_number: int = 1
-    cursor_history: Tuple[str, ...] = ()
     scroll_position: int = 0
 
 
@@ -68,9 +66,6 @@ class OnlineSiteState:
     keyword: str = ""
     seek_date: str = ""
     current_cursor: str = ""
-    page_number: int = 1
-    cursor_history: List[str] = field(default_factory=list)
-    next_cursor: str = ""
     current_page: Optional[OnlineGalleryPage] = None
     current_cache_key: Optional[PageCacheKey] = None
     pages: OrderedDict = field(default_factory=OrderedDict)
@@ -693,7 +688,6 @@ class OnlineMangaInterface(QWidget):
         self.previousButton = PushButton(FIF.LEFT_ARROW, self.tr("上一页"), self)
         self.nextButton = PushButton(self.tr("下一页"), self)
         self.nextButton.setIcon(FIF.RIGHT_ARROW)
-        self.pageLabel = BodyLabel(self.tr("第 1 页"), self)
         self.previousButton.clicked.connect(self.previousPage)
         self.nextButton.clicked.connect(self.nextPage)
         self.previousButton.setEnabled(False)
@@ -701,7 +695,6 @@ class OnlineMangaInterface(QWidget):
         footer = QHBoxLayout()
         footer.addStretch(1)
         footer.addWidget(self.previousButton)
-        footer.addWidget(self.pageLabel)
         footer.addWidget(self.nextButton)
         footer.addStretch(1)
 
@@ -793,8 +786,6 @@ class OnlineMangaInterface(QWidget):
             keyword=state.keyword,
             seek_date=state.seek_date,
             cursor=state.current_cursor,
-            page_number=state.page_number,
-            cursor_history=tuple(state.cursor_history),
             scroll_position=position,
         )
         previous_site_mode = self._siteDisplayMode(previous_mode)
@@ -851,10 +842,9 @@ class OnlineMangaInterface(QWidget):
 
         self._cover_data.clear()
         self._setItems(())
-        self.pageLabel.setText(self.tr("第 1 页"))
         self.previousButton.setEnabled(False)
         self.nextButton.setEnabled(False)
-        request = OnlinePageRequest(keyword="", cursor="", page_number=1)
+        request = OnlinePageRequest(keyword="", cursor="")
         self._requestPage(
             site,
             request,
@@ -957,7 +947,7 @@ class OnlineMangaInterface(QWidget):
         self._rendered_site = site
         keyword = self.searchEdit.text().strip()
         state.search_text = keyword
-        request = OnlinePageRequest(keyword=keyword, cursor="", page_number=1)
+        request = OnlinePageRequest(keyword=keyword, cursor="")
         self._requestPage(site, request)
 
     def seekDate(self, *_args):
@@ -974,7 +964,6 @@ class OnlineMangaInterface(QWidget):
             keyword=keyword,
             seek_date=date.toString("yyyy-MM-dd"),
             cursor="",
-            page_number=1,
         )
         self._requestPage(site, request, force_network=True)
 
@@ -986,7 +975,7 @@ class OnlineMangaInterface(QWidget):
         self.currentState.search_text = keyword
         self._requestPage(
             site,
-            OnlinePageRequest(keyword=keyword, cursor="", page_number=1),
+            OnlinePageRequest(keyword=keyword, cursor=""),
             force_network=True,
         )
 
@@ -1000,8 +989,6 @@ class OnlineMangaInterface(QWidget):
             keyword=state.keyword if state.current_page is not None else state.search_text.strip(),
             seek_date=state.seek_date if state.current_page is not None else "",
             cursor=state.current_cursor if state.current_page is not None else "",
-            page_number=state.page_number if state.current_page is not None else 1,
-            cursor_history=tuple(state.cursor_history),
             scroll_position=self.scrollArea.verticalScrollBar().value(),
         )
         self._requestPage(site, request, force_network=True)
@@ -1036,7 +1023,6 @@ class OnlineMangaInterface(QWidget):
             keyword=request.keyword,
             seek_date=request.seek_date,
             cursor=request.cursor,
-            page_number=request.page_number,
             filters=dict(self._filters),
         )
         self.resultLabel.setText(self.tr("正在加载 {}…").format(self._siteName(site)))
@@ -1068,9 +1054,6 @@ class OnlineMangaInterface(QWidget):
         state.keyword = request.keyword
         state.seek_date = request.seek_date
         state.current_cursor = request.cursor
-        state.page_number = request.page_number
-        state.cursor_history = list(request.cursor_history)
-        state.next_cursor = page.next_cursor
         state.current_page = page
         state.current_cache_key = cache_key
         state.scroll_position = request.scroll_position
@@ -1087,10 +1070,7 @@ class OnlineMangaInterface(QWidget):
     def _displayPage(self, site, state, page, provider=None):
         self._setLoading(False)
         self.nextButton.setEnabled(bool(page.next_cursor))
-        self.previousButton.setEnabled(
-            bool(state.cursor_history or page.previous_cursor)
-        )
-        self.pageLabel.setText(self.tr("第 {} 页").format(state.page_number))
+        self.previousButton.setEnabled(bool(page.previous_cursor))
         date_text = (
             self.tr(" · 定位 {} ").format(state.seek_date)
             if state.seek_date
@@ -1127,8 +1107,9 @@ class OnlineMangaInterface(QWidget):
     def _showError(self, message):
         state = self.currentState
         self.resultLabel.setText(self.tr("加载失败：{}").format(message))
-        self.previousButton.setEnabled(bool(state.cursor_history))
-        self.nextButton.setEnabled(bool(state.next_cursor))
+        page = state.current_page
+        self.previousButton.setEnabled(bool(page and page.previous_cursor))
+        self.nextButton.setEnabled(bool(page and page.next_cursor))
 
     def _setLoading(self, loading):
         self.searchButton.setEnabled(not loading)
@@ -1306,36 +1287,25 @@ class OnlineMangaInterface(QWidget):
 
     def nextPage(self):
         state = self.currentState
-        if not state.next_cursor:
+        page = state.current_page
+        if page is None or not page.next_cursor:
             return
-        history = tuple(state.cursor_history + [state.next_cursor])
         request = OnlinePageRequest(
             keyword=state.keyword,
             seek_date=state.seek_date,
-            cursor=state.next_cursor,
-            page_number=state.page_number + 1,
-            cursor_history=history,
+            cursor=page.next_cursor,
         )
         self._requestPage(self._current_site, request)
 
     def previousPage(self):
         state = self.currentState
-        if not state.cursor_history and not (
-            state.current_page and state.current_page.previous_cursor
-        ):
+        page = state.current_page
+        if page is None or not page.previous_cursor:
             return
-        if state.cursor_history:
-            history = tuple(state.cursor_history[:-1])
-            cursor = history[-1] if history else ""
-        else:
-            history = ()
-            cursor = state.current_page.previous_cursor
         request = OnlinePageRequest(
             keyword=state.keyword,
             seek_date=state.seek_date,
-            cursor=cursor,
-            page_number=max(1, state.page_number - 1),
-            cursor_history=history,
+            cursor=page.previous_cursor,
         )
         self._requestPage(self._current_site, request)
 

@@ -1,5 +1,6 @@
 import sqlite3
 import tempfile
+import threading
 import unittest
 from contextlib import closing
 from dataclasses import replace
@@ -43,6 +44,9 @@ from app.sources.ehviewer_source import EhViewerDataSource
 from app.workers.online_gallery_download_worker import (
     LocalGalleryPageDownloadWorker,
     OnlineGalleryDownloadWorker,
+)
+from app.services.gallery_page_download_scheduler import (
+    GalleryPageDownloadScheduler,
 )
 from app.workers.original_gallery_worker import OriginalGalleryFileWorker
 from app.workers.eh_online_worker import LocalGallerySyncWorker
@@ -324,6 +328,123 @@ class OnlineGalleryDownloadTests(unittest.TestCase):
         self.assertFalse((folder / "original").exists())
         self.assertEqual(3, len(tuple(folder.glob("*.png"))))
 
+    def test_one_gallery_uses_multiple_shared_page_threads(self):
+        class ConcurrentProvider(FakeDownloadProvider):
+            def __init__(self, pages):
+                super().__init__(pages)
+                self.lock = threading.Lock()
+                self.started = threading.Event()
+                self.active = 0
+                self.max_active = 0
+
+            def load_gallery_page_image(self, _gallery, preview):
+                with self.lock:
+                    self.page_calls.append(preview.page_index)
+                    self.active += 1
+                    self.max_active = max(self.max_active, self.active)
+                    if self.active == len(self.pages):
+                        self.started.set()
+                if not self.started.wait(2):
+                    raise TimeoutError("page requests did not run concurrently")
+                try:
+                    return self.pages[preview.page_index]
+                finally:
+                    with self.lock:
+                        self.active -= 1
+
+        scheduler = GalleryPageDownloadScheduler(6)
+        provider = ConcurrentProvider(self.pages)
+        worker = self._worker(provider)
+        worker.page_download_scheduler = scheduler
+
+        worker.run()
+
+        self.assertEqual(3, provider.max_active)
+        self.assertEqual([0, 1, 2], sorted(provider.page_calls))
+        self.assertEqual(
+            ONLINE_DOWNLOAD_COMPLETED,
+            self.user_repository.online_gallery_download(4120989).state,
+        )
+
+    def test_parallel_original_download_checkpoints_each_base_fallback(self):
+        class MixedOriginalProvider(FakeDownloadProvider):
+            def load_gallery_page_original(self, _gallery, preview):
+                self.original_calls.append(preview.page_index)
+                if preview.page_index:
+                    raise OriginalImageUnavailableError("no full image")
+                return self.pages[preview.page_index]
+
+        scheduler = GalleryPageDownloadScheduler(3)
+        provider = MixedOriginalProvider(self.pages)
+        worker = self._worker(provider)
+        worker.download_mode = DOWNLOAD_MODE_ORIGINAL_DIRECT
+        worker.page_download_scheduler = scheduler
+
+        worker.run()
+
+        record = self.user_repository.online_gallery_download(4120989)
+        original = self.user_repository.gallery_original_state(4120989)
+        self.assertEqual(ONLINE_DOWNLOAD_COMPLETED, record.state)
+        self.assertEqual(ORIGINAL_STATE_ACTIVE, original.state)
+        self.assertEqual([0, 1, 2], sorted(provider.original_calls))
+        self.assertEqual([1, 2], sorted(provider.page_calls))
+        self.assertEqual(
+            (
+                ORIGINAL_PAGE_MODE_ORIGINAL,
+                ORIGINAL_PAGE_MODE_BASE,
+                ORIGINAL_PAGE_MODE_BASE,
+            ),
+            original.page_modes,
+        )
+
+    def test_parallel_download_cancel_stops_active_and_queued_pages(self):
+        class BlockingProvider(FakeDownloadProvider):
+            def __init__(self, pages):
+                super().__init__(pages)
+                self.lock = threading.Lock()
+                self.active = 0
+                self.two_started = threading.Event()
+                self.release = threading.Event()
+
+            def cancel_pending_requests(self):
+                super().cancel_pending_requests()
+                self.release.set()
+
+            def load_gallery_page_image(
+                self,
+                _gallery,
+                preview,
+                should_cancel=None,
+            ):
+                with self.lock:
+                    self.page_calls.append(preview.page_index)
+                    self.active += 1
+                    if self.active == 2:
+                        self.two_started.set()
+                self.release.wait(2)
+                if should_cancel is not None and should_cancel():
+                    raise RuntimeError("cancelled")
+                return self.pages[preview.page_index]
+
+        scheduler = GalleryPageDownloadScheduler(2)
+        provider = BlockingProvider(self.pages)
+        worker = self._worker(provider)
+        worker.page_download_scheduler = scheduler
+        runner = threading.Thread(target=worker.run)
+        runner.start()
+        self.assertTrue(provider.two_started.wait(2))
+
+        worker.cancel()
+        runner.join(3)
+
+        self.assertFalse(runner.is_alive())
+        self.assertEqual(1, provider.cancel_calls)
+        self.assertEqual(0, scheduler.queuedCount())
+        self.assertEqual(
+            ONLINE_DOWNLOAD_PAUSED,
+            self.user_repository.online_gallery_download(4120989).state,
+        )
+
     def test_missing_original_falls_back_to_base_and_resumes_as_base(self):
         class MissingOriginalProvider(FakeDownloadProvider):
             def load_gallery_page_original(self, _gallery, preview):
@@ -443,7 +564,7 @@ class OnlineGalleryDownloadTests(unittest.TestCase):
         )
         self.assertFalse((folder / "original").exists())
 
-    def test_stalled_original_request_retries_and_clears_stale_speed(self):
+    def test_stalled_original_request_retries_without_zero_speed_flicker(self):
         class FlakyOriginalProvider(FakeDownloadProvider):
             def __init__(self, pages):
                 super().__init__(pages)
@@ -468,7 +589,8 @@ class OnlineGalleryDownloadTests(unittest.TestCase):
         worker.run()
 
         self.assertEqual([0, 0, 0, 1, 2], provider.original_calls)
-        self.assertGreaterEqual(speeds.count(0.0), 2)
+        self.assertTrue(speeds)
+        self.assertTrue(all(speed > 0 for speed in speeds))
         self.assertTrue(any("重试" in stage for stage in stages))
         self.assertEqual(
             ONLINE_DOWNLOAD_COMPLETED,

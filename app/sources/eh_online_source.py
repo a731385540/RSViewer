@@ -298,7 +298,7 @@ class RefactoredEhOnlineProvider(EhOnlineProvider):
     """Adapter for the user-supplied ``eh_tool_refactored`` list crawler."""
 
     STREAM_READ_IDLE_TIMEOUT_SECONDS = 15
-    SPEED_UPDATE_INTERVAL_SECONDS = 0.5
+    SPEED_UPDATE_INTERVAL_SECONDS = 1.0
 
     SOURCE_NAMES = {
         "ehentai": "e-hentai",

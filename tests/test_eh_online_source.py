@@ -164,7 +164,7 @@ class EhOnlineProviderContractTests(unittest.TestCase):
         self.assertTrue(request.kwargs["stream"])
         self.assertEqual((15, 15), request.kwargs["timeout"])
 
-    def test_streaming_download_reports_speed_every_half_second(self):
+    def test_streaming_download_reports_speed_about_once_per_second(self):
         provider = RefactoredEhOnlineProvider(
             EhOnlineSettings.create(proxy_mode="direct")
         )
@@ -191,7 +191,7 @@ class EhOnlineProviderContractTests(unittest.TestCase):
 
         with patch(
             "app.sources.eh_online_source.time.monotonic",
-            side_effect=(0.0, 0.2, 0.5, 0.7, 0.7),
+            side_effect=(0.0, 0.4, 1.0, 1.2, 1.2),
         ):
             data, status = provider._request_bytes_cancellable(
                 "https://exhentai.org/fullimg/1/1/key/page.jpg",
@@ -202,7 +202,7 @@ class EhOnlineProviderContractTests(unittest.TestCase):
         self.assertEqual(b"a" * 10 + b"b" * 10 + b"c" * 10, data)
         self.assertEqual(200, status)
         self.assertEqual(2, len(speeds))
-        self.assertAlmostEqual(40.0, speeds[0])
+        self.assertAlmostEqual(20.0, speeds[0])
         self.assertAlmostEqual(50.0, speeds[1])
 
     @staticmethod
@@ -303,7 +303,6 @@ class EhOnlineProviderContractTests(unittest.TestCase):
         query = OnlineGalleryQuery(
             keyword="test",
             cursor="cursor-1",
-            page_number=2,
             filters={"blocked_titles": ("drop",)},
         )
 

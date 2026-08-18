@@ -104,5 +104,4 @@ class OnlineGalleryQuery:
     keyword: str = ""
     seek_date: str = ""
     cursor: str = ""
-    page_number: int = 1
     filters: Mapping[str, Any] = field(default_factory=dict)

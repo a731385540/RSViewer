@@ -427,6 +427,21 @@ class SettingInterface(ScrollArea):
             ],
             parent=self.onlineGroup,
         )
+        self.onlineDownloadThreadsCard = OptionsSettingCard(
+            cfg.onlineEhDownloadThreads,
+            FIF.DOWNLOAD,
+            self.tr("图片下载线程数"),
+            self.tr("所有正在下载的画廊共用这些线程，范围 1–6"),
+            texts=[
+                self.tr("1 个"),
+                self.tr("2 个"),
+                self.tr("3 个"),
+                self.tr("4 个"),
+                self.tr("5 个"),
+                self.tr("6 个"),
+            ],
+            parent=self.onlineGroup,
+        )
         self.onlineDownloadLabelCard = OnlineDownloadLabelSettingCard(
             self.onlineGroup
         )
@@ -581,6 +596,7 @@ class SettingInterface(ScrollArea):
         self.onlineGroup.addSettingCard(self.onlineViewModeCard)
         self.onlineGroup.addSettingCard(self.onlineThumbnailConcurrencyCard)
         self.onlineGroup.addSettingCard(self.onlineDownloadConcurrencyCard)
+        self.onlineGroup.addSettingCard(self.onlineDownloadThreadsCard)
         self.onlineGroup.addSettingCard(self.onlineDownloadLabelCard)
         self.onlineGroup.addSettingCard(self.onlineThumbnailCacheHoursCard)
         self.personalGroup.addSettingCard(self.themeCard)

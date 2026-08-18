@@ -108,6 +108,7 @@ from app.workers.ehviewer_database_worker import EhViewerDatabaseExportWorker
 
 
 MAX_ONLINE_DOWNLOAD_CONCURRENCY = 3
+MAX_ONLINE_PAGE_DOWNLOAD_THREADS = 6
 MAX_GALLERY_UPDATE_CONCURRENCY = 1
 
 
@@ -179,11 +180,17 @@ class MainWindow(FluentWindow):
         self.onlineDownloadThreadPool = (
             self.windowCoordinator.onlineDownloadThreadPool
         )
+        self.galleryPageDownloadScheduler = (
+            self.windowCoordinator.galleryPageDownloadScheduler
+        )
         self.onlineDownloadRegistrationThreadPool = (
             self.windowCoordinator.downloadRegistrationThreadPool
         )
         self.windowCoordinator.setDownloadConcurrency(
             cfg.get(cfg.onlineEhDownloadConcurrency)
+        )
+        self.windowCoordinator.setPageDownloadThreads(
+            cfg.get(cfg.onlineEhDownloadThreads)
         )
         self.galleryUpdateThreadPool = self.windowCoordinator.galleryUpdateThreadPool
         self.originalFileThreadPool = self.windowCoordinator.originalFileThreadPool
@@ -371,6 +378,9 @@ class MainWindow(FluentWindow):
         )
         cfg.onlineEhDownloadConcurrency.valueChanged.connect(
             self._updateOnlineDownloadConcurrency
+        )
+        cfg.onlineEhDownloadThreads.valueChanged.connect(
+            self._updateOnlinePageDownloadThreads
         )
         self.initNavigation()
         self.stackedWidget.addWidget(self.mangaDetailInterface)
@@ -2862,6 +2872,11 @@ class MainWindow(FluentWindow):
             target_label=target_label,
             download_mode=download_mode,
             existing_folder=existing_folder,
+            page_download_scheduler=getattr(
+                self,
+                "galleryPageDownloadScheduler",
+                None,
+            ),
         )
         worker.signals.stageChanged.connect(
             lambda message: self._updateOnlineDownloadStage(worker, gid, message)
@@ -3181,7 +3196,10 @@ class MainWindow(FluentWindow):
         gid = int(gid)
         if self._onlineDownloadWorkers.get(gid) is not worker:
             return
-        self._onlineDownloadSpeeds[gid] = max(0.0, float(speed or 0))
+        speed = max(0.0, float(speed or 0))
+        if speed <= 0:
+            return
+        self._onlineDownloadSpeeds[gid] = speed
         record = self.userLibraryRepository.online_gallery_download(gid)
         if record is not None:
             self.mangaReaderInterface.setDownloadState(
@@ -3574,6 +3592,15 @@ class MainWindow(FluentWindow):
         else:
             self.onlineDownloadThreadPool.setMaxThreadCount(
                 min(MAX_ONLINE_DOWNLOAD_CONCURRENCY, max(1, int(value)))
+            )
+
+    def _updateOnlinePageDownloadThreads(self, value):
+        coordinator = getattr(self, "windowCoordinator", None)
+        if coordinator is not None:
+            coordinator.setPageDownloadThreads(value)
+        else:
+            self.galleryPageDownloadScheduler.setThreadCount(
+                min(MAX_ONLINE_PAGE_DOWNLOAD_THREADS, max(1, int(value)))
             )
 
     def _cancelAllOnlineDownloads(self):

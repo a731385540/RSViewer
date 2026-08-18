@@ -1036,6 +1036,7 @@ class LocalLibraryControlsTests(unittest.TestCase):
         self.assertEqual(
             {2, 3}, {item.gid for item in self.interface._filtered_items}
         )
+        self.assertEqual("全彩/作者1", self.interface.titleLabel.text())
         self.assertIs(
             self.interface._taxonomy_items[child_id].parent(),
             self.interface._taxonomy_items[root_id],
@@ -1046,6 +1047,31 @@ class LocalLibraryControlsTests(unittest.TestCase):
         self.assertEqual(
             {2, 3}, {item.gid for item in self.interface._filtered_items}
         )
+        self.assertEqual("全彩", self.interface.titleLabel.text())
+
+    def test_local_title_tracks_category_playlist_and_show_all(self):
+        self.assertEqual("未分类", self.interface.titleLabel.text())
+
+        category_item = next(
+            self.interface.primaryLabelTree.topLevelItem(index)
+            for index in range(self.interface.primaryLabelTree.topLevelItemCount())
+            if self.interface.primaryLabelTree.topLevelItem(index).data(
+                0, Qt.UserRole
+            ) == "分类 A"
+        )
+        self.interface.primaryLabelTree.setCurrentItem(category_item)
+        self.assertEqual("分类 A", self.interface.titleLabel.text())
+
+        playlist_id = self.repository.create_playlist("稍后阅读")
+        self.interface._refreshTagData()
+        self.interface._setTagMode(self.interface.TAG_PLAYLIST)
+        self.interface.playlistTree.setCurrentItem(
+            self.interface._playlist_items[playlist_id]
+        )
+        self.assertEqual("稍后阅读", self.interface.titleLabel.text())
+
+        self.interface._showAllManga()
+        self.assertEqual("本地资源", self.interface.titleLabel.text())
 
     def test_tag_sidebar_never_exceeds_thirty_percent(self):
         self.interface.resize(1000, 700)

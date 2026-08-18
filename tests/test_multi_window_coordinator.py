@@ -1,9 +1,11 @@
 import os
+import threading
 import unittest
 from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QRunnable
 from PySide6.QtWidgets import QApplication
 
 from app.services.multi_window_coordinator import MultiWindowCoordinator
@@ -54,12 +56,83 @@ class MultiWindowCoordinatorTests(unittest.TestCase):
 
     def test_process_wide_pool_limits_are_enforced(self):
         self.coordinator.setDownloadConcurrency(6)
+        self.coordinator.setPageDownloadThreads(20)
         self.assertEqual(3, self.coordinator.onlineDownloadThreadPool.maxThreadCount())
+        self.assertEqual(
+            6,
+            self.coordinator.galleryPageDownloadScheduler.threadPool.maxThreadCount(),
+        )
         self.assertEqual(
             1,
             self.coordinator.downloadRegistrationThreadPool.maxThreadCount(),
         )
         self.assertEqual(1, self.coordinator.galleryUpdateThreadPool.maxThreadCount())
+
+    def test_gallery_limit_one_keeps_other_galleries_queued(self):
+        lock = threading.Lock()
+        release = threading.Event()
+        first_started = threading.Event()
+        all_finished = threading.Event()
+        counts = {"started": 0, "finished": 0}
+
+        class GalleryTask(QRunnable):
+            def run(self):
+                with lock:
+                    counts["started"] += 1
+                    first_started.set()
+                release.wait(2)
+                with lock:
+                    counts["finished"] += 1
+                    if counts["finished"] == 10:
+                        all_finished.set()
+
+        self.coordinator.setDownloadConcurrency(1)
+        for _ in range(10):
+            self.coordinator.onlineDownloadThreadPool.start(GalleryTask())
+
+        self.assertTrue(first_started.wait(1))
+        with lock:
+            self.assertEqual(1, counts["started"])
+        release.set()
+        self.assertTrue(all_finished.wait(2))
+
+    def test_active_galleries_share_one_page_thread_limit(self):
+        lock = threading.Lock()
+        release = threading.Event()
+        limit_reached = threading.Event()
+        all_finished = threading.Event()
+        counts = {"active": 0, "maximum": 0, "finished": 0}
+
+        class PageTask:
+            def run(self):
+                with lock:
+                    counts["active"] += 1
+                    counts["maximum"] = max(
+                        counts["maximum"], counts["active"]
+                    )
+                    if counts["active"] == 2:
+                        limit_reached.set()
+                release.wait(2)
+                with lock:
+                    counts["active"] -= 1
+                    counts["finished"] += 1
+                    if counts["finished"] == 8:
+                        all_finished.set()
+                return True
+
+            def cancelPending(self):
+                raise AssertionError("successful tasks must not be cancelled")
+
+        scheduler = self.coordinator.galleryPageDownloadScheduler
+        scheduler.setThreadCount(2)
+        scheduler.submitMany("gallery-a", (PageTask() for _ in range(4)))
+        scheduler.submitMany("gallery-b", (PageTask() for _ in range(4)))
+
+        self.assertTrue(limit_reached.wait(1))
+        self.assertEqual(2, scheduler.activeCount())
+        release.set()
+        self.assertTrue(all_finished.wait(2))
+        self.assertEqual(2, counts["maximum"])
 
     def test_queued_trash_target_blocks_other_gallery_mutations(self):
         window = self._window()

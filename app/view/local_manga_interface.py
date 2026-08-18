@@ -1868,6 +1868,7 @@ class LocalMangaInterface(QWidget):
         ):
             button.setVisible(is_playlist)
         self._updatePlaylistActions()
+        self._updateTitleLabel()
         if self._all_items:
             self.applyFilters(reset_page=reset_page)
 
@@ -1946,25 +1947,28 @@ class LocalMangaInterface(QWidget):
         self._startLabelMutation(operation, self._refreshTagData)
 
     def _taxonomyPathEntries(self):
-        by_id = {
-            int(label_id): (parent_id, name)
-            for label_id, parent_id, name, _count in self._taxonomy_labels
-        }
-
-        def path_for(label_id):
-            values = []
-            seen = set()
-            while label_id in by_id and label_id not in seen:
-                seen.add(label_id)
-                parent_id, name = by_id[label_id]
-                values.append(name)
-                label_id = parent_id
-            return " / ".join(reversed(values))
-
         return sorted(
-            ((path_for(label_id), label_id) for label_id in by_id),
+            (
+                (self._taxonomyPath(label_id, " / "), int(label_id))
+                for label_id, _parent_id, _name, _count in self._taxonomy_labels
+            ),
             key=lambda pair: pair[0].casefold(),
         )
+
+    def _taxonomyPath(self, label_id, separator="/"):
+        by_id = {
+            int(current_id): (parent_id, name)
+            for current_id, parent_id, name, _count in self._taxonomy_labels
+        }
+        values = []
+        seen = set()
+        label_id = int(label_id) if label_id is not None else None
+        while label_id in by_id and label_id not in seen:
+            seen.add(label_id)
+            parent_id, name = by_id[label_id]
+            values.append(str(name))
+            label_id = int(parent_id) if parent_id is not None else None
+        return separator.join(reversed(values))
 
     def _showTagTreeMenu(self, tag_mode, tree, position):
         item = tree.itemAt(position)
@@ -2612,6 +2616,7 @@ class LocalMangaInterface(QWidget):
         self._search_pinned = False
 
     def applyFilters(self, reset_page=False):
+        self._updateTitleLabel()
         query = self.searchEdit.text().strip()
         query_terms = (
             self.tagSearchIndex.local_query_terms(query)
@@ -2687,6 +2692,24 @@ class LocalMangaInterface(QWidget):
         )
         self._updatePagination()
         self._renderCards()
+
+    def _updateTitleLabel(self):
+        if self._collection_kind is not None:
+            return
+        title = self.tr("本地资源")
+        if not self._show_all_manga:
+            if self._tag_mode == self.TAG_CATEGORY:
+                title = (
+                    self.tr("未分类")
+                    if self._primary_label_filter == "__none__"
+                    else str(self._primary_label_filter)
+                )
+            elif self._tag_mode == self.TAG_PLAYLIST:
+                title = self._playlist_filter_name or title
+            elif self._tag_mode == self.TAG_TAXONOMY:
+                title = self._taxonomyPath(self._taxonomy_filter_id) or title
+        self.titleLabel.setText(title)
+        self.titleLabel.setToolTip(title)
 
     def _matchesActiveTag(self, item: MangaItem, taxonomy_label_ids=None) -> bool:
         return int(item.gid) in self._activeTagGids()

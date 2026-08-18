@@ -2,7 +2,9 @@ import math
 import inspect
 import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
+from queue import Queue
 from threading import Lock
 
 from PySide6.QtCore import QObject, QRunnable, Signal
@@ -87,8 +89,100 @@ class _DownloadCancelled(RuntimeError):
     pass
 
 
+@dataclass(frozen=True)
+class _PageDownloadResult:
+    page_index: int
+    page_mode: str = ""
+    page_path: str = ""
+    error: Exception = None
+
+
+class _GalleryPageDownloadTask:
+    def __init__(
+        self,
+        worker,
+        preview,
+        page_index,
+        target_folder,
+        result_queue,
+        total,
+    ):
+        self.worker = worker
+        self.preview = preview
+        self.page_index = int(page_index)
+        self.target_folder = target_folder
+        self.result_queue = result_queue
+        self.total = int(total)
+        self._result_lock = Lock()
+        self._result_sent = False
+
+    def run(self):
+        try:
+            self.worker._check_cancelled()
+            self.worker.signals.stageChanged.emit(
+                f"正在下载第 {self.page_index + 1} / {self.total} 页…"
+            )
+            started_at = time.monotonic()
+            speed_was_reported = False
+
+            def report_speed(speed):
+                nonlocal speed_was_reported
+                speed_was_reported = True
+                self.worker._update_page_speed(self.page_index, speed)
+
+            data, page_mode = self.worker._download_page(
+                self.preview,
+                self.page_index,
+                report_speed,
+                self.total,
+                speed_key=self.page_index,
+            )
+            elapsed = max(0.001, time.monotonic() - started_at)
+            if not speed_was_reported:
+                self.worker._update_page_speed(
+                    self.page_index,
+                    len(data) / elapsed,
+                )
+            page_path = self.worker.ehviewer_repository.write_page(
+                self.target_folder,
+                self.page_index,
+                _image_extension(data),
+                data,
+            )
+            self._sendResult(
+                _PageDownloadResult(
+                    self.page_index,
+                    page_mode,
+                    str(page_path),
+                )
+            )
+            return True
+        except Exception as error:
+            self._sendResult(
+                _PageDownloadResult(self.page_index, error=error)
+            )
+            return False
+        finally:
+            self.worker._clear_page_speed(self.page_index)
+
+    def cancelPending(self):
+        self._sendResult(
+            _PageDownloadResult(
+                self.page_index,
+                error=_DownloadCancelled(),
+            )
+        )
+
+    def _sendResult(self, result):
+        with self._result_lock:
+            if self._result_sent:
+                return
+            self._result_sent = True
+        self.result_queue.put(result)
+
+
 class OnlineGalleryDownloadWorker(QRunnable):
-    """Persist metadata first, then resume missing gallery images in order."""
+    """Persist metadata, then resume pages through the shared page scheduler."""
 
     def __init__(
         self,
@@ -103,6 +197,7 @@ class OnlineGalleryDownloadWorker(QRunnable):
         download_mode=DOWNLOAD_MODE_STANDARD,
         existing_folder=None,
         retry_count=3,
+        page_download_scheduler=None,
     ):
         super().__init__()
         self.provider = provider
@@ -122,15 +217,23 @@ class OnlineGalleryDownloadWorker(QRunnable):
             raise ValueError("未知的画廊下载模式")
         self.existing_folder = Path(existing_folder) if existing_folder else None
         self.retry_count = max(1, int(retry_count))
+        self.page_download_scheduler = page_download_scheduler
+        self._page_download_key = (int(detail.gallery.gid), id(self))
         self.cancelled = False
         self._smoothed_speed = 0.0
+        self._page_speeds = {}
+        self._speed_lock = Lock()
         self._page_modes = []
+        self._page_state_lock = Lock()
+        self._completed_pages = 0
         self._available_page_indexes = set()
         self._available_page_lock = Lock()
         self.signals = OnlineGalleryDownloadSignals()
 
     def cancel(self):
         self.cancelled = True
+        if self.page_download_scheduler is not None:
+            self.page_download_scheduler.cancel(self._page_download_key)
         cancel_requests = getattr(self.provider, "cancel_pending_requests", None)
         if cancel_requests is not None:
             cancel_requests()
@@ -187,6 +290,7 @@ class OnlineGalleryDownloadWorker(QRunnable):
             else:
                 completed_indexes = existing_indexes
             completed_pages = len(completed_indexes)
+            self._completed_pages = completed_pages
             record = OnlineGalleryDownloadRecord(
                 gid=gid,
                 site=self.site,
@@ -246,86 +350,22 @@ class OnlineGalleryDownloadWorker(QRunnable):
                 )
                 self.signals.sidecarReady.emit(gid, str(folder))
 
-            index = 0
-            while index < total:
-                self._check_cancelled()
-                externally_available = self._pageWasMadeAvailable(index)
-                if index in completed_indexes or (
-                    externally_available and not self._is_original_download
-                ):
-                    completed_indexes.add(index)
-                    index += 1
-                    continue
-                self.signals.stageChanged.emit(
-                    f"正在下载第 {index + 1} / {total} 页…"
-                )
-                started_at = time.monotonic()
-                speed_was_reported = False
-
-                def report_speed(speed):
-                    nonlocal speed_was_reported
-                    speed_was_reported = True
-                    self._update_speed(speed)
-
-                data, page_mode = self._download_page(
-                    previews[index],
-                    index,
-                    report_speed,
-                    completed_pages,
+            if self.page_download_scheduler is None:
+                completed_pages = self._download_pages_sequential(
+                    gid,
+                    previews,
+                    target_folder,
+                    completed_indexes,
                     total,
                 )
-                elapsed = max(0.001, time.monotonic() - started_at)
-                if not speed_was_reported:
-                    self._update_speed(len(data) / elapsed)
-                extension = _image_extension(data)
-                page_path = self.ehviewer_repository.write_page(
-                    target_folder, index, extension, data
-                )
-                completed_indexes.add(index)
-                completed_pages = len(completed_indexes)
-                self.user_repository.update_online_download(
+            else:
+                completed_pages = self._download_pages_parallel(
                     gid,
-                    completed_pages,
-                    ONLINE_DOWNLOAD_DOWNLOADING,
+                    previews,
+                    target_folder,
+                    completed_indexes,
+                    total,
                 )
-                if self._is_original_download:
-                    self._page_modes[index] = page_mode
-                    self.user_repository.update_gallery_original_state(
-                        gid,
-                        ORIGINAL_STATE_DOWNLOADING,
-                        completed_pages,
-                        total,
-                        fallback_to_standard=(
-                            ORIGINAL_PAGE_MODE_BASE in self._page_modes
-                        ),
-                        page_modes=tuple(self._page_modes),
-                    )
-                    if self.download_mode == DOWNLOAD_MODE_ORIGINAL_LOCAL:
-                        self.signals.originalPageSaved.emit(
-                            gid,
-                            index,
-                            str(page_path),
-                            completed_pages,
-                            total,
-                        )
-                    else:
-                        self.signals.pageSaved.emit(
-                            gid,
-                            index,
-                            str(page_path),
-                            completed_pages,
-                            total,
-                        )
-                else:
-                    self.signals.pageSaved.emit(
-                        gid,
-                        index,
-                        str(page_path),
-                        completed_pages,
-                        total,
-                    )
-                self.signals.progressChanged.emit(completed_pages, total)
-                index += 1
 
             if self.download_mode != DOWNLOAD_MODE_ORIGINAL_LOCAL:
                 self.ehviewer_repository.mark_state(gid, EH_STATE_FINISHED)
@@ -365,14 +405,22 @@ class OnlineGalleryDownloadWorker(QRunnable):
             if record is not None:
                 self.user_repository.update_online_download(
                     gid,
-                    max(completed_pages, int(record.completed_pages)),
+                    max(
+                        completed_pages,
+                        self._completed_pages,
+                        int(record.completed_pages),
+                    ),
                     ONLINE_DOWNLOAD_PAUSED,
                 )
             if self._is_original_download:
                 self.user_repository.update_gallery_original_state(
                     gid,
                     ORIGINAL_STATE_PAUSED,
-                    max(completed_pages, int(record.completed_pages))
+                    max(
+                        completed_pages,
+                        self._completed_pages,
+                        int(record.completed_pages),
+                    )
                     if record is not None else completed_pages,
                     int(self.detail.page_count),
                 )
@@ -385,7 +433,11 @@ class OnlineGalleryDownloadWorker(QRunnable):
             if record is not None:
                 self.user_repository.update_online_download(
                     gid,
-                    max(completed_pages, int(record.completed_pages)),
+                    max(
+                        completed_pages,
+                        self._completed_pages,
+                        int(record.completed_pages),
+                    ),
                     ONLINE_DOWNLOAD_FAILED,
                     message,
                 )
@@ -393,7 +445,11 @@ class OnlineGalleryDownloadWorker(QRunnable):
                 self.user_repository.update_gallery_original_state(
                     gid,
                     ORIGINAL_STATE_FAILED,
-                    max(completed_pages, int(record.completed_pages))
+                    max(
+                        completed_pages,
+                        self._completed_pages,
+                        int(record.completed_pages),
+                    )
                     if record is not None else completed_pages,
                     int(self.detail.page_count),
                     message,
@@ -406,6 +462,167 @@ class OnlineGalleryDownloadWorker(QRunnable):
             DOWNLOAD_MODE_ORIGINAL_DIRECT,
             DOWNLOAD_MODE_ORIGINAL_LOCAL,
         }
+
+    def _download_pages_sequential(
+        self,
+        gid,
+        previews,
+        target_folder,
+        completed_indexes,
+        total,
+    ):
+        for index in range(total):
+            self._check_cancelled()
+            externally_available = self._pageWasMadeAvailable(index)
+            if index in completed_indexes or (
+                externally_available and not self._is_original_download
+            ):
+                completed_indexes.add(index)
+                continue
+            self.signals.stageChanged.emit(
+                f"正在下载第 {index + 1} / {total} 页…"
+            )
+            started_at = time.monotonic()
+            speed_was_reported = False
+
+            def report_speed(speed):
+                nonlocal speed_was_reported
+                speed_was_reported = True
+                self._update_speed(speed)
+
+            data, page_mode = self._download_page(
+                previews[index],
+                index,
+                report_speed,
+                total,
+            )
+            elapsed = max(0.001, time.monotonic() - started_at)
+            if not speed_was_reported:
+                self._update_speed(len(data) / elapsed)
+            page_path = self.ehviewer_repository.write_page(
+                target_folder,
+                index,
+                _image_extension(data),
+                data,
+            )
+            self._commit_downloaded_page(
+                gid,
+                index,
+                page_mode,
+                page_path,
+                completed_indexes,
+                total,
+            )
+        return len(completed_indexes)
+
+    def _download_pages_parallel(
+        self,
+        gid,
+        previews,
+        target_folder,
+        completed_indexes,
+        total,
+    ):
+        pending_indexes = []
+        for index in range(total):
+            externally_available = self._pageWasMadeAvailable(index)
+            if index in completed_indexes or (
+                externally_available and not self._is_original_download
+            ):
+                completed_indexes.add(index)
+            else:
+                pending_indexes.append(index)
+        if not pending_indexes:
+            return len(completed_indexes)
+
+        self.signals.stageChanged.emit(
+            f"正在并行下载 {len(pending_indexes)} 个缺失页面…"
+        )
+        results = Queue()
+        self.page_download_scheduler.submitMany(
+            self._page_download_key,
+            (
+                _GalleryPageDownloadTask(
+                    self,
+                    previews[index],
+                    index,
+                    target_folder,
+                    results,
+                    total,
+                )
+                for index in pending_indexes
+            ),
+        )
+
+        first_error = None
+        for _ in pending_indexes:
+            result = results.get()
+            if result.error is not None:
+                if (
+                    first_error is None
+                    and not isinstance(result.error, _DownloadCancelled)
+                ):
+                    first_error = result.error
+                continue
+            self._commit_downloaded_page(
+                gid,
+                result.page_index,
+                result.page_mode,
+                Path(result.page_path),
+                completed_indexes,
+                total,
+            )
+        if self.cancelled:
+            raise _DownloadCancelled()
+        if first_error is not None:
+            raise first_error
+        return len(completed_indexes)
+
+    def _commit_downloaded_page(
+        self,
+        gid,
+        index,
+        page_mode,
+        page_path,
+        completed_indexes,
+        total,
+    ):
+        completed_indexes.add(index)
+        completed_pages = len(completed_indexes)
+        self._completed_pages = completed_pages
+        self.user_repository.update_online_download(
+            gid,
+            completed_pages,
+            ONLINE_DOWNLOAD_DOWNLOADING,
+        )
+        if self._is_original_download:
+            with self._page_state_lock:
+                self._page_modes[index] = page_mode
+                self.user_repository.update_gallery_original_state(
+                    gid,
+                    ORIGINAL_STATE_DOWNLOADING,
+                    completed_pages,
+                    total,
+                    fallback_to_standard=(
+                        ORIGINAL_PAGE_MODE_BASE in self._page_modes
+                    ),
+                    page_modes=tuple(self._page_modes),
+                )
+            signal = (
+                self.signals.originalPageSaved
+                if self.download_mode == DOWNLOAD_MODE_ORIGINAL_LOCAL
+                else self.signals.pageSaved
+            )
+        else:
+            signal = self.signals.pageSaved
+        signal.emit(
+            gid,
+            index,
+            str(page_path),
+            completed_pages,
+            total,
+        )
+        self.signals.progressChanged.emit(completed_pages, total)
 
     def _validated_existing_folder(self):
         if self.existing_folder is None or not self.existing_folder.is_dir():
@@ -477,7 +694,7 @@ class OnlineGalleryDownloadWorker(QRunnable):
             raise ValueError(f"画廊页面 ID 不完整，缺少 {missing} 页")
         return previews
 
-    def _retry(self, operation, label):
+    def _retry(self, operation, label, speed_key=None):
         last_error = None
         for attempt in range(1, self.retry_count + 1):
             self._check_cancelled()
@@ -487,8 +704,10 @@ class OnlineGalleryDownloadWorker(QRunnable):
                 raise
             except Exception as error:
                 last_error = error
-                self._smoothed_speed = 0.0
-                self.signals.speedChanged.emit(0.0)
+                if speed_key is None:
+                    self._smoothed_speed = 0.0
+                else:
+                    self._clear_page_speed(speed_key)
                 self._check_cancelled()
                 if attempt >= self.retry_count:
                     break
@@ -503,12 +722,13 @@ class OnlineGalleryDownloadWorker(QRunnable):
         preview,
         index,
         progress_callback=None,
-        completed_pages=0,
         total=0,
+        speed_key=None,
     ):
         page_mode = ""
         if self._is_original_download:
-            page_mode = self._page_modes[index]
+            with self._page_state_lock:
+                page_mode = self._page_modes[index]
         if not self._is_original_download or page_mode == ORIGINAL_PAGE_MODE_BASE:
             method = "load_gallery_page_image"
             page_mode = ORIGINAL_PAGE_MODE_BASE
@@ -520,6 +740,7 @@ class OnlineGalleryDownloadWorker(QRunnable):
                     progress_callback=progress_callback,
                 ),
                 f"第 {index + 1} 页",
+                speed_key=speed_key,
             )
         else:
             try:
@@ -531,20 +752,12 @@ class OnlineGalleryDownloadWorker(QRunnable):
                         progress_callback=progress_callback,
                     ),
                     f"第 {index + 1} 页原图",
+                    speed_key=speed_key,
                 )
                 page_mode = ORIGINAL_PAGE_MODE_ORIGINAL
             except OriginalImageUnavailableError:
                 page_mode = ORIGINAL_PAGE_MODE_BASE
-                self._page_modes[index] = page_mode
-                self.user_repository.update_gallery_original_state(
-                    self.detail.gallery.gid,
-                    ORIGINAL_STATE_DOWNLOADING,
-                    completed_pages=completed_pages,
-                    page_count=total,
-                    error="",
-                    fallback_to_standard=True,
-                    page_modes=tuple(self._page_modes),
-                )
+                self._checkpoint_original_fallback(index, total)
                 self.signals.stageChanged.emit(
                     f"第 {index + 1} 页没有原图，正在下载基础图…"
                 )
@@ -556,6 +769,7 @@ class OnlineGalleryDownloadWorker(QRunnable):
                         progress_callback=progress_callback,
                     ),
                     f"第 {index + 1} 页基础图",
+                    speed_key=speed_key,
                 )
         if not data or QImage.fromData(data).isNull():
             raise ValueError(f"第 {index + 1} 页不是有效图片")
@@ -582,6 +796,39 @@ class OnlineGalleryDownloadWorker(QRunnable):
             else self._smoothed_speed * 0.65 + current_speed * 0.35
         )
         self.signals.speedChanged.emit(self._smoothed_speed)
+
+    def _update_page_speed(self, page_index, current_speed):
+        page_index = int(page_index)
+        current_speed = max(0.0, float(current_speed or 0))
+        with self._speed_lock:
+            previous = self._page_speeds.get(page_index, 0.0)
+            self._page_speeds[page_index] = (
+                current_speed
+                if previous <= 0
+                else previous * 0.65 + current_speed * 0.35
+            )
+            aggregate = sum(self._page_speeds.values())
+        self.signals.speedChanged.emit(aggregate)
+
+    def _clear_page_speed(self, page_index):
+        with self._speed_lock:
+            self._page_speeds.pop(int(page_index), None)
+            aggregate = sum(self._page_speeds.values())
+        if aggregate > 0:
+            self.signals.speedChanged.emit(aggregate)
+
+    def _checkpoint_original_fallback(self, page_index, total):
+        with self._page_state_lock:
+            self._page_modes[int(page_index)] = ORIGINAL_PAGE_MODE_BASE
+            self.user_repository.update_gallery_original_state(
+                self.detail.gallery.gid,
+                ORIGINAL_STATE_DOWNLOADING,
+                completed_pages=self._completed_pages,
+                page_count=total,
+                error="",
+                fallback_to_standard=True,
+                page_modes=tuple(self._page_modes),
+            )
 
     def _cancelable_wait(self, seconds):
         deadline = time.monotonic() + max(0, float(seconds))
