@@ -12,6 +12,8 @@ class MultiWindowCoordinator(QObject):
         self._startupRecoveryClaimed = False
         self.onlineDownloadThreadPool = QThreadPool(self)
         self.onlineDownloadThreadPool.setMaxThreadCount(3)
+        self.downloadRegistrationThreadPool = QThreadPool(self)
+        self.downloadRegistrationThreadPool.setMaxThreadCount(1)
         self.galleryUpdateThreadPool = QThreadPool(self)
         self.galleryUpdateThreadPool.setMaxThreadCount(1)
         self.originalFileThreadPool = QThreadPool(self)

@@ -94,6 +94,7 @@ from app.workers.reading_progress_worker import (
 from app.workers.eh_online_worker import LocalGallerySyncWorker, OnlineDetailWorker
 from app.workers.online_gallery_download_worker import (
     LocalGalleryPageDownloadWorker,
+    OnlineDownloadRegistrationWorker,
     OnlineGalleryDownloadWorker,
 )
 from app.workers.gallery_update_worker import GalleryUpdateWorker
@@ -177,6 +178,9 @@ class MainWindow(FluentWindow):
         self.onlineDetailThreadPool.setMaxThreadCount(2)
         self.onlineDownloadThreadPool = (
             self.windowCoordinator.onlineDownloadThreadPool
+        )
+        self.onlineDownloadRegistrationThreadPool = (
+            self.windowCoordinator.downloadRegistrationThreadPool
         )
         self.windowCoordinator.setDownloadConcurrency(
             cfg.get(cfg.onlineEhDownloadConcurrency)
@@ -1449,7 +1453,8 @@ class MainWindow(FluentWindow):
 
     def prepareOnlineGalleryDownload(self, item, provider, cover_data=b""):
         gid = int(item.gid)
-        if self._isGalleryTrashed(gid):
+        coordinator = getattr(self, "windowCoordinator", None)
+        if coordinator is not None and coordinator.hasTrashOperation(gid):
             InfoBar.info(
                 title=self.tr("画廊位于回收站"),
                 content=self.tr("请先从回收站还原这个画廊。"),
@@ -1459,12 +1464,6 @@ class MainWindow(FluentWindow):
                 duration=3000,
                 parent=self.onlineMangaInterface,
             )
-            return
-        original = self.userLibraryRepository.gallery_original_state(gid)
-        if (
-            original is not None
-            and original.state == ORIGINAL_STATE_ACTIVE
-        ):
             return
         if self._downloadOwner(gid) is not None:
             InfoBar.info(
@@ -1478,6 +1477,54 @@ class MainWindow(FluentWindow):
             )
             return
         site = str(provider.settings.site)
+        if cover_data:
+            self.onlineGalleryCache.put_cover_data(site, item, cover_data)
+        self.onlineMangaInterface.setGalleryDownloaded(gid)
+        InfoBar.info(
+            title=self.tr("正在加入下载"),
+            content=self.tr("正在后台登记画廊与本地目录…"),
+            orient=Qt.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP_RIGHT,
+            duration=1800,
+            parent=self.onlineMangaInterface,
+        )
+        worker = OnlineDownloadRegistrationWorker(
+            gid,
+            lambda: self._registerOnlineGalleryDownload(
+                item,
+                site,
+                cover_data,
+            ),
+        )
+        worker.signals.succeeded.connect(
+            lambda result: self._finishOnlineDownloadRegistration(
+                worker,
+                item,
+                provider,
+                cover_data,
+                site,
+                result,
+            )
+        )
+        worker.signals.failed.connect(
+            lambda _gid, message: self._failOnlineDownloadPreparation(
+                worker,
+                gid,
+                message,
+            )
+        )
+        self._localDownloadPrepareWorkers[gid] = worker
+        self.onlineDownloadRegistrationThreadPool.start(worker)
+
+    def _registerOnlineGalleryDownload(self, item, site, cover_data=b""):
+        gid = int(item.gid)
+        trash_lookup = getattr(self.userLibraryRepository, "gallery_trash", None)
+        if trash_lookup is not None and trash_lookup(gid) is not None:
+            return {"blocked": "trash"}
+        original = self.userLibraryRepository.gallery_original_state(gid)
+        if original is not None and original.state == ORIGINAL_STATE_ACTIVE:
+            return {"blocked": "original_active"}
         existing = self.userLibraryRepository.online_gallery_download(gid)
         existing_metadata = dict(existing.metadata or {}) if existing else {}
         target_label = str(
@@ -1521,19 +1568,63 @@ class MainWindow(FluentWindow):
             record,
             existing_comments,
         )
-        try:
-            record, folder, newly_registered = self._prepareOnlineDownloadTarget(
-                record,
-                build_online_detail_from_gallery(item),
-                cover_data,
-                target_label,
-                existing_comments,
-            )
-        except Exception as error:
-            self._markManagedDownloadFailed(gid, str(error))
-            self._showOnlineDownloadPreparationError(str(error))
+        record, folder, newly_registered = self._prepareOnlineDownloadTarget(
+            record,
+            build_online_detail_from_gallery(item),
+            cover_data,
+            target_label,
+            existing_comments,
+        )
+        local_item = self._loadLocalGalleryItem(gid, folder)
+        return {
+            "record": record,
+            "folder": folder,
+            "newly_registered": newly_registered,
+            "local_item": local_item,
+            "target_label": target_label,
+        }
+
+    def _finishOnlineDownloadRegistration(
+        self, worker, item, provider, cover_data, site, result
+    ):
+        gid = int(item.gid)
+        if self._localDownloadPrepareWorkers.get(gid) is not worker:
             return
-        self._announceOnlineDownloadRegistration(gid, newly_registered, folder)
+        self._localDownloadPrepareWorkers.pop(gid, None)
+        blocked = result.get("blocked")
+        if blocked is not None:
+            self._syncOnlineGalleryDownloadMarkers()
+            title, content = {
+                "trash": (
+                    self.tr("画廊位于回收站"),
+                    self.tr("请先从回收站还原这个画廊。"),
+                ),
+                "original_active": (
+                    self.tr("下载任务已存在"),
+                    self.tr("这个画廊已经是原图画廊。"),
+                ),
+            }[blocked]
+            InfoBar.info(
+                title=title,
+                content=content,
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=3000,
+                parent=self.onlineMangaInterface,
+            )
+            return
+        record = result["record"]
+        folder = result["folder"]
+        newly_registered = result["newly_registered"]
+        local_item = result["local_item"]
+        target_label = result["target_label"]
+        self._announceOnlineDownloadRegistration(
+            gid,
+            newly_registered,
+            folder,
+            local_item,
+        )
         self._setCurrentDownloadState(
             gid,
             ONLINE_DOWNLOAD_QUEUED,
@@ -1541,9 +1632,7 @@ class MainWindow(FluentWindow):
             record.page_count,
             self.tr("正在获取画廊信息…"),
         )
-
-        if cover_data:
-            self.onlineGalleryCache.put_cover_data(site, item, cover_data)
+        self._refreshDownloadManager()
         label_text = target_label or self.tr("未分类")
         InfoBar.success(
             title=self.tr("已加入下载"),
@@ -1563,27 +1652,25 @@ class MainWindow(FluentWindow):
                 target_label,
             )
             return
-
-        worker = OnlineDetailWorker(provider, item, cover_data)
-        worker.signals.loaded.connect(
+        detail_worker = OnlineDetailWorker(provider, item, cover_data)
+        detail_worker.signals.loaded.connect(
             lambda detail, data: self._finishOnlineDownloadPreparation(
-                worker,
+                detail_worker,
                 detail,
                 data,
                 site,
                 target_label,
             )
         )
-        worker.signals.failed.connect(
+        detail_worker.signals.failed.connect(
             lambda message: self._failOnlineDownloadPreparation(
-                worker,
+                detail_worker,
                 gid,
                 message,
             )
         )
-        self._localDownloadPrepareWorkers[gid] = worker
-        self._refreshDownloadManager()
-        self.onlineDetailThreadPool.start(worker)
+        self._localDownloadPrepareWorkers[gid] = detail_worker
+        self.onlineDetailThreadPool.start(detail_worker)
 
     def _finishOnlineDownloadPreparation(
         self, worker, detail, cover_data, site, target_label
@@ -1611,6 +1698,7 @@ class MainWindow(FluentWindow):
                 download_provider,
                 cover_data,
                 target_label=target_label,
+                pre_registered=True,
             )
         except Exception as error:
             self._markManagedDownloadFailed(gid, str(error))
@@ -2638,11 +2726,15 @@ class MainWindow(FluentWindow):
         return prepared, folder, not previous_dirname
 
     def _announceOnlineDownloadRegistration(
-        self, gid, reload_library=False, folder=None
+        self, gid, reload_library=False, folder=None, local_item=None
     ):
         gid = int(gid)
         self.onlineMangaInterface.setGalleryDownloaded(gid)
-        refreshed = self._refreshLocalGalleryItem(gid, folder)
+        refreshed = (
+            self._applyLocalGalleryItem(local_item)
+            if local_item is not None
+            else self._refreshLocalGalleryItem(gid, folder)
+        )
         if reload_library and not refreshed:
             self.localMangaInterface.reload()
             self._publishSharedState("library_refresh")
@@ -2656,6 +2748,7 @@ class MainWindow(FluentWindow):
         target_label=None,
         download_mode=DOWNLOAD_MODE_STANDARD,
         existing_folder=None,
+        pre_registered=False,
     ):
         gid = int(detail.gallery.gid)
         if self._downloadOwner(gid) is not None:
@@ -2698,18 +2791,28 @@ class MainWindow(FluentWindow):
             metadata=online_detail_metadata(detail, target_label),
             created_at=existing.created_at if existing is not None else 0,
         )
-        self.userLibraryRepository.save_online_gallery_download(
-            record,
-            detail.comments,
-        )
-        record, folder, newly_registered = self._prepareOnlineDownloadTarget(
-            record,
-            detail,
-            cover_data,
-            target_label,
-            detail.comments,
-            existing_folder,
-        )
+        if (
+            pre_registered
+            and download_mode == DOWNLOAD_MODE_STANDARD
+            and existing is not None
+            and existing.dirname
+        ):
+            record = replace(record, dirname=existing.dirname)
+            folder = Path(cfg.get(cfg.ehViewerMangaRoot)) / existing.dirname
+            newly_registered = False
+        else:
+            self.userLibraryRepository.save_online_gallery_download(
+                record,
+                detail.comments,
+            )
+            record, folder, newly_registered = self._prepareOnlineDownloadTarget(
+                record,
+                detail,
+                cover_data,
+                target_label,
+                detail.comments,
+                existing_folder,
+            )
         if download_mode in {
             DOWNLOAD_MODE_ORIGINAL_DIRECT,
             DOWNLOAD_MODE_ORIGINAL_LOCAL,
@@ -2743,7 +2846,8 @@ class MainWindow(FluentWindow):
                     ),
                 )
             )
-        self._announceOnlineDownloadRegistration(gid, newly_registered, folder)
+        if not pre_registered:
+            self._announceOnlineDownloadRegistration(gid, newly_registered, folder)
         worker = OnlineGalleryDownloadWorker(
             provider=provider,
             detail=detail,
@@ -3457,6 +3561,10 @@ class MainWindow(FluentWindow):
             int(item.gid) for item in getattr(self, "_libraryItems", ())
         }
         gids.update(int(record.gid) for record in incomplete_records)
+        active_state = getattr(self, "_activeDownloadState", None)
+        if active_state is not None:
+            active_gids, _speeds = active_state()
+            gids.update(int(gid) for gid in active_gids)
         self.onlineMangaInterface.setDownloadedGids(gids)
 
     def _updateOnlineDownloadConcurrency(self, value):

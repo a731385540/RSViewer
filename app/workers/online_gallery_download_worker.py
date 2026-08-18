@@ -36,6 +36,40 @@ from app.services.online_download_builder import online_detail_metadata
 from app.sources.eh_online_source import OriginalImageUnavailableError
 
 
+class OnlineDownloadRegistrationSignals(QObject):
+    succeeded = Signal(object)
+    failed = Signal(int, str)
+
+
+class OnlineDownloadRegistrationWorker(QRunnable):
+    """Run local download registration without blocking the GUI thread."""
+
+    def __init__(self, gid, operation):
+        super().__init__()
+        self.gid = int(gid)
+        self.operation = operation
+        self.cancelled = False
+        self.signals = OnlineDownloadRegistrationSignals()
+
+    def run(self):
+        if self.cancelled:
+            return
+        try:
+            result = self.operation()
+        except Exception as error:
+            if not self.cancelled:
+                try:
+                    self.signals.failed.emit(self.gid, str(error))
+                except RuntimeError:
+                    pass
+            return
+        if not self.cancelled:
+            try:
+                self.signals.succeeded.emit(result)
+            except RuntimeError:
+                pass
+
+
 class OnlineGalleryDownloadSignals(QObject):
     stageChanged = Signal(str)
     progressChanged = Signal(int, int)

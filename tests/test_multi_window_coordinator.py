@@ -55,6 +55,10 @@ class MultiWindowCoordinatorTests(unittest.TestCase):
     def test_process_wide_pool_limits_are_enforced(self):
         self.coordinator.setDownloadConcurrency(6)
         self.assertEqual(3, self.coordinator.onlineDownloadThreadPool.maxThreadCount())
+        self.assertEqual(
+            1,
+            self.coordinator.downloadRegistrationThreadPool.maxThreadCount(),
+        )
         self.assertEqual(1, self.coordinator.galleryUpdateThreadPool.maxThreadCount())
 
     def test_queued_trash_target_blocks_other_gallery_mutations(self):

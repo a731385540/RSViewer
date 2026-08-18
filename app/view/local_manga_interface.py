@@ -73,6 +73,7 @@ from app.domain.online_download import (
     ORIGINAL_STATE_ACTIVE,
 )
 from app.repositories.user_library_repository import UserLibraryRepository
+from app.services.manga_classification_index import MangaClassificationIndex
 from app.sources.ehviewer_source import EhViewerDataSource
 from app.view.eh_tag_search_line_edit import EhTagSearchLineEdit
 from app.workers.similar_manga_worker import SimilarMangaWorker
@@ -1131,6 +1132,7 @@ class LocalMangaInterface(QWidget):
         self.searchHistoryService = search_history_service
         self._all_items: List[MangaItem] = []
         self._filtered_items: List[MangaItem] = []
+        self._classification_index = MangaClassificationIndex()
         self._pending_item_upserts: Dict[int, MangaItem] = {}
         self._cards: List[QWidget] = []
         self._empty_label: Optional[BodyLabel] = None
@@ -1499,6 +1501,10 @@ class LocalMangaInterface(QWidget):
             gid for gid in ordered_gids if gid in by_gid
         )
         self._all_items = [by_gid[gid] for gid in self._collection_order]
+        self._classification_index.rebuild(
+            self._all_items,
+            self._taxonomy_labels,
+        )
         self._selected_gids.intersection_update(self._collection_order)
         self._updateSelectionState()
         self.applyFilters(reset_page=True)
@@ -1524,6 +1530,7 @@ class LocalMangaInterface(QWidget):
         )
         if existing_index is None:
             self._all_items.append(item)
+            self._classification_index.upsert(item)
             if not self._itemMatchesCurrentFilters(item):
                 if self._collection_kind:
                     self.resultLabel.setText(
@@ -1552,6 +1559,7 @@ class LocalMangaInterface(QWidget):
 
         previous = self._all_items[existing_index]
         self._all_items[existing_index] = item
+        self._classification_index.upsert(item)
         filter_identity = lambda value: (
             value.english_title,
             value.original_title,
@@ -1588,12 +1596,7 @@ class LocalMangaInterface(QWidget):
             return False
         if self._collection_kind:
             return True
-        taxonomy_label_ids = (
-            self._activeTaxonomyLabelIds()
-            if self._tag_mode == self.TAG_TAXONOMY and not self._show_all_manga
-            else set()
-        )
-        return self._matchesActiveTag(item, taxonomy_label_ids)
+        return int(item.gid) in self._activeTagGids()
 
     def tagMetadata(self):
         return (
@@ -1606,6 +1609,7 @@ class LocalMangaInterface(QWidget):
         self._primary_labels = list(primary_labels)
         self._playlists = list(playlists)
         self._taxonomy_labels = list(taxonomy_labels)
+        self._classification_index.set_taxonomy_labels(self._taxonomy_labels)
         self._populatePrimaryLabels(self._primary_labels)
         self._populatePlaylists(self._playlists)
         self._populateTaxonomy(self._taxonomy_labels)
@@ -1680,6 +1684,10 @@ class LocalMangaInterface(QWidget):
         )
         self._playlists = list(playlists)
         self._taxonomy_labels = list(taxonomy_labels)
+        self._classification_index.rebuild(
+            self._all_items,
+            self._taxonomy_labels,
+        )
         self._populatePrimaryLabels(self._primary_labels)
         self._populatePlaylists(self._playlists)
         self._populateTaxonomy(self._taxonomy_labels)
@@ -1709,6 +1717,7 @@ class LocalMangaInterface(QWidget):
         self._pending_reveal_gid = None
         self._all_items = []
         self._filtered_items = []
+        self._classification_index.rebuild(())
         self.resultLabel.setText(self.tr("读取失败：{}").format(message))
         self._renderCards()
 
@@ -2033,6 +2042,10 @@ class LocalMangaInterface(QWidget):
             if item.primary_label.casefold() == target else item
             for item in self._all_items
         ]
+        self._classification_index.rebuild(
+            self._all_items,
+            self._taxonomy_labels,
+        )
         if self._primary_label_filter.casefold() == target:
             self._primary_label_filter = "__none__"
             cfg.set(cfg.mangaPrimaryLabelFilter, "__none__")
@@ -2061,6 +2074,10 @@ class LocalMangaInterface(QWidget):
             )
             for item in self._all_items
         ]
+        self._classification_index.rebuild(
+            self._all_items,
+            self._taxonomy_labels,
+        )
         self._populatePlaylists(self._playlists)
         self._populateTaxonomy(self._taxonomy_labels)
         if self._playlist_filter_id is not None:
@@ -2239,6 +2256,9 @@ class LocalMangaInterface(QWidget):
                 if item.gid in target_gid_set else item
                 for item in self._all_items
             ]
+            for item in self._all_items:
+                if item.gid in target_gid_set:
+                    self._classification_index.upsert(item)
             self.applyFilters(reset_page=False)
 
         if normalized_label:
@@ -2635,15 +2655,11 @@ class LocalMangaInterface(QWidget):
             self._updatePagination()
             self._renderCards()
             return
-        taxonomy_label_ids = (
-            self._activeTaxonomyLabelIds()
-            if self._tag_mode == self.TAG_TAXONOMY and not self._show_all_manga
-            else set()
-        )
+        active_gids = self._activeTagGids()
         self._filtered_items = [
             item
             for item in self._all_items
-            if self._matchesActiveTag(item, taxonomy_label_ids)
+            if int(item.gid) in active_gids
             and item.matches_terms(query_terms)
         ]
         if (
@@ -2673,36 +2689,36 @@ class LocalMangaInterface(QWidget):
         self._renderCards()
 
     def _matchesActiveTag(self, item: MangaItem, taxonomy_label_ids=None) -> bool:
+        return int(item.gid) in self._activeTagGids()
+
+    def _activeTagGids(self):
         if self._show_all_manga:
-            return True
+            return self._classification_index.gids_for(
+                MangaClassificationIndex.ALL
+            )
         if self._tag_mode == self.TAG_CATEGORY:
-            if self._primary_label_filter == "__none__":
-                return not item.primary_label
-            return item.primary_label == self._primary_label_filter
+            return self._classification_index.gids_for(
+                MangaClassificationIndex.CATEGORY,
+                self._primary_label_filter,
+            )
         if self._tag_mode == self.TAG_PLAYLIST:
-            return bool(
-                self._playlist_filter_name
-                and self._playlist_filter_name in item.multiple_labels
+            return self._classification_index.gids_for(
+                MangaClassificationIndex.PLAYLIST,
+                self._playlist_filter_name,
             )
-        return bool(
-            self._taxonomy_filter_id is not None
-            and set(item.taxonomy_label_ids).intersection(
-                taxonomy_label_ids or ()
-            )
+        return self._classification_index.gids_for(
+            MangaClassificationIndex.TAXONOMY,
+            self._taxonomy_filter_id,
         )
 
     def _activeTaxonomyLabelIds(self):
         if self._taxonomy_filter_id is None:
             return set()
-        result = {self._taxonomy_filter_id}
-        changed = True
-        while changed:
-            changed = False
-            for label_id, parent_id, _name, _count in self._taxonomy_labels:
-                if parent_id in result and label_id not in result:
-                    result.add(label_id)
-                    changed = True
-        return result
+        return set(
+            self._classification_index.taxonomy_label_ids(
+                self._taxonomy_filter_id
+            )
+        )
 
     def pageCount(self) -> int:
         return max(1, math.ceil(len(self._filtered_items) / self._page_size))

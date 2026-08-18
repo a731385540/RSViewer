@@ -370,8 +370,8 @@ class LocalLibraryControlsTests(unittest.TestCase):
         self.assertEqual(7, splitter_handle.width())
         QApplication.sendEvent(splitter_handle, QEvent(QEvent.Enter))
         self.assertTrue(splitter_handle._hovered)
-        self.interface._all_items[0] = replace(
-            self.interface._all_items[0], primary_label="分类 A"
+        self.interface.upsertItem(
+            replace(self.interface._all_items[0], primary_label="分类 A")
         )
         self.interface.primaryLabelTree.setCurrentItem(
             self.interface.primaryLabelTree.topLevelItem(1)

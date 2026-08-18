@@ -63,6 +63,7 @@ RSViewer/
    ├─ services/eh_tag_importer.py    # EH 标签 Markdown 快照解析与校验
    ├─ services/eh_tag_search.py      # 启动加载的内存标签检索表与本地查询解析
    ├─ services/search_history.py     # 本地/在线共享的持久化搜索历史服务
+   ├─ services/manga_classification_index.py # 分类/播放列表/归类到 GID 的内存倒排索引
    ├─ services/multi_window_coordinator.py # 多窗口事件总线、共享线程池与任务所有权
    ├─ services/ehviewer_database_transfer.py # 旧库只读导入与兼容库原子导出
    ├─ services/library_organizer.py  # 未登记本地目录扫描、同步与回收站边界
@@ -177,6 +178,8 @@ RSViewer 自有 SQLite 使用 `PRAGMA user_version` 执行可重复迁移。版�
 
 “新窗口”必须创建同一进程内的完整 `MainWindow`，并复用单一 `MultiWindowCoordinator`。协调器持有全局下载、画廊更新、原图文件操作、整理和回收站线程池，聚合各窗口活动任务与速度；下载总并发硬上限 3，更新总并发硬上限 1，同一 GID 的开始/暂停/删除必须路由到实际任务所有者。只有第一个窗口可执行启动中断恢复，后续窗口不得把正在运行的任务误标为暂停。收藏、历史、阅读进度、标签变更、资源重载、下载、更新、整理、回收站和数据源切换通过进程内事件总线同步；接收窗口更新 UI 或从共享数据库重载时不得再次回传同一事件形成循环。关闭一个窗口只能取消该窗口拥有的 Worker，禁止 `clear()` 共享线程池而影响仍打开的其他窗口。
 
+分类、播放列表和树状归类的持久化事实仍是 SQLite 关系表；本地资源加载后必须构建单一 `MangaClassificationIndex`，以“类型 -> 标签 -> GID 集合”保存直接成员关系。“显示全部”通过同一索引的 `all_gids()` 获取全集，分类和播放列表直接取对应集合，父归类在查询时合并全部后代节点集合。单本增量刷新或分类操作成功后必须同步 `upsert`/重建索引，界面筛选不得再分别扫描每个 `MangaItem` 的分类字段来维护另一套判断。
+
 主窗口必须先初始化唯一的 `UserLibraryRepository`，再把其 `database_path` 传给本地数据源、下载、更新、整理、原图与回收站 Repository；禁止从配置或旧 JSON 键重新接入外部 `eh.db`。随后加载已导入的 EH 标签，构造一个全局共享的 `EhTagSearchIndex`，并创建单一 `SearchHistoryService` 供本地、收藏、本地历史和在线页面共享；不得让各页面重复读取四万多条标签或维护互相独立的搜索历史。标签仓库更新由 `scripts/import_eh_tags.py` 显式执行，主程序启动只加载 SQLite 快照，不扫描 Markdown。
 
 `SystemThemeListener` 是持有资源的后台监听器，关闭窗口时必须 `terminate()` 和 `deleteLater()`。
@@ -194,6 +197,8 @@ RSViewer 自有 SQLite 使用 `PRAGMA user_version` 执行可重复迁移。版�
 `EhOnlineSettings` 统一提供站点基址、规范化 Cookie、代理模式/映射和请求超时。Cookie 可粘贴完整 `ipb_member_id=...; ipb_pass_hash=...; igneous=...` 字符串，单独裸 token 按 `igneous` 兼容，并从 settings 的 `repr` 中排除。系统代理由标准库发现；Windows 把单一无 scheme 代理端点展开为同地址的 `http://` 与 `https://` 时，必须规范化为同一个 HTTP CONNECT 代理供 `requests` 使用。直连关闭 session 环境代理，手动模式验证并补全 HTTP(S) URL。源码中不得硬编码 Cookie 或本机代理；`eh_tool_refactored.py` 的全局默认凭据和代理必须保持为空，运行值仅由设置注入。列表翻页 URL 只允许当前 EH/EX 主机，缩略图只允许 EH/EX 与 `ehgt.org` HTTPS 主机。
 
 `OnlineMangaInterface` 为 `ehentai` 与 `exhentai` 分别维护独立的 `OnlineSiteState` 内存容器，保存搜索词、日期定位、当前页、翻页游标历史、滚动位置及最近 64 个页面结果。切换站点先恢复其容器，容器为空才请求该站首页；工具栏“刷新”始终绕过页面内存缓存重取当前页。搜索栏旁的日历按钮展开日期定位面板，链接图标按钮展开独立画廊网址输入框；网址必须通过统一的严格 EH/EX 画廊地址解析，取得 GID/token 后忽略输入地址所属站点，按当前 `_current_site` 重新生成目标 URL，并复用当前站点 provider 打开详情。结果支持 `card`、`list` 与 `extended` 三种视图，顶部图标按钮按该顺序循环且图标表示点击后的目标布局。`list` 是与本地标题列表同为 116px 高的无封面行，只展示标题、分类、上传者和页数；Card/List 只重建当前内存页，不得请求封面或切换远端模式。切入或切出 Extended 才由 `OnlineSearchWorker` 调用 `set_display_mode()`，沿用 `eh_tool_refactored.py` 会话请求 `inline_set=dm_l/dm_e` 并重取当前关键词、日期或游标页。当前页已成功加载的封面必须跨卡片重建复用，不得重新读取磁盘或下载。三类卡片右键菜单都提供“下载”，只允许鼠标左键触发详情；每张卡片通过 GID 判断本地是否已有画廊，命中时在左上角显示绿色下载图标。默认 Card 显示大封面、类型/评分、悬停滚动长标题、发布时间/上传者/页数；Extended 使用横向信息行和可换行标签，Minimal/Minimal+ 标签为空时显示缺省说明。类别色块统一使用 EH ct1–cta 渐变。列表请求使用独立搜索线程池，封面按单项任务提交到由 `onlineEhThumbnailConcurrency` 控制的专用线程池；`OnlineThumbnailCache` 按站点保存过期磁盘缓存。
+
+在线列表点击下载后必须立即在内存中占用该 GID 并标绿；SQLite 任务写入、兼容表更新、目录创建、封面落盘和本地条目读取必须进入 `MultiWindowCoordinator` 持有的共享单线程预登记池，禁止在 GUI 线程执行。预登记成功后再获取完整详情并进入统一下载 Worker，详情请求和下载线程排队期间均须保留可恢复任务记录。
 
 ### `app/repositories/ehviewer_download_repository.py` 与 `app/workers/online_gallery_download_worker.py`
 

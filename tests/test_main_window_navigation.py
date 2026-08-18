@@ -458,11 +458,13 @@ class MainWindowNavigationTests(unittest.TestCase):
         window = self.window
         repository = DownloadPreparationRepository()
         provider = SimpleNamespace(settings=SimpleNamespace(site="ehentai"))
-        pool = FakeThreadPool()
+        registration_pool = FakeThreadPool()
+        detail_pool = FakeThreadPool()
         states = []
         refreshed = []
         cached = []
         started = []
+        markers = []
         item = SimpleNamespace(
             gid=321,
             token="gallery-token",
@@ -479,7 +481,9 @@ class MainWindowNavigationTests(unittest.TestCase):
         window.userLibraryRepository = repository
         window._onlineDownloadWorkers = {}
         window._localDownloadPrepareWorkers = {}
-        window.onlineDetailThreadPool = pool
+        window.onlineDownloadRegistrationThreadPool = registration_pool
+        window.onlineDetailThreadPool = detail_pool
+        window.onlineMangaInterface.setGalleryDownloaded = markers.append
         window.onlineGalleryCache = SimpleNamespace(
             put_cover_data=lambda *_args: None,
             get_detail=lambda *_args: None,
@@ -498,14 +502,21 @@ class MainWindowNavigationTests(unittest.TestCase):
             with patch("app.view.main_window.OnlineDetailWorker", FakeBootstrapWorker):
                 window.prepareOnlineGalleryDownload(item, provider, b"cover")
 
+            self.assertNotIn(item.gid, repository.records)
+            self.assertEqual([item.gid], markers)
+            self.assertEqual(1, len(registration_pool.started))
+            registration_pool.started[0].run()
             record = repository.records[item.gid]
             self.assertEqual("queued", record.state)
             self.assertEqual("自动下载", record.metadata["download_label"])
             self.assertIn("正在获取画廊信息", states[-1][-1])
-            self.assertIs(pool.started[0], window._localDownloadPrepareWorkers[item.gid])
+            self.assertIs(
+                detail_pool.started[0],
+                window._localDownloadPrepareWorkers[item.gid],
+            )
 
             detail = SimpleNamespace(gallery=SimpleNamespace(gid=item.gid))
-            pool.started[0].signals.loaded.emit(detail, b"full-cover")
+            detail_pool.started[0].signals.loaded.emit(detail, b"full-cover")
             self.assertNotIn(item.gid, window._localDownloadPrepareWorkers)
             self.assertEqual([("ehentai", detail, b"full-cover")], cached)
             self.assertEqual(
@@ -520,7 +531,8 @@ class MainWindowNavigationTests(unittest.TestCase):
         markers = []
         reloads = []
         published = []
-        pool = FakeThreadPool()
+        registration_pool = FakeThreadPool()
+        detail_pool = FakeThreadPool()
         cover = image_bytes("green")
         gallery = OnlineGallery(
             gid=654321,
@@ -548,7 +560,8 @@ class MainWindowNavigationTests(unittest.TestCase):
             window._onlineDownloadWorkers = {}
             window._localDownloadPrepareWorkers = {}
             window._libraryItems = []
-            window.onlineDetailThreadPool = pool
+            window.onlineDownloadRegistrationThreadPool = registration_pool
+            window.onlineDetailThreadPool = detail_pool
             window.onlineGalleryCache = SimpleNamespace(
                 put_cover_data=lambda *_args: None,
                 get_detail=lambda *_args: None,
@@ -566,6 +579,9 @@ class MainWindowNavigationTests(unittest.TestCase):
                 ), patch("app.view.main_window.InfoBar.success"):
                     window.prepareOnlineGalleryDownload(gallery, provider, cover)
 
+                self.assertIsNone(repository.online_gallery_download(gallery.gid))
+                self.assertEqual([gallery.gid], markers)
+                registration_pool.started[0].run()
                 record = repository.online_gallery_download(gallery.gid)
                 folder = manga_root / record.dirname
                 self.assertEqual("queued", record.state)
@@ -589,10 +605,10 @@ class MainWindowNavigationTests(unittest.TestCase):
                     manga_root,
                 ).list_local_manga()
                 self.assertEqual([gallery.gid], [item.gid for item in listed])
-                self.assertEqual([gallery.gid], markers)
+                self.assertEqual([gallery.gid, gallery.gid], markers)
                 self.assertEqual([True], reloads)
                 self.assertIn(("library_refresh",), published)
-                self.assertEqual(1, len(pool.started))
+                self.assertEqual(1, len(detail_pool.started))
             finally:
                 cfg.set(cfg.ehViewerMangaRoot, old_root)
                 cfg.set(cfg.onlineEhDownloadLabel, old_label)
