@@ -3755,7 +3755,10 @@ class MainWindow(FluentWindow):
                     gid, (DOWNLOAD_INCOMPLETE, "none")
                 )
                 states[gid] = (DOWNLOAD_INCOMPLETE, reading)
-        self.onlineMangaInterface.setGalleryStates(states)
+        if hasattr(self.onlineMangaInterface, "setGalleryStates"):
+            self.onlineMangaInterface.setGalleryStates(states)
+        else:
+            self.onlineMangaInterface.setDownloadedGids(states)
 
     def _updateOnlineDownloadConcurrency(self, value):
         coordinator = getattr(self, "windowCoordinator", None)

@@ -35,6 +35,7 @@ from app.services.online_gallery_memory_cache import OnlineGalleryMemoryCache
 from app.sources.ehviewer_source import EhViewerDataSource
 from app.view.local_manga_interface import manga_metadata_text
 from app.view.manga_detail_interface import MangaDetailInterface, group_manga_tags
+from app.view.similar_gallery_browser_window import SimilarGalleryBrowserWindow
 from app.workers.reading_progress_worker import ReadingProgressSaveWorker
 
 
@@ -171,6 +172,30 @@ class ReadingProgressTests(unittest.TestCase):
         self.assertEqual((30,), reopened.latest_similar_search().result_gids)
         reopened.purge_gallery(11)
         self.assertIsNone(reopened.latest_similar_search())
+
+    def test_similar_browser_replaces_results_and_reuses_detail_window(self):
+        page = self._create_pages(1)[0]
+        first = replace(make_item(self.root, (page,)), gid=20)
+        second = replace(make_item(self.root, (page,)), gid=30)
+        browser = SimilarGalleryBrowserWindow(
+            EhViewerDataSource(self.root / "unused.db", self.root),
+            self.repository,
+        )
+        record = LatestSimilarSearch(10, "Progress", (20, 30), 1)
+        browser.setSearch(record, (first, second))
+
+        self.assertEqual(2, browser.resultList.count())
+        browser._openResult(browser.resultList.item(0))
+        self.assertIs(browser.detail, browser.stack.currentWidget())
+        browser.showResults()
+        self.assertIs(browser.resultPage, browser.stack.currentWidget())
+
+        replacement = LatestSimilarSearch(40, "Other", (30,), 2)
+        browser.setSearch(replacement, (second,))
+        self.assertEqual(1, browser.resultList.count())
+        self.assertIn("Other", browser.summaryLabel.text())
+        browser.close()
+        browser.deleteLater()
 
     def test_v17_original_fallback_migrates_to_per_page_base_modes(self):
         with closing(sqlite3.connect(str(self.repository.database_path))) as connection:

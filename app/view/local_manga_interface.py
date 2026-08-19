@@ -301,12 +301,13 @@ def paint_manga_download_state(card):
 def local_gallery_states(item):
     download_state = (
         DOWNLOAD_COMPLETE
-        if item.download_complete is True and not item.standard_download_pending
+        if getattr(item, "download_complete", None) is True
+        and not bool(getattr(item, "standard_download_pending", False))
         else DOWNLOAD_INCOMPLETE
     )
-    if item.reading_completed:
+    if bool(getattr(item, "reading_completed", False)):
         reading_state = READING_COMPLETE
-    elif item.progress_page_index is not None:
+    elif getattr(item, "progress_page_index", None) is not None:
         reading_state = READING_PARTIAL
     else:
         reading_state = READING_NONE
