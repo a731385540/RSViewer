@@ -3,8 +3,9 @@ from pathlib import Path
 from typing import List, Optional
 
 from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QImage, QImageReader, QPixmap
+from PySide6.QtGui import QAction, QImage, QImageReader, QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -20,6 +21,7 @@ from qfluentwidgets import (
     ProgressBar,
     PrimaryPushButton,
     PushButton,
+    RoundMenu,
     ScrollArea,
     SegmentedWidget,
     SimpleCardWidget,
@@ -441,16 +443,21 @@ class MangaDetailInterface(QWidget):
     onlineDownloadCancelRequested = Signal(int)
     localMangaResolved = Signal(object)
     progressResolved = Signal(int, int, int)
+    readingRecordClearRequested = Signal(int)
+    selectedTitleSearchRequested = Signal(int, str)
+    similarResultsRequested = Signal()
 
     def __init__(
         self,
         source: EhViewerDataSource,
         user_repository: UserLibraryRepository,
         parent=None,
+        tag_search_index=None,
     ):
         super().__init__(parent)
         self.source = source
         self.userRepository = user_repository
+        self.tagSearchIndex = tag_search_index
         self.setObjectName("mangaDetailInterface")
         self._item: Optional[MangaItem] = None
         self._preview_tiles: List[PreviewTile] = []
@@ -519,12 +526,24 @@ class MangaDetailInterface(QWidget):
             QSizePolicy.Ignored, QSizePolicy.Preferred
         )
         _enable_text_copy(self.originalTitleLabel)
+        self.originalTitleLabel.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.originalTitleLabel.customContextMenuRequested.connect(
+            lambda position: self._showTitleContextMenu(
+                self.originalTitleLabel, position
+            )
+        )
         self.englishTitleLabel = BodyLabel("", self.infoCard)
         self.englishTitleLabel.setWordWrap(True)
         self.englishTitleLabel.setSizePolicy(
             QSizePolicy.Ignored, QSizePolicy.Preferred
         )
         _enable_text_copy(self.englishTitleLabel)
+        self.englishTitleLabel.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.englishTitleLabel.customContextMenuRequested.connect(
+            lambda position: self._showTitleContextMenu(
+                self.englishTitleLabel, position
+            )
+        )
         self.metadataLabel = BodyLabel("", self.infoCard)
         self.metadataLabel.setWordWrap(True)
         self.metadataLabel.setSizePolicy(
@@ -537,6 +556,20 @@ class MangaDetailInterface(QWidget):
             self.infoCard,
         )
         self.detailMetadataButton.clicked.connect(self._toggleDetailedMetadata)
+        self.similarResultsButton = PushButton(
+            FIF.SEARCH,
+            self.tr("无相似画廊"),
+            self.infoCard,
+        )
+        self.similarResultsButton.clicked.connect(self.similarResultsRequested)
+        self.similarResultsButton.hide()
+        self.keyTagsWidget = QWidget(self.infoCard)
+        self.keyTagsWidget.setObjectName("mangaKeyTags")
+        self.keyTagsLayout = FlowLayout(self.keyTagsWidget, isTight=True)
+        self.keyTagsLayout.setContentsMargins(0, 0, 0, 0)
+        self.keyTagsLayout.setHorizontalSpacing(8)
+        self.keyTagsLayout.setVerticalSpacing(7)
+        self.keyTagsWidget.hide()
         self.detailMetadataLabel = BodyLabel("", self.infoCard)
         self.detailMetadataLabel.setWordWrap(True)
         self.detailMetadataLabel.setSizePolicy(
@@ -559,9 +592,16 @@ class MangaDetailInterface(QWidget):
         text_layout.setSpacing(10)
         text_layout.addWidget(self.originalTitleLabel)
         text_layout.addWidget(self.englishTitleLabel)
+        text_layout.addWidget(self.keyTagsWidget)
         text_layout.addSpacing(4)
         text_layout.addWidget(self.metadataLabel)
-        text_layout.addWidget(self.detailMetadataButton, 0, Qt.AlignLeft)
+        metadata_actions = QHBoxLayout()
+        metadata_actions.setContentsMargins(0, 0, 0, 0)
+        metadata_actions.setSpacing(8)
+        metadata_actions.addWidget(self.detailMetadataButton)
+        metadata_actions.addWidget(self.similarResultsButton)
+        metadata_actions.addStretch(1)
+        text_layout.addLayout(metadata_actions)
         text_layout.addWidget(self.detailMetadataLabel)
         text_layout.addWidget(self.galleryVersionLabel)
         text_layout.addStretch(1)
@@ -712,6 +752,13 @@ class MangaDetailInterface(QWidget):
         )
         self.readButton.clicked.connect(self._requestRead)
         action_layout.addWidget(self.readButton)
+        self.clearProgressButton = PushButton(
+            FIF.DELETE,
+            self.tr("清空阅读记录"),
+            self.operationCard,
+        )
+        self.clearProgressButton.clicked.connect(self._requestClearProgress)
+        action_layout.addWidget(self.clearProgressButton)
         operation_layout.addWidget(self.actionWidget)
         self.downloadProgressLabel.hide()
         self.downloadProgressBar.hide()
@@ -724,6 +771,7 @@ class MangaDetailInterface(QWidget):
         self.syncButton.hide()
         self.updateButton.hide()
         self.openFolderButton.hide()
+        self.clearProgressButton.hide()
 
         self.previewCard = SimpleCardWidget(self)
         preview_layout = QVBoxLayout(self.previewCard)
@@ -867,6 +915,7 @@ class MangaDetailInterface(QWidget):
         self._local_online_provider = None
         self._local_online_cache = None
         self._online_download_active = False
+        self.setSimilarSearchRecord(None)
         self._original_download_active = False
         self._original_operation_active = False
         self._preview_source = "standard"
@@ -897,6 +946,9 @@ class MangaDetailInterface(QWidget):
         self.deleteCompressedButton.hide()
         self.syncButton.show()
         self.openFolderButton.show()
+        self.clearProgressButton.setVisible(
+            item.progress_page_index is not None or item.reading_completed
+        )
         self.syncButton.setEnabled(bool(item.gallery_token))
         self.syncButton.setText(self.tr("同步信息"))
         self.syncButton.setToolTip(
@@ -931,6 +983,7 @@ class MangaDetailInterface(QWidget):
         self.updateButton.setVisible(bool(item.newer_gallery_urls))
         self.updateButton.setEnabled(bool(item.gallery_token))
         self._setTags(item.tags)
+        self._setKeyTags(item.tags)
 
         cover_path = item.thumbnail_path or item.cover_path
         pixmap = QPixmap(str(cover_path))
@@ -974,6 +1027,7 @@ class MangaDetailInterface(QWidget):
         self._online_provider = provider
         self._online_cache = cache
         self._online_download_active = False
+        self.setSimilarSearchRecord(None)
         self._original_download_active = False
         self._original_operation_active = False
         self._preview_source = "standard"
@@ -988,6 +1042,7 @@ class MangaDetailInterface(QWidget):
         self._setOnlineMetadata(item, reset_details=True)
         self.galleryVersionLabel.hide()
         self._setTags(item.tags)
+        self._setKeyTags(item.tags)
         self._replaceCover(cover_data, loading=not bool(cover_data))
         self._clearPreview()
         self.operationCard.show()
@@ -1005,6 +1060,7 @@ class MangaDetailInterface(QWidget):
         self.syncButton.hide()
         self.updateButton.hide()
         self.openFolderButton.hide()
+        self.clearProgressButton.hide()
         self.downloadButton.setEnabled(False)
         self.downloadButton.setText(self.tr("正在读取画廊信息…"))
         self.readButton.setEnabled(False)
@@ -1046,6 +1102,7 @@ class MangaDetailInterface(QWidget):
         self.updateButton.setVisible(bool(detail.newer_gallery_urls))
         self.updateButton.setEnabled(bool(detail.newer_gallery_urls))
         self._setTags(detail.tags)
+        self._setKeyTags(detail.tags)
         self._replaceCover(cover_data)
         self._setComments(detail.comments)
         self.operationCard.show()
@@ -1360,6 +1417,7 @@ class MangaDetailInterface(QWidget):
         self.englishTitleLabel.setVisible(bool(self._item.secondary_title))
         self._setLocalMetadata(self._item)
         self._setTags(self._item.tags)
+        self._setKeyTags(self._item.tags)
         self._setComments(detail.comments)
         self.commentsCard.show()
         self._setGalleryVersionStatus(detail.newer_gallery_urls, checked=True)
@@ -1452,9 +1510,21 @@ class MangaDetailInterface(QWidget):
         if self._folder_open_item is not None:
             self.folderOpenRequested.emit(self._folder_open_item)
 
+    def _requestClearProgress(self):
+        item = self._item or self._folder_open_item
+        if item is not None:
+            self.readingRecordClearRequested.emit(int(item.gid))
+
     def setFolderOpenTarget(self, item=None):
         self._folder_open_item = item
         self.openFolderButton.setVisible(item is not None)
+        self.clearProgressButton.setVisible(
+            item is not None
+            and (
+                getattr(item, "progress_page_index", None) is not None
+                or bool(getattr(item, "reading_completed", False))
+            )
+        )
 
     def setGalleryUpdateState(self, record=None, active=False, speed=0):
         """Lock destructive gallery actions while an update is unfinished."""
@@ -1824,12 +1894,15 @@ class MangaDetailInterface(QWidget):
             return
         self.readRequested.emit(reader_item, -1)
 
-    def updateReadingProgress(self, gid: int, page_index: int, page_count=0):
+    def updateReadingProgress(
+        self, gid: int, page_index: int, page_count=0, completed=False
+    ):
         if self._item is None or self._item.gid != gid:
             return
         self._item = replace(
             self._item,
             progress_page_index=max(0, int(page_index)),
+            reading_completed=self._item.reading_completed or bool(completed),
             page_count=max(self._item.page_count, int(page_count or 0)),
         )
         self._setLocalMetadata(self._item)
@@ -1841,6 +1914,18 @@ class MangaDetailInterface(QWidget):
                 current_page
             )
         )
+
+    def clearReadingProgress(self, gid: int):
+        if self._item is None or int(self._item.gid) != int(gid):
+            return
+        self._item = replace(
+            self._item,
+            progress_page_index=None,
+            reading_completed=False,
+        )
+        self._setLocalMetadata(self._item)
+        self.readButton.setText(self.tr("开始阅读"))
+        self.clearProgressButton.hide()
 
     def addDownloadedPage(
         self,
@@ -1987,6 +2072,95 @@ class MangaDetailInterface(QWidget):
             self.tr("收起详细") if expanded else self.tr("查看详细")
         )
         self.detailMetadataButton.setIcon(FIF.HIDE if expanded else FIF.VIEW)
+
+    def _currentGalleryGid(self):
+        if self._item is not None:
+            return int(self._item.gid)
+        if self._online_gallery is not None:
+            return int(self._online_gallery.gid)
+        return None
+
+    def _showTitleContextMenu(self, label, position):
+        selected_text = " ".join(str(label.selectedText() or "").split())
+        if not selected_text:
+            return
+        menu = RoundMenu(parent=label)
+        copy_action = QAction(self.tr("复制"), menu)
+        copy_action.triggered.connect(
+            lambda: QApplication.clipboard().setText(selected_text)
+        )
+        search_action = QAction(self.tr("在本地搜索所选文本"), menu)
+        effective_length = len("".join(selected_text.split()))
+        search_action.setEnabled(
+            self._currentGalleryGid() is not None and effective_length >= 2
+        )
+        search_action.triggered.connect(
+            lambda: self.selectedTitleSearchRequested.emit(
+                self._currentGalleryGid(), selected_text
+            )
+        )
+        menu.addAction(copy_action)
+        menu.addAction(search_action)
+        menu.exec(label.mapToGlobal(position))
+
+    def setSimilarSearchRecord(self, record):
+        gid = self._currentGalleryGid()
+        if record is None or gid is None or int(record.source_gid) != gid:
+            self.similarResultsButton.hide()
+            return
+        count = len(record.result_gids)
+        self.similarResultsButton.setText(
+            self.tr("展开 {} 个相似画廊").format(count)
+            if count
+            else self.tr("无相似画廊")
+        )
+        self.similarResultsButton.setEnabled(bool(count))
+        self.similarResultsButton.setToolTip(
+            self.tr("最近搜索：{} ").format(record.selected_text).rstrip()
+        )
+        self.similarResultsButton.show()
+
+    def _setKeyTags(self, tags):
+        while self.keyTagsLayout.count():
+            layout_item = self.keyTagsLayout.takeAt(0)
+            widget = (
+                layout_item.widget()
+                if hasattr(layout_item, "widget")
+                else layout_item
+            )
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        key_groups = {
+            namespace: values
+            for namespace, _title, _tone, values in group_manga_tags(tags)
+            if namespace in ("language", "artist")
+        }
+        labels = []
+        for namespace, title, tone in (
+            ("language", self.tr("语言"), "language"),
+            ("artist", self.tr("作者"), "creator"),
+        ):
+            for value in key_groups.get(namespace, ()):
+                translation = (
+                    self.tagSearchIndex.translated_name(namespace, value)
+                    if self.tagSearchIndex is not None
+                    else ""
+                )
+                display_value = value
+                if translation and translation.casefold() != value.casefold():
+                    display_value = f"{value}（{translation}）"
+                chip = TagChip(
+                        f"{title}：{display_value}",
+                        namespace,
+                        tone,
+                        self.keyTagsWidget,
+                    )
+                chip.setObjectName("mangaKeyTagChip")
+                labels.append(chip)
+        for chip in labels:
+            self.keyTagsLayout.addWidget(chip)
+        self.keyTagsWidget.setVisible(bool(labels))
 
     def _setTags(self, tags):
         while self.tagGroupsLayout.count():

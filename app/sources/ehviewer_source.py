@@ -136,6 +136,7 @@ class EhViewerDataSource:
             page_paths=(),
             page_count=0,
             added_time=int(row["TIME"] or 0),
+            download_complete=int(row["STATE"] or 0) == 3,
         )
 
     def load_pages(self, item: MangaItem) -> MangaItem:

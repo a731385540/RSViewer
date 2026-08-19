@@ -1,4 +1,6 @@
 import unittest
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 
 from app.services.manga_title_similarity import (
@@ -6,6 +8,8 @@ from app.services.manga_title_similarity import (
     manga_similarity_score,
     title_fingerprint,
 )
+from app.repositories.user_library_repository import UserLibraryRepository
+from app.workers.similar_manga_worker import SelectedTitleSearchWorker
 
 
 def manga(gid, english_title="", original_title="", added_time=0):
@@ -61,6 +65,27 @@ class MangaTitleSimilarityTests(unittest.TestCase):
                 manga(2, english_title="Lover"),
             ),
         )
+
+    def test_selected_text_search_is_literal_excludes_source_and_persists(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = UserLibraryRepository(Path(directory) / "rsviewer.db")
+            items = (
+                manga(1, english_title="Alpha Part One", added_time=1),
+                manga(2, english_title="ALPHA Part Two", added_time=3),
+                manga(3, original_title="前传 alpha part", added_time=2),
+                manga(4, english_title="Alphabet Soup", added_time=4),
+            )
+            found = []
+            worker = SelectedTitleSearchWorker(
+                repository, 1, "alpha part", items
+            )
+            worker.signals.found.connect(found.append)
+            worker.run()
+
+            record, matches = found[0]
+            self.assertEqual((2, 3), tuple(item.gid for item in matches))
+            self.assertEqual((2, 3), record.result_gids)
+            self.assertEqual(record, repository.latest_similar_search())
 
 
 if __name__ == "__main__":

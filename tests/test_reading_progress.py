@@ -16,6 +16,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 from app.domain.manga import MangaItem
+from app.domain.similar_gallery import LatestSimilarSearch
 from app.domain.online_download import (
     DOWNLOAD_MODE_ORIGINAL_LOCAL,
     GalleryOriginalState,
@@ -119,6 +120,16 @@ class ReadingProgressTests(unittest.TestCase):
                     "PRAGMA table_info(gallery_sync_comments)"
                 )
             }
+            progress_columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(manga_reading_progress)"
+                )
+            }
+            similar_table = connection.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'latest_similar_search'"
+            ).fetchone()
         self.assertEqual(UserLibraryRepository.SCHEMA_VERSION, version)
         self.assertIn("download_mode", download_columns)
         self.assertEqual(("gallery_original_states",), original_table)
@@ -126,6 +137,40 @@ class ReadingProgressTests(unittest.TestCase):
         self.assertIn("page_modes_json", original_columns)
         self.assertIn("gallery_links_json", online_comment_columns)
         self.assertIn("gallery_links_json", sync_comment_columns)
+        self.assertTrue({"completed", "cleared"}.issubset(progress_columns))
+        self.assertEqual(("latest_similar_search",), similar_table)
+
+    def test_completed_reading_is_permanent_until_explicit_clear(self):
+        self.repository.save_progress(123, 9, completed=True)
+        self.repository.save_progress(123, 2)
+
+        self.assertEqual((2, True), self.repository.reading_state_for_manga(123))
+
+        self.repository.clear_progress(123)
+        self.assertIsNone(self.repository.reading_state_for_manga(123))
+        self.assertIsNone(self.repository.resolve_progress(123, 8))
+
+        self.repository.save_progress(123, 1)
+        self.assertEqual((1, False), self.repository.reading_state_for_manga(123))
+
+    def test_latest_similar_search_survives_restart_and_gid_changes(self):
+        record = LatestSimilarSearch(10, "Part", (20, 30), 123456)
+        self.repository.save_latest_similar_search(record)
+
+        reopened = UserLibraryRepository(self.repository.database_path)
+        self.assertEqual(record, reopened.latest_similar_search())
+
+        reopened.promote_gallery_gid(10, 11)
+        self.assertEqual(
+            LatestSimilarSearch(11, "Part", (20, 30), 123456),
+            reopened.latest_similar_search(),
+        )
+        reopened.promote_gallery_gid(20, 21)
+        self.assertEqual((21, 30), reopened.latest_similar_search().result_gids)
+        reopened.purge_gallery(21)
+        self.assertEqual((30,), reopened.latest_similar_search().result_gids)
+        reopened.purge_gallery(11)
+        self.assertIsNone(reopened.latest_similar_search())
 
     def test_v17_original_fallback_migrates_to_per_page_base_modes(self):
         with closing(sqlite3.connect(str(self.repository.database_path))) as connection:
@@ -294,6 +339,11 @@ class ReadingProgressTests(unittest.TestCase):
         self.repository.assign_taxonomy_to_mangas((10, 20), author_id)
 
         self.assertEqual((30, 10, 20), self.repository.playlist_items(playlist_id))
+        self.repository.prepend_mangas_to_playlist((20, 40, 30), playlist_id)
+        self.assertEqual(
+            (20, 40, 30, 10),
+            self.repository.playlist_items(playlist_id),
+        )
         self.assertEqual(10, self.repository.playlist_last_gid(playlist_id))
         self.assertEqual(root_id, duplicate_id)
         self.assertEqual(

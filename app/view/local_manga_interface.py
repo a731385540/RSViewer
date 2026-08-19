@@ -45,6 +45,7 @@ from qfluentwidgets import (
     ComboBox,
     InfoBar,
     InfoBarPosition,
+    LineEdit,
     MessageBox,
     MessageBoxBase,
     PushButton,
@@ -76,6 +77,14 @@ from app.repositories.user_library_repository import UserLibraryRepository
 from app.services.manga_classification_index import MangaClassificationIndex
 from app.sources.ehviewer_source import EhViewerDataSource
 from app.view.eh_tag_search_line_edit import EhTagSearchLineEdit
+from app.view.gallery_state_indicator import (
+    DOWNLOAD_COMPLETE,
+    DOWNLOAD_INCOMPLETE,
+    GalleryStateIndicator,
+    READING_COMPLETE,
+    READING_NONE,
+    READING_PARTIAL,
+)
 from app.workers.similar_manga_worker import SimilarMangaWorker
 
 
@@ -289,10 +298,19 @@ def paint_manga_download_state(card):
         painter.setBrush(Qt.NoBrush)
         painter.drawRoundedRect(rect, 7, 7)
 
-    if item.standard_download_pending:
-        painter.setPen(QPen(QColor("#8c6b08"), 1))
-        painter.setBrush(QColor("#f2c94c"))
-        painter.drawEllipse(card.width() - 22, 10, 11, 11)
+def local_gallery_states(item):
+    download_state = (
+        DOWNLOAD_COMPLETE
+        if item.download_complete is True and not item.standard_download_pending
+        else DOWNLOAD_INCOMPLETE
+    )
+    if item.reading_completed:
+        reading_state = READING_COMPLETE
+    elif item.progress_page_index is not None:
+        reading_state = READING_PARTIAL
+    else:
+        reading_state = READING_NONE
+    return download_state, reading_state
 
 
 
@@ -379,6 +397,7 @@ class MangaGridCard(CardWidget):
         self.layout.addWidget(self.metaLabel)
         self.selectionCheckBox.raise_()
         self.originalFallbackBadge = OriginalFallbackBadge(self)
+        self.stateIndicator = GalleryStateIndicator(self)
         self._updateDownloadStateBadge()
 
     def setItem(self, item: MangaItem):
@@ -399,6 +418,13 @@ class MangaGridCard(CardWidget):
 
     def _updateDownloadStateBadge(self):
         update_original_fallback_badge(self)
+        self.stateIndicator.setStates(*local_gallery_states(self.item))
+        self.stateIndicator.move(self.width() - 26, 10)
+        self.stateIndicator.raise_()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._updateDownloadStateBadge()
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -514,6 +540,7 @@ class MangaListCard(CardWidget):
         self.layout.addLayout(text_layout, 1)
         self.selectionCheckBox.raise_()
         self.originalFallbackBadge = OriginalFallbackBadge(self)
+        self.stateIndicator = GalleryStateIndicator(self)
         self._updateDownloadStateBadge()
 
     def setItem(self, item: MangaItem):
@@ -535,6 +562,13 @@ class MangaListCard(CardWidget):
 
     def _updateDownloadStateBadge(self):
         update_original_fallback_badge(self)
+        self.stateIndicator.setStates(*local_gallery_states(self.item))
+        self.stateIndicator.move(self.width() - 26, 10)
+        self.stateIndicator.raise_()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._updateDownloadStateBadge()
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -691,7 +725,7 @@ class MangaLoadWorker(QRunnable):
         gids = [item.gid for item in items]
         assignments = user_repository.labels_for_manga(gids)
         taxonomy_assignments = user_repository.taxonomy_for_mangas(gids)
-        progress = user_repository.progress_for_mangas(gids)
+        reading_states = user_repository.reading_states_for_mangas(gids)
         online_downloads = user_repository.online_gallery_downloads_for_mangas(gids)
         original_states = user_repository.gallery_original_states_for_mangas(gids)
         sync_records = user_repository.gallery_sync_records_for_mangas(gids)
@@ -703,7 +737,14 @@ class MangaLoadWorker(QRunnable):
                 original_states.get(item.gid),
                 sync_records.get(item.gid),
                 multiple_labels=assignments.get(item.gid, ()),
-                progress_page_index=progress.get(item.gid),
+                progress_page_index=(
+                    reading_states[item.gid][0]
+                    if item.gid in reading_states else None
+                ),
+                reading_completed=(
+                    reading_states[item.gid][1]
+                    if item.gid in reading_states else False
+                ),
                 is_favorite=item.gid in favorite_gids,
                 taxonomy_label_ids=tuple(
                     label_id
@@ -769,6 +810,22 @@ class MangaLoadWorker(QRunnable):
         **values,
     ):
         values.update(cls._onlineMetadata(item, download_record, sync_record))
+        if (
+            download_record is not None
+            and download_record.download_mode == DOWNLOAD_MODE_STANDARD
+        ):
+            total = max(0, int(download_record.page_count))
+            completed = max(0, int(download_record.completed_pages))
+            values.update(
+                {
+                    "downloaded_page_count": completed,
+                    "download_complete": bool(
+                        total > 0
+                        and completed >= total
+                        and download_record.state == ONLINE_DOWNLOAD_COMPLETED
+                    ),
+                }
+            )
         values.update(
             {
                 "original_mode": original_state.mode if original_state else "",
@@ -910,6 +967,72 @@ class PlaylistOrderDialog(QDialog):
             int(self.listWidget.item(index).data(Qt.UserRole))
             for index in range(self.listWidget.count())
         )
+
+
+class TaxonomyCreateDialog(MessageBoxBase):
+    """Create one taxonomy node without chaining native input dialogs."""
+
+    def __init__(self, parent_entries, parent=None):
+        super().__init__(parent)
+        self.widget.setMinimumWidth(480)
+
+        self.titleLabel = SubtitleLabel(self.tr("新增归类"), self.widget)
+        self.nameEdit = LineEdit(self.widget)
+        self.nameEdit.setPlaceholderText(self.tr("归类名称"))
+        self.parentLabel = BodyLabel(self.tr("父级"), self.widget)
+        self.parentCombo = ComboBox(self.widget)
+        for text, label_id in parent_entries:
+            self.parentCombo.addItem(str(text), userData=label_id)
+
+        self.viewLayout.addWidget(self.titleLabel)
+        self.viewLayout.addWidget(self.nameEdit)
+        self.viewLayout.addWidget(self.parentLabel)
+        self.viewLayout.addWidget(self.parentCombo)
+        self.yesButton.setText(self.tr("创建"))
+        self.cancelButton.setText(self.tr("取消"))
+        self.yesButton.setEnabled(False)
+        self.nameEdit.textChanged.connect(
+            lambda text: self.yesButton.setEnabled(bool(text.strip()))
+        )
+        self.nameEdit.setFocus()
+
+    def name(self):
+        return self.nameEdit.text().strip()
+
+    def parentId(self):
+        value = self.parentCombo.currentData()
+        return int(value) if value is not None else None
+
+
+class PlaylistTargetDialog(MessageBoxBase):
+    """Choose one playlist for a classification-wide prepend operation."""
+
+    def __init__(self, classification_name, playlists, parent=None):
+        super().__init__(parent)
+        self.widget.setMinimumWidth(480)
+        self.titleLabel = SubtitleLabel(
+            self.tr("加入播放列表"), self.widget
+        )
+        self.descriptionLabel = BodyLabel(
+            self.tr("“{}”中的全部画廊将按添加时间从新到旧插入列表最前方。").format(
+                classification_name
+            ),
+            self.widget,
+        )
+        self.descriptionLabel.setWordWrap(True)
+        self.playlistCombo = ComboBox(self.widget)
+        for playlist_id, name, _count, _last_gid in playlists:
+            self.playlistCombo.addItem(str(name), userData=int(playlist_id))
+        self.viewLayout.addWidget(self.titleLabel)
+        self.viewLayout.addWidget(self.descriptionLabel)
+        self.viewLayout.addWidget(self.playlistCombo)
+        self.yesButton.setText(self.tr("加入到最前方"))
+        self.cancelButton.setText(self.tr("取消"))
+        self.yesButton.setEnabled(bool(playlists))
+
+    def playlistId(self):
+        value = self.playlistCombo.currentData()
+        return int(value) if value is not None else None
 
 
 class MangaLabelSelectionDialog(MessageBoxBase):
@@ -1111,6 +1234,7 @@ class LocalMangaInterface(QWidget):
     metadataSyncRequested = Signal(object)
     trashRequested = Signal(object)
     folderOpenRequested = Signal(object)
+    readingRecordClearRequested = Signal(int)
 
     def __init__(
         self,
@@ -1744,7 +1868,7 @@ class LocalMangaInterface(QWidget):
         self.primaryLabelTree.blockSignals(False)
         cfg.set(cfg.mangaPrimaryLabelFilter, self._primary_label_filter)
 
-    def _populatePlaylists(self, playlists):
+    def _populatePlaylists(self, playlists, selected_order=None):
         selected_id = self._playlist_filter_id
         self.playlistTree.blockSignals(True)
         self.playlistTree.clear()
@@ -1771,8 +1895,10 @@ class LocalMangaInterface(QWidget):
             self._playlist_filter_name = str(
                 selected_item.data(0, Qt.UserRole + 1)
             )
-            self._playlist_order = self.userRepository.playlist_items(
-                self._playlist_filter_id
+            self._playlist_order = (
+                tuple(selected_order)
+                if selected_order is not None
+                else self.userRepository.playlist_items(self._playlist_filter_id)
             )
         else:
             self._playlist_filter_id = None
@@ -1914,37 +2040,72 @@ class LocalMangaInterface(QWidget):
         self._startLabelMutation(operation, self._refreshTagData)
 
     def _createTaxonomyLabel(self, assign_to_gids=None):
-        name, accepted = QInputDialog.getText(
-            self, self.tr("新增归类"), self.tr("归类名称")
-        )
-        normalized = name.strip()
-        if not accepted or not normalized:
-            return
         parent_entries = [(self.tr("根节点"), None)] + self._taxonomyPathEntries()
-        parent_texts = [text for text, _label_id in parent_entries]
-        parent_text, parent_accepted = QInputDialog.getItem(
-            self,
-            self.tr("选择父级"),
-            self.tr("新节点放在"),
-            parent_texts,
-            0,
-            False,
-        )
-        if not parent_accepted:
+        dialog = TaxonomyCreateDialog(parent_entries, self.window())
+        if dialog.exec() != QDialog.Accepted:
             return
-        parent_id = dict(parent_entries).get(parent_text)
+        normalized = dialog.name()
+        if not normalized:
+            return
+        parent_id = dialog.parentId()
+        target_gids = tuple(
+            dict.fromkeys(int(gid) for gid in (assign_to_gids or ()))
+        )
         result = {}
 
         def operation():
             result["id"] = self.userRepository.create_taxonomy_label(
                 normalized, parent_id
             )
-            if assign_to_gids:
+            if target_gids:
                 self.userRepository.assign_taxonomy_to_mangas(
-                    assign_to_gids, result["id"]
+                    target_gids, result["id"]
+                )
+            result["labels"] = self.userRepository.list_taxonomy_labels()
+            result["assignments"] = (
+                self.userRepository.taxonomy_for_mangas(target_gids)
+                if target_gids else {}
+            )
+
+        self._startLabelMutation(
+            operation,
+            lambda: self._finishCreateTaxonomyLabel(result, target_gids),
+        )
+
+    def _finishCreateTaxonomyLabel(self, result, target_gids):
+        previous_filter_id = self._taxonomy_filter_id
+        self._taxonomy_labels = list(result["labels"])
+        self._classification_index.set_taxonomy_labels(self._taxonomy_labels)
+
+        if target_gids:
+            target_gid_set = set(target_gids)
+            assignments = result["assignments"]
+
+            def update(item):
+                if item.gid not in target_gid_set:
+                    return item
+                values = assignments.get(item.gid, ())
+                return replace(
+                    item,
+                    taxonomy_label_ids=tuple(
+                        label_id for label_id, _name in values
+                    ),
+                    taxonomy_labels=tuple(name for _label_id, name in values),
                 )
 
-        self._startLabelMutation(operation, self._refreshTagData)
+            self._all_items = [update(item) for item in self._all_items]
+            for item in self._all_items:
+                if item.gid in target_gid_set:
+                    self._classification_index.upsert(item)
+
+        self._populateTaxonomy(self._taxonomy_labels)
+        filter_changed = previous_filter_id != self._taxonomy_filter_id
+        if target_gids or (
+            self._tag_mode == self.TAG_TAXONOMY and filter_changed
+        ):
+            self.applyFilters(reset_page=False)
+        else:
+            self._updateTitleLabel()
 
     def _taxonomyPathEntries(self):
         return sorted(
@@ -1980,7 +2141,7 @@ class LocalMangaInterface(QWidget):
 
     def _buildTagTreeMenu(self, tag_mode, item):
         value = item.data(0, Qt.UserRole)
-        if value is None or (tag_mode == self.TAG_CATEGORY and value == "__none__"):
+        if value is None:
             return None
         name = (
             str(value)
@@ -1988,12 +2149,149 @@ class LocalMangaInterface(QWidget):
             else str(item.data(0, Qt.UserRole + 1) or item.text(0))
         )
         menu = RoundMenu(name, self)
+        if tag_mode == self.TAG_CATEGORY:
+            prepend_action = QAction(
+                self.tr("全部加入播放列表最前方…"), menu
+            )
+            prepend_action.triggered.connect(
+                lambda: self._prependCategoryToPlaylist(str(value), name)
+            )
+            menu.addAction(prepend_action)
+            if value == "__none__":
+                return menu
         delete_action = QAction(self.tr("删除"), menu)
         delete_action.triggered.connect(
             lambda: self._deleteTag(tag_mode, value, name)
         )
         menu.addAction(delete_action)
         return menu
+
+    def _prependCategoryToPlaylist(self, category_value, category_name):
+        if not self._playlists:
+            InfoBar.warning(
+                title=self.tr("没有播放列表"),
+                content=self.tr("请先创建一个播放列表。"),
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=3000,
+                parent=self,
+            )
+            return
+        dialog = PlaylistTargetDialog(
+            category_name,
+            self._playlists,
+            self.window(),
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        playlist_id = dialog.playlistId()
+        if playlist_id is None:
+            return
+        playlist_name = next(
+            (
+                name
+                for current_id, name, _count, _last_gid in self._playlists
+                if int(current_id) == playlist_id
+            ),
+            "",
+        )
+        category_gids = self._classification_index.gids_for(
+            MangaClassificationIndex.CATEGORY,
+            category_value,
+        )
+        ordered_gids = tuple(
+            item.gid
+            for item in sorted(
+                (
+                    item for item in self._all_items
+                    if item.gid in category_gids
+                ),
+                key=lambda item: (item.added_time, item.gid),
+                reverse=True,
+            )
+        )
+        if not ordered_gids:
+            InfoBar.info(
+                title=self.tr("分类为空"),
+                content=self.tr("该分类中没有可加入的画廊。"),
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=2500,
+                parent=self,
+            )
+            return
+        selected_playlist_id = self._playlist_filter_id
+        result = {}
+
+        def operation():
+            self.userRepository.prepend_mangas_to_playlist(
+                ordered_gids, playlist_id
+            )
+            result["playlists"] = self.userRepository.list_playlists()
+            result["target_order"] = self.userRepository.playlist_items(
+                playlist_id
+            )
+            result["selected_order"] = (
+                result["target_order"]
+                if selected_playlist_id == playlist_id
+                else (
+                    self.userRepository.playlist_items(selected_playlist_id)
+                    if selected_playlist_id is not None else ()
+                )
+            )
+
+        self._startLabelMutation(
+            operation,
+            lambda: self._finishCategoryPlaylistPrepend(
+                ordered_gids,
+                playlist_id,
+                playlist_name,
+                result,
+            ),
+        )
+
+    def _finishCategoryPlaylistPrepend(
+        self, ordered_gids, playlist_id, playlist_name, result
+    ):
+        target_gids = set(ordered_gids)
+
+        def update(item):
+            if item.gid not in target_gids or playlist_name in item.multiple_labels:
+                return item
+            return replace(
+                item,
+                multiple_labels=tuple(item.multiple_labels) + (playlist_name,),
+            )
+
+        self._all_items = [update(item) for item in self._all_items]
+        for item in self._all_items:
+            if item.gid in target_gids:
+                self._classification_index.upsert(item)
+        self._playlists = list(result["playlists"])
+        self._populatePlaylists(
+            self._playlists,
+            selected_order=result["selected_order"],
+        )
+        if (
+            self._tag_mode == self.TAG_PLAYLIST
+            and not self._show_all_manga
+            and self._playlist_filter_id == playlist_id
+        ):
+            self._playlist_order = tuple(result["target_order"])
+            self.applyFilters(reset_page=True)
+        InfoBar.success(
+            title=self.tr("已加入播放列表"),
+            content=self.tr("已将 {} 个画廊加入“{}”最前方。").format(
+                len(ordered_gids), playlist_name
+            ),
+            orient=Qt.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP_RIGHT,
+            duration=3000,
+            parent=self,
+        )
 
     def _deleteTag(self, tag_mode, value, name):
         descriptions = {
@@ -2146,6 +2444,16 @@ class LocalMangaInterface(QWidget):
                 )
             )
             menu.addAction(similar_action)
+        if item.progress_page_index is not None or item.reading_completed:
+            clear_progress_action = QAction(
+                self.tr("清空阅读记录"), menu
+            )
+            clear_progress_action.triggered.connect(
+                lambda _checked=False, gid=int(item.gid): (
+                    self.readingRecordClearRequested.emit(gid)
+                )
+            )
+            menu.addAction(clear_progress_action)
         if (
             self._tag_mode == self.TAG_PLAYLIST
             and not self._show_all_manga
@@ -2968,13 +3276,16 @@ class LocalMangaInterface(QWidget):
             return
         self.updateReadingProgress(gid, page_index)
 
-    def updateReadingProgress(self, gid: int, page_index: int, page_count=0):
+    def updateReadingProgress(
+        self, gid: int, page_index: int, page_count=0, completed=False
+    ):
         def update(item):
             if item.gid != gid:
                 return item
             return replace(
                 item,
                 progress_page_index=max(0, int(page_index)),
+                reading_completed=item.reading_completed or bool(completed),
                 page_count=max(item.page_count, int(page_count or 0)),
             )
 
@@ -2982,6 +3293,25 @@ class LocalMangaInterface(QWidget):
         self._filtered_items = [update(item) for item in self._filtered_items]
         for card in self._cards:
             if card.item.gid == gid:
+                card.setItem(update(card.item))
+                break
+
+    def clearReadingProgress(self, gid: int):
+        gid = int(gid)
+
+        def update(item):
+            if int(item.gid) != gid:
+                return item
+            return replace(
+                item,
+                progress_page_index=None,
+                reading_completed=False,
+            )
+
+        self._all_items = [update(item) for item in self._all_items]
+        self._filtered_items = [update(item) for item in self._filtered_items]
+        for card in self._cards:
+            if int(card.item.gid) == gid:
                 card.setItem(update(card.item))
                 break
 

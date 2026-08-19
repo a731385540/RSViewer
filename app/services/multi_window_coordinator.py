@@ -14,6 +14,7 @@ class MultiWindowCoordinator(QObject):
         super().__init__(parent)
         self._windows = []
         self._startupRecoveryClaimed = False
+        self.similarGalleryWindow = None
         self.onlineDownloadThreadPool = QThreadPool(self)
         self.onlineDownloadThreadPool.setMaxThreadCount(3)
         self.galleryPageDownloadScheduler = GalleryPageDownloadScheduler(6, self)

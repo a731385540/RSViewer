@@ -97,6 +97,9 @@ class EhTagImportAndSearchTests(unittest.TestCase):
         self._import()
         index = EhTagSearchIndex.from_repository(self.repository)
 
+        self.assertEqual("汉语", index.translated_name("lang", "chinese"))
+        self.assertEqual("", index.translated_name("artist", "missing"))
+
         chinese_result = index.search("全彩")[0]
         self.assertEqual("other：full color\n全彩", chinese_result.display_text)
         self.assertEqual('o:"full color"', chinese_result.query_token)

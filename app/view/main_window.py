@@ -76,7 +76,12 @@ from app.sources.eh_online_source import (
 from app.sources.ehviewer_source import EhViewerDataSource
 from app.view.download_manager_interface import DownloadManagerInterface
 from app.view.library_organizer_interface import LibraryOrganizerInterface
-from app.view.local_manga_interface import LocalMangaInterface, MangaLoadWorker
+from app.view.gallery_state_indicator import DOWNLOAD_INCOMPLETE
+from app.view.local_manga_interface import (
+    LocalMangaInterface,
+    MangaLoadWorker,
+    local_gallery_states,
+)
 from app.view.manga_detail_interface import MangaDetailInterface, PageDiscoveryWorker
 from app.view.manga_history_interface import MangaHistoryInterface
 from app.view.manga_reader_interface import MangaReaderInterface
@@ -85,12 +90,15 @@ from app.view.navigation_resize_handle import NavigationResizeHandle
 from app.view.online_manga_interface import OnlineMangaInterface
 from app.view.recycle_bin_interface import RecycleBinInterface
 from app.view.setting_interface import SettingInterface
+from app.view.similar_gallery_browser_window import SimilarGalleryBrowserWindow
 from app.view.update_manager_interface import UpdateManagerInterface
 from app.workers.reading_progress_worker import (
     BrowsingHistorySaveWorker,
     PlaylistPositionSaveWorker,
+    ReadingProgressClearWorker,
     ReadingProgressSaveWorker,
 )
+from app.workers.similar_manga_worker import SelectedTitleSearchWorker
 from app.workers.eh_online_worker import LocalGallerySyncWorker, OnlineDetailWorker
 from app.workers.online_gallery_download_worker import (
     LocalGalleryPageDownloadWorker,
@@ -127,6 +135,9 @@ class MainWindow(FluentWindow):
             PROJECT_ROOT / "app" / "data" / "rsviewer.db"
         )
         self.userLibraryRepository.initialize()
+        self._latestSimilarSearch = (
+            self.userLibraryRepository.latest_similar_search()
+        )
         self.mangaSource = self._createMangaSource()
         if self.windowCoordinator.claimStartupRecovery():
             self.userLibraryRepository.mark_interrupted_online_downloads()
@@ -171,12 +182,16 @@ class MainWindow(FluentWindow):
             self.mangaSource,
             self.userLibraryRepository,
             self,
+            tag_search_index=self.ehTagSearchIndex,
         )
         self.mangaReaderInterface = MangaReaderInterface(self)
         self.progressThreadPool = QThreadPool(self)
         self.progressThreadPool.setMaxThreadCount(1)
         self.onlineDetailThreadPool = QThreadPool(self)
         self.onlineDetailThreadPool.setMaxThreadCount(2)
+        self.similarSearchThreadPool = QThreadPool(self)
+        self.similarSearchThreadPool.setMaxThreadCount(1)
+        self._selectedTitleSearchWorker = None
         self.onlineDownloadThreadPool = (
             self.windowCoordinator.onlineDownloadThreadPool
         )
@@ -219,6 +234,7 @@ class MainWindow(FluentWindow):
         self._trashWorker = None
         self._ehViewerExportWorker = None
         self._pendingProgress = {}
+        self._readingProgressClearWorkers = set()
         self.progressSaveTimer = QTimer(self)
         self.progressSaveTimer.setSingleShot(True)
         self.progressSaveTimer.setInterval(180)
@@ -250,6 +266,9 @@ class MainWindow(FluentWindow):
             )
             interface.trashRequested.connect(self.trashLocalGalleries)
             interface.folderOpenRequested.connect(self.openGalleryFolder)
+            interface.readingRecordClearRequested.connect(
+                self.clearReadingRecord
+            )
         self.favoriteMangaInterface.mangaActivated.connect(self.openMangaDetail)
         self.mangaHistoryInterface.localHistoryInterface.mangaActivated.connect(
             self.openMangaDetail
@@ -264,6 +283,15 @@ class MainWindow(FluentWindow):
         )
         self.mangaDetailInterface.onlineDownloadCancelRequested.connect(
             self.cancelOnlineGalleryDownload
+        )
+        self.mangaDetailInterface.readingRecordClearRequested.connect(
+            self.clearReadingRecord
+        )
+        self.mangaDetailInterface.selectedTitleSearchRequested.connect(
+            self.searchSelectedTitleText
+        )
+        self.mangaDetailInterface.similarResultsRequested.connect(
+            self.showSimilarGalleryResults
         )
         self.mangaDetailInterface.localDownloadRequested.connect(
             self.startLocalGalleryDownload
@@ -575,8 +603,16 @@ class MainWindow(FluentWindow):
         elif scope == "history":
             self._applyLocalHistory(payload)
         elif scope == "progress":
-            gid, page_index, page_count = payload
-            self._applyReadingProgress(gid, page_index, page_count)
+            gid, page_index, page_count, completed = payload
+            self._applyReadingProgress(
+                gid, page_index, page_count, completed
+            )
+        elif scope == "progress_clear":
+            self._applyReadingProgressClear(int(payload))
+        elif scope == "similar_search":
+            self._latestSimilarSearch = payload
+            self.mangaDetailInterface.setSimilarSearchRecord(payload)
+            self._updateVisibleSimilarGalleryWindow()
         elif scope == "downloads":
             self._refreshDownloadManager(publish=False)
             detail = self.mangaDetailInterface.currentOnlineDetail
@@ -686,7 +722,7 @@ class MainWindow(FluentWindow):
         self.mangaSource = self._createMangaSource()
         self._libraryItems = []
         self._historyOrder = []
-        self.onlineMangaInterface.setDownloadedGids(())
+        self.onlineMangaInterface.setGalleryStates({})
         self.favoriteMangaInterface.setCollectionItems((), ())
         self.mangaHistoryInterface.setCollectionItems((), ())
         self.localMangaInterface.setSource(self.mangaSource)
@@ -1188,8 +1224,127 @@ class MainWindow(FluentWindow):
         if self.mangaReaderInterface.isFullscreen:
             self.setReaderFullscreen(False)
         self.mangaDetailInterface.setManga(item)
+        self.mangaDetailInterface.setSimilarSearchRecord(
+            self._latestSimilarSearch
+        )
         self._syncCurrentGalleryUpdate(item.gid)
         self.switchTo(self.mangaDetailInterface)
+
+    def searchSelectedTitleText(self, source_gid, selected_text):
+        selected_text = " ".join(str(selected_text).split())
+        if len("".join(selected_text.split())) < 2:
+            InfoBar.warning(
+                title=self.tr("无法搜索"),
+                content=self.tr("至少选择两个有效字符。"),
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=2500,
+                parent=self.mangaDetailInterface,
+            )
+            return
+        if self._selectedTitleSearchWorker is not None:
+            self._selectedTitleSearchWorker.cancelled = True
+        worker = SelectedTitleSearchWorker(
+            self.userLibraryRepository,
+            source_gid,
+            selected_text,
+            self._libraryItems,
+        )
+        worker.signals.found.connect(
+            lambda result: self._finishSelectedTitleSearch(worker, result)
+        )
+        worker.signals.failed.connect(
+            lambda message: self._failSelectedTitleSearch(worker, message)
+        )
+        self._selectedTitleSearchWorker = worker
+        self.similarSearchThreadPool.start(worker)
+
+    def _finishSelectedTitleSearch(self, worker, result):
+        if self._selectedTitleSearchWorker is not worker:
+            return
+        self._selectedTitleSearchWorker = None
+        record, items = result
+        self._latestSimilarSearch = record
+        self.mangaDetailInterface.setSimilarSearchRecord(record)
+        self._publishSharedState("similar_search", record)
+        self._updateVisibleSimilarGalleryWindow()
+        if not items:
+            InfoBar.info(
+                title=self.tr("没有相似画廊"),
+                content=self.tr("本地标题中没有找到“{}”。").format(
+                    record.selected_text
+                ),
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=3000,
+                parent=self.mangaDetailInterface,
+            )
+
+    def _failSelectedTitleSearch(self, worker, message):
+        if self._selectedTitleSearchWorker is not worker:
+            return
+        self._selectedTitleSearchWorker = None
+        InfoBar.error(
+            title=self.tr("搜索相似画廊失败"),
+            content=str(message),
+            orient=Qt.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP_RIGHT,
+            duration=4000,
+            parent=self.mangaDetailInterface,
+        )
+
+    def showSimilarGalleryResults(self):
+        record = self._latestSimilarSearch
+        if record is None or not record.result_gids:
+            return
+        by_gid = {int(item.gid): item for item in self._libraryItems}
+        items = tuple(
+            by_gid[gid] for gid in record.result_gids if gid in by_gid
+        )
+        if not items:
+            return
+        window = self.windowCoordinator.similarGalleryWindow
+        if window is None:
+            window = SimilarGalleryBrowserWindow(
+                self.mangaSource,
+                self.userLibraryRepository,
+                self.ehTagSearchIndex,
+            )
+            self.windowCoordinator.similarGalleryWindow = window
+        else:
+            window.setSource(self.mangaSource)
+        for signal in (
+            window.readRequested,
+            window.folderOpenRequested,
+            window.readingRecordClearRequested,
+            window.selectedTitleSearchRequested,
+        ):
+            try:
+                signal.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+        window.readRequested.connect(self.openMangaReader)
+        window.folderOpenRequested.connect(self.openGalleryFolder)
+        window.readingRecordClearRequested.connect(self.clearReadingRecord)
+        window.selectedTitleSearchRequested.connect(self.searchSelectedTitleText)
+        window.setSearch(record, items)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _updateVisibleSimilarGalleryWindow(self):
+        window = self.windowCoordinator.similarGalleryWindow
+        record = self._latestSimilarSearch
+        if window is None or not window.isVisible() or record is None:
+            return
+        by_gid = {int(item.gid): item for item in self._libraryItems}
+        items = tuple(
+            by_gid[gid] for gid in record.result_gids if gid in by_gid
+        )
+        window.setSearch(record, items)
 
     def openGalleryFolder(self, item_or_gid):
         item = (
@@ -1240,6 +1395,9 @@ class MainWindow(FluentWindow):
         if self.mangaReaderInterface.isFullscreen:
             self.setReaderFullscreen(False)
         self.mangaDetailInterface.setManga(item)
+        self.mangaDetailInterface.setSimilarSearchRecord(
+            self._latestSimilarSearch
+        )
         self._syncCurrentGalleryUpdate(item.gid)
         self.switchTo(self.mangaDetailInterface)
 
@@ -1300,6 +1458,9 @@ class MainWindow(FluentWindow):
             cover_data = self.onlineGalleryCache.cover_data(site, item)
         self.mangaDetailInterface.setOnlineLoading(
             item, provider, self.onlineGalleryCache, cover_data
+        )
+        self.mangaDetailInterface.setSimilarSearchRecord(
+            self._latestSimilarSearch
         )
         self.mangaDetailInterface.setFolderOpenTarget(
             MainWindow._localGalleryItem(self, item.gid)
@@ -3575,15 +3736,26 @@ class MainWindow(FluentWindow):
             incomplete_records = (
                 self.userLibraryRepository.incomplete_online_gallery_downloads()
             )
-        gids = {
-            int(item.gid) for item in getattr(self, "_libraryItems", ())
+        states = {
+            int(item.gid): local_gallery_states(item)
+            for item in getattr(self, "_libraryItems", ())
         }
-        gids.update(int(record.gid) for record in incomplete_records)
+        for record in incomplete_records:
+            gid = int(record.gid)
+            _download, reading = states.get(
+                gid, (DOWNLOAD_INCOMPLETE, "none")
+            )
+            states[gid] = (DOWNLOAD_INCOMPLETE, reading)
         active_state = getattr(self, "_activeDownloadState", None)
         if active_state is not None:
             active_gids, _speeds = active_state()
-            gids.update(int(gid) for gid in active_gids)
-        self.onlineMangaInterface.setDownloadedGids(gids)
+            for gid in active_gids:
+                gid = int(gid)
+                _download, reading = states.get(
+                    gid, (DOWNLOAD_INCOMPLETE, "none")
+                )
+                states[gid] = (DOWNLOAD_INCOMPLETE, reading)
+        self.onlineMangaInterface.setGalleryStates(states)
 
     def _updateOnlineDownloadConcurrency(self, value):
         coordinator = getattr(self, "windowCoordinator", None)
@@ -3660,6 +3832,9 @@ class MainWindow(FluentWindow):
 
     def _setPlaylistContext(self, playlist_id, items, position):
         self._cancelPlaylistLoad()
+        if self._selectedTitleSearchWorker is not None:
+            self._selectedTitleSearchWorker.cancelled = True
+            self._selectedTitleSearchWorker = None
         self._playlistContext = {
             "playlist_id": int(playlist_id),
             "items": tuple(items),
@@ -3780,32 +3955,97 @@ class MainWindow(FluentWindow):
         self.mangaReaderInterface.setFocus()
 
     def updateReadingProgress(self, gid: int, page_index: int, page_count: int):
-        self._applyReadingProgress(gid, page_index, page_count)
-        self._publishSharedState(
-            "progress", (int(gid), int(page_index), int(page_count))
+        completed = bool(
+            int(page_count or 0) > 0
+            and int(page_index) >= int(page_count) - 1
         )
-        self._pendingProgress[int(gid)] = int(page_index)
+        self._applyReadingProgress(gid, page_index, page_count, completed)
+        self._publishSharedState(
+            "progress",
+            (int(gid), int(page_index), int(page_count), completed),
+        )
+        previous = self._pendingProgress.get(int(gid))
+        self._pendingProgress[int(gid)] = (
+            int(page_index),
+            completed or bool(previous and previous[1]),
+        )
         self.progressSaveTimer.start()
 
-    def _applyReadingProgress(self, gid, page_index, page_count):
-        self.localMangaInterface.updateReadingProgress(gid, page_index, page_count)
-        self.favoriteMangaInterface.updateReadingProgress(gid, page_index, page_count)
-        self.mangaHistoryInterface.localHistoryInterface.updateReadingProgress(
-            gid, page_index, page_count
+    def _applyReadingProgress(
+        self, gid, page_index, page_count, completed=False
+    ):
+        self.localMangaInterface.updateReadingProgress(
+            gid, page_index, page_count, completed
         )
-        self.mangaDetailInterface.updateReadingProgress(gid, page_index, page_count)
+        self.favoriteMangaInterface.updateReadingProgress(
+            gid, page_index, page_count, completed
+        )
+        self.mangaHistoryInterface.localHistoryInterface.updateReadingProgress(
+            gid, page_index, page_count, completed
+        )
+        self.mangaDetailInterface.updateReadingProgress(
+            gid, page_index, page_count, completed
+        )
+        self._libraryItems = list(self.localMangaInterface.allItems())
+        self._syncOnlineGalleryDownloadMarkers()
+
+    def _applyReadingProgressClear(self, gid):
+        self._pendingProgress.pop(int(gid), None)
+        self.localMangaInterface.clearReadingProgress(gid)
+        self.favoriteMangaInterface.clearReadingProgress(gid)
+        self.mangaHistoryInterface.localHistoryInterface.clearReadingProgress(gid)
+        self.mangaDetailInterface.clearReadingProgress(gid)
+        self._libraryItems = list(self.localMangaInterface.allItems())
+        self._syncOnlineGalleryDownloadMarkers()
+
+    def clearReadingRecord(self, gid):
+        gid = int(gid)
+        self._pendingProgress.pop(gid, None)
+        worker = ReadingProgressClearWorker(
+            self.userLibraryRepository, gid
+        )
+        worker.signals.succeeded.connect(
+            lambda cleared_gid: self._finishReadingRecordClear(
+                worker, cleared_gid
+            )
+        )
+        worker.signals.failed.connect(
+            lambda failed_gid, message: self._failReadingRecordClear(
+                worker, failed_gid, message
+            )
+        )
+        self._readingProgressClearWorkers.add(worker)
+        self.progressThreadPool.start(worker)
+
+    def _finishReadingRecordClear(self, worker, gid):
+        self._readingProgressClearWorkers.discard(worker)
+        self._applyReadingProgressClear(gid)
+        self._publishSharedState("progress_clear", int(gid))
+
+    def _failReadingRecordClear(self, worker, gid, message):
+        self._readingProgressClearWorkers.discard(worker)
+        InfoBar.error(
+            title=self.tr("清空阅读记录失败"),
+            content=str(message),
+            orient=Qt.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP_RIGHT,
+            duration=5000,
+            parent=self,
+        )
 
     def _flushReadingProgress(self):
         if not self._pendingProgress:
             return
         pending_progress = self._pendingProgress
         self._pendingProgress = {}
-        for gid, page_index in pending_progress.items():
+        for gid, (page_index, completed) in pending_progress.items():
             self.progressThreadPool.start(
                 ReadingProgressSaveWorker(
                     self.userLibraryRepository,
                     gid,
                     page_index,
+                    completed,
                 )
             )
 
@@ -3952,6 +4192,7 @@ class MainWindow(FluentWindow):
         self._flushReadingProgress()
         self.progressThreadPool.waitForDone(3000)
         self.onlineDetailThreadPool.waitForDone(3000)
+        self.similarSearchThreadPool.waitForDone(3000)
         if had_download_workers:
             self.onlineDownloadThreadPool.waitForDone(1000)
         if had_update_workers:
@@ -3966,6 +4207,11 @@ class MainWindow(FluentWindow):
         QApplication.instance().removeEventFilter(self)
         self.themeListener.terminate()
         self.themeListener.deleteLater()
+        similar_window = self.windowCoordinator.similarGalleryWindow
+        if similar_window is not None:
+            similar_window.close()
+            similar_window.deleteLater()
+            self.windowCoordinator.similarGalleryWindow = None
         self.windowCoordinator.unregister(self)
         super().closeEvent(e)
 

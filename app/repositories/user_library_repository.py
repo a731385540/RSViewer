@@ -17,13 +17,14 @@ from app.domain.online_download import (
 )
 from app.domain.online_gallery import OnlineGalleryComment
 from app.domain.online_gallery import OnlineGalleryLink
+from app.domain.similar_gallery import LatestSimilarSearch
 from app.repositories.ehviewer_schema import ensure_ehviewer_schema
 
 
 class UserLibraryRepository:
     """RSViewer's complete application and local-gallery database."""
 
-    SCHEMA_VERSION = 19
+    SCHEMA_VERSION = 21
 
     def __init__(self, database_path: Path):
         self.database_path = Path(database_path).resolve()
@@ -468,6 +469,48 @@ class UserLibraryRepository:
                             "gallery_links_json TEXT NOT NULL DEFAULT '[]'"
                         )
                 connection.execute("PRAGMA user_version = 19")
+            if version < 20:
+                connection.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS manga_reading_progress (
+                        gid INTEGER PRIMARY KEY,
+                        page_index INTEGER NOT NULL CHECK (page_index >= 0),
+                        updated_at INTEGER NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_manga_reading_progress_updated
+                        ON manga_reading_progress(updated_at DESC);
+                    """
+                )
+                progress_columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(manga_reading_progress)"
+                    )
+                }
+                if "completed" not in progress_columns:
+                    connection.execute(
+                        "ALTER TABLE manga_reading_progress "
+                        "ADD COLUMN completed INTEGER NOT NULL DEFAULT 0"
+                    )
+                if "cleared" not in progress_columns:
+                    connection.execute(
+                        "ALTER TABLE manga_reading_progress "
+                        "ADD COLUMN cleared INTEGER NOT NULL DEFAULT 0"
+                    )
+                connection.execute("PRAGMA user_version = 20")
+            if version < 21:
+                connection.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS latest_similar_search (
+                        singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                        source_gid INTEGER NOT NULL,
+                        selected_text TEXT NOT NULL,
+                        result_gids_json TEXT NOT NULL DEFAULT '[]',
+                        searched_at INTEGER NOT NULL
+                    );
+                    """
+                )
+                connection.execute("PRAGMA user_version = 21")
 
     def list_labels(self) -> List[Tuple[int, str, int]]:
         self.initialize()
@@ -587,6 +630,55 @@ class UserLibraryRepository:
                 (
                     (gid, int(label_id), next_order + offset, now)
                     for offset, gid in enumerate(target_gids)
+                ),
+            )
+
+    def prepend_mangas_to_playlist(self, gids: Sequence[int], playlist_id: int):
+        """Put unique galleries at the front while preserving both orderings."""
+        self.initialize()
+        target_gids = tuple(dict.fromkeys(int(gid) for gid in gids))
+        if not target_gids:
+            return
+        playlist_id = int(playlist_id)
+        with self._connect() as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM multi_labels WHERE id = ?",
+                (playlist_id,),
+            ).fetchone()
+            if exists is None:
+                raise ValueError("目标播放列表不存在")
+            existing_gids = tuple(
+                int(row[0])
+                for row in connection.execute(
+                    """
+                    SELECT gid FROM manga_multi_labels
+                    WHERE label_id = ?
+                    ORDER BY sort_order, added_at, gid
+                    """,
+                    (playlist_id,),
+                )
+            )
+            target_set = set(target_gids)
+            combined = target_gids + tuple(
+                gid for gid in existing_gids if gid not in target_set
+            )
+            now = time.time_ns()
+            connection.executemany(
+                """
+                INSERT OR IGNORE INTO manga_multi_labels(
+                    gid, label_id, sort_order, added_at
+                ) VALUES (?, ?, 0, ?)
+                """,
+                ((gid, playlist_id, now) for gid in target_gids),
+            )
+            connection.executemany(
+                """
+                UPDATE manga_multi_labels SET sort_order = ?
+                WHERE label_id = ? AND gid = ?
+                """,
+                (
+                    (position, playlist_id, gid)
+                    for position, gid in enumerate(combined)
                 ),
             )
 
@@ -859,49 +951,147 @@ class UserLibraryRepository:
             )
 
     def progress_for_manga(self, gid: int):
+        state = self.reading_state_for_manga(gid)
+        return state[0] if state is not None else None
+
+    def progress_for_mangas(self, gids: Sequence[int]) -> Dict[int, int]:
+        return {
+            gid: state[0]
+            for gid, state in self.reading_states_for_mangas(gids).items()
+        }
+
+    def reading_state_for_manga(self, gid: int):
         self.initialize()
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT page_index FROM manga_reading_progress WHERE gid = ?",
-                (gid,),
+                """
+                SELECT page_index, completed, cleared
+                FROM manga_reading_progress
+                WHERE gid = ?
+                """,
+                (int(gid),),
             ).fetchone()
-        return int(row[0]) if row is not None else None
+        if row is None or bool(row[2]):
+            return None
+        return int(row[0]), bool(row[1])
 
-    def progress_for_mangas(self, gids: Sequence[int]) -> Dict[int, int]:
+    def reading_states_for_mangas(self, gids: Sequence[int]):
         self.initialize()
         if not gids:
             return {}
-        requested_gids = set(gids)
+        requested_gids = {int(gid) for gid in gids}
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT gid, page_index FROM manga_reading_progress"
+                """
+                SELECT gid, page_index, completed
+                FROM manga_reading_progress WHERE cleared = 0
+                """
             )
             return {
-                int(gid): int(page_index)
-                for gid, page_index in rows
-                if gid in requested_gids
+                int(gid): (int(page_index), bool(completed))
+                for gid, page_index, completed in rows
+                if int(gid) in requested_gids
             }
 
-    def save_progress(self, gid: int, page_index: int):
+    def save_progress(self, gid: int, page_index: int, completed=False):
         self.initialize()
         page_index = max(0, int(page_index))
         with self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO manga_reading_progress(gid, page_index, updated_at)
-                VALUES (?, ?, ?)
+                INSERT INTO manga_reading_progress(
+                    gid, page_index, updated_at, completed, cleared
+                ) VALUES (?, ?, ?, ?, 0)
                 ON CONFLICT(gid) DO UPDATE SET
                     page_index = excluded.page_index,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    completed = MAX(
+                        manga_reading_progress.completed,
+                        excluded.completed
+                    ),
+                    cleared = 0
                 """,
-                (int(gid), page_index, int(time.time())),
+                (int(gid), page_index, time.time_ns(), 1 if completed else 0),
             )
+
+    def clear_progress(self, gid: int):
+        self.initialize()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO manga_reading_progress(
+                    gid, page_index, updated_at, completed, cleared
+                ) VALUES (?, 0, ?, 0, 1)
+                ON CONFLICT(gid) DO UPDATE SET
+                    page_index = 0,
+                    updated_at = excluded.updated_at,
+                    completed = 0,
+                    cleared = 1
+                """,
+                (int(gid), time.time_ns()),
+            )
+
+    def save_latest_similar_search(self, record: LatestSimilarSearch):
+        self.initialize()
+        result_gids = tuple(dict.fromkeys(int(gid) for gid in record.result_gids))
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO latest_similar_search(
+                    singleton_id, source_gid, selected_text,
+                    result_gids_json, searched_at
+                ) VALUES (1, ?, ?, ?, ?)
+                ON CONFLICT(singleton_id) DO UPDATE SET
+                    source_gid = excluded.source_gid,
+                    selected_text = excluded.selected_text,
+                    result_gids_json = excluded.result_gids_json,
+                    searched_at = excluded.searched_at
+                """,
+                (
+                    int(record.source_gid),
+                    str(record.selected_text),
+                    json.dumps(result_gids, separators=(",", ":")),
+                    int(record.searched_at or time.time_ns()),
+                ),
+            )
+
+    def latest_similar_search(self):
+        self.initialize()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT source_gid, selected_text, result_gids_json, searched_at
+                FROM latest_similar_search WHERE singleton_id = 1
+                """
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            result_gids = tuple(
+                dict.fromkeys(int(gid) for gid in json.loads(row[2] or "[]"))
+            )
+        except (TypeError, ValueError):
+            result_gids = ()
+        return LatestSimilarSearch(
+            source_gid=int(row[0]),
+            selected_text=str(row[1]),
+            result_gids=result_gids,
+            searched_at=int(row[3]),
+        )
 
     def resolve_progress(self, gid: int, ehviewer_page_index):
         """Prefer RSViewer progress, importing EhViewer only when ours is absent."""
-        own_progress = self.progress_for_manga(gid)
-        if own_progress is not None:
-            return own_progress
+        self.initialize()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT page_index, cleared FROM manga_reading_progress
+                WHERE gid = ?
+                """,
+                (int(gid),),
+            ).fetchone()
+        if row is not None:
+            return None if bool(row[1]) else int(row[0])
         if ehviewer_page_index is None:
             return None
         imported_progress = max(0, int(ehviewer_page_index))
@@ -1132,6 +1322,7 @@ class UserLibraryRepository:
                     str(record.download_mode or DOWNLOAD_MODE_STANDARD),
                 ),
             )
+
             connection.execute(
                 "DELETE FROM online_gallery_comments WHERE gid = ?",
                 (int(record.gid),),
@@ -1285,6 +1476,26 @@ class UserLibraryRepository:
                     f"DELETE FROM {table} WHERE {column} = ?", (gid,)
                 )
             connection.execute("DELETE FROM gallery_trash WHERE gid = ?", (gid,))
+            latest = connection.execute(
+                "SELECT source_gid, result_gids_json FROM latest_similar_search "
+                "WHERE singleton_id = 1"
+            ).fetchone()
+            if latest is not None:
+                if int(latest[0]) == gid:
+                    connection.execute(
+                        "DELETE FROM latest_similar_search WHERE singleton_id = 1"
+                    )
+                else:
+                    result_gids = tuple(
+                        current
+                        for current in json.loads(latest[1] or "[]")
+                        if int(current) != gid
+                    )
+                    connection.execute(
+                        "UPDATE latest_similar_search SET result_gids_json = ? "
+                        "WHERE singleton_id = 1",
+                        (json.dumps(result_gids, separators=(",", ":")),),
+                    )
 
     def mark_interrupted_gallery_trash(self):
         self.initialize()
@@ -1490,22 +1701,34 @@ class UserLibraryRepository:
                 connection.execute(
                     f"DELETE FROM {table} WHERE gid = ?", (source_gid,)
                 )
-            if progress_page_index is None:
-                row = connection.execute(
-                    "SELECT page_index FROM manga_reading_progress WHERE gid = ?",
-                    (source_gid,),
-                ).fetchone()
-                progress_page_index = int(row[0]) if row is not None else None
-            if progress_page_index is not None:
+            progress_row = connection.execute(
+                "SELECT page_index, completed, cleared "
+                "FROM manga_reading_progress WHERE gid = ?",
+                (source_gid,),
+            ).fetchone()
+            if progress_page_index is not None or progress_row is not None:
+                page_index = (
+                    max(0, int(progress_page_index))
+                    if progress_page_index is not None
+                    else max(0, int(progress_row[0]))
+                )
+                completed = int(progress_row[1]) if progress_row is not None else 0
+                cleared = int(progress_row[2]) if progress_row is not None else 0
                 connection.execute(
                     """
-                    INSERT INTO manga_reading_progress(gid, page_index, updated_at)
-                    VALUES (?, ?, ?)
+                    INSERT INTO manga_reading_progress(
+                        gid, page_index, updated_at, completed, cleared
+                    ) VALUES (?, ?, ?, ?, ?)
                     ON CONFLICT(gid) DO UPDATE SET
                         page_index = excluded.page_index,
-                        updated_at = excluded.updated_at
+                        updated_at = excluded.updated_at,
+                        completed = MAX(
+                            manga_reading_progress.completed,
+                            excluded.completed
+                        ),
+                        cleared = excluded.cleared
                     """,
-                    (target_gid, max(0, int(progress_page_index)), time.time_ns()),
+                    (target_gid, page_index, time.time_ns(), completed, cleared),
                 )
             connection.execute(
                 "DELETE FROM manga_reading_progress WHERE gid = ?", (source_gid,)
@@ -1546,6 +1769,27 @@ class UserLibraryRepository:
             connection.execute(
                 "DELETE FROM gallery_sync_records WHERE gid = ?", (source_gid,)
             )
+            latest = connection.execute(
+                "SELECT source_gid, selected_text, result_gids_json, searched_at "
+                "FROM latest_similar_search WHERE singleton_id = 1"
+            ).fetchone()
+            if latest is not None:
+                result_gids = tuple(
+                    target_gid if int(gid) == source_gid else int(gid)
+                    for gid in json.loads(latest[2] or "[]")
+                )
+                result_gids = tuple(dict.fromkeys(result_gids))
+                connection.execute(
+                    """
+                    UPDATE latest_similar_search
+                    SET source_gid = ?, result_gids_json = ?
+                    WHERE singleton_id = 1
+                    """,
+                    (
+                        target_gid if int(latest[0]) == source_gid else int(latest[0]),
+                        json.dumps(result_gids, separators=(",", ":")),
+                    ),
+                )
 
     def update_online_download(
         self,

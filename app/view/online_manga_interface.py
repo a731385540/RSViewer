@@ -43,6 +43,12 @@ from app.sources.eh_online_source import (
     parse_eh_gallery_url,
 )
 from app.view.eh_tag_search_line_edit import EhTagSearchLineEdit
+from app.view.gallery_state_indicator import (
+    DOWNLOAD_INCOMPLETE,
+    DOWNLOAD_NONE,
+    GalleryStateIndicator,
+    READING_NONE,
+)
 from app.workers.eh_online_worker import OnlineCoverWorker, OnlineSearchWorker
 
 
@@ -233,12 +239,24 @@ class _OnlineGalleryCardBase(CardWidget):
         )
         self.downloadedBadge.move(16, 16)
         self.downloadedBadge.hide()
+        self.stateIndicator = GalleryStateIndicator(self)
+        self.stateIndicator.setStates(DOWNLOAD_NONE, READING_NONE)
+        self.stateIndicator.raise_()
 
     def setDownloaded(self, downloaded):
         self.isDownloaded = bool(downloaded)
         self.downloadedBadge.setVisible(bool(downloaded))
         if downloaded:
             self.downloadedBadge.raise_()
+
+    def setGalleryStates(self, download_state, reading_state):
+        self.stateIndicator.setStates(download_state, reading_state)
+        self.stateIndicator.raise_()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.stateIndicator.move(self.width() - 26, 10)
+        self.stateIndicator.raise_()
 
     def setCoverData(self, data: bytes):
         cover_label = getattr(self, "coverLabel", None)
@@ -550,6 +568,7 @@ class OnlineMangaInterface(QWidget):
         self._cover_data = {}
         self._site_providers = {}
         self._downloaded_gids = set()
+        self._gallery_states = {}
         self._cards = []
         self._cards_by_gid = {}
         self._filters = {}
@@ -871,13 +890,31 @@ class OnlineMangaInterface(QWidget):
         for card in self._cards:
             card.setDownloaded(card.item.gid in downloaded_gids)
 
+    def setGalleryStates(self, states):
+        self._gallery_states = {
+            int(gid): tuple(values)
+            for gid, values in dict(states).items()
+        }
+        self.setDownloadedGids(self._gallery_states)
+        for card in self._cards:
+            card.setGalleryStates(
+                *self._gallery_states.get(
+                    int(card.item.gid),
+                    (DOWNLOAD_NONE, READING_NONE),
+                )
+            )
+
     def setGalleryDownloaded(self, gid, downloaded=True):
-        downloaded_gids = set(self._downloaded_gids)
+        gid = int(gid)
+        states = dict(self._gallery_states)
         if downloaded:
-            downloaded_gids.add(int(gid))
+            _download, reading = states.get(
+                gid, (DOWNLOAD_NONE, READING_NONE)
+            )
+            states[gid] = (DOWNLOAD_INCOMPLETE, reading)
         else:
-            downloaded_gids.discard(int(gid))
-        self.setDownloadedGids(downloaded_gids)
+            states.pop(gid, None)
+        self.setGalleryStates(states)
 
     def _makeProvider(self, site=None):
         site = site or self._current_site
@@ -1144,6 +1181,12 @@ class OnlineMangaInterface(QWidget):
         ]
         self._cards_by_gid = {card.item.gid: card for card in self._cards}
         for card in self._cards:
+            card.setGalleryStates(
+                *self._gallery_states.get(
+                    int(card.item.gid),
+                    (DOWNLOAD_NONE, READING_NONE),
+                )
+            )
             data = self._cover_data.get(
                 self._coverMemoryKey(self._current_site, card.item)
             )

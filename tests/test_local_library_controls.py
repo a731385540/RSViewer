@@ -28,7 +28,17 @@ from app.view.local_manga_interface import (
     MangaGridCard,
     ORIGINAL_FALLBACK_BADGE_COLOR,
     ORIGINAL_PENDING_BORDER_COLOR,
+    PlaylistTargetDialog,
     PlaylistOrderDialog,
+    TaxonomyCreateDialog,
+    local_gallery_states,
+)
+from app.view.gallery_state_indicator import (
+    DOWNLOAD_COMPLETE,
+    DOWNLOAD_INCOMPLETE,
+    READING_COMPLETE,
+    READING_NONE,
+    READING_PARTIAL,
 )
 from app.view.manga_history_interface import MangaHistoryInterface
 
@@ -109,6 +119,34 @@ class LocalLibraryControlsTests(unittest.TestCase):
 
     def test_original_pending_border_uses_dark_yellow(self):
         self.assertEqual("#B8860B", ORIGINAL_PENDING_BORDER_COLOR)
+
+    def test_card_states_distinguish_download_and_permanent_reading_status(self):
+        incomplete = replace(
+            self.items[0],
+            download_complete=False,
+            progress_page_index=None,
+            reading_completed=False,
+        )
+        partial = replace(incomplete, progress_page_index=2)
+        completed = replace(
+            incomplete,
+            download_complete=True,
+            progress_page_index=0,
+            reading_completed=True,
+        )
+
+        self.assertEqual(
+            (DOWNLOAD_INCOMPLETE, READING_NONE),
+            local_gallery_states(incomplete),
+        )
+        self.assertEqual(
+            (DOWNLOAD_INCOMPLETE, READING_PARTIAL),
+            local_gallery_states(partial),
+        )
+        self.assertEqual(
+            (DOWNLOAD_COMPLETE, READING_COMPLETE),
+            local_gallery_states(completed),
+        )
 
     def test_cover_scaling_is_cached_until_widget_size_changes(self):
         image = QImage(480, 640, QImage.Format_RGB32)
@@ -612,6 +650,93 @@ class LocalLibraryControlsTests(unittest.TestCase):
         playlist_dialog.close()
         taxonomy_dialog.close()
 
+    def test_taxonomy_create_dialog_collects_name_and_parent(self):
+        dialog = TaxonomyCreateDialog(
+            (("根节点", None), ("全彩", 7)),
+            parent=self.interface,
+        )
+        self.assertFalse(dialog.yesButton.isEnabled())
+        dialog.nameEdit.setText("  作者一  ")
+        dialog.parentCombo.setCurrentIndex(1)
+
+        self.assertTrue(dialog.yesButton.isEnabled())
+        self.assertEqual("作者一", dialog.name())
+        self.assertEqual(7, dialog.parentId())
+        dialog.close()
+
+    def test_taxonomy_creation_skips_full_library_refresh_and_card_render(self):
+        root_id = self.repository.create_taxonomy_label("已有归类")
+        self.interface._refreshTagData()
+        self.interface._setTagMode(self.interface.TAG_TAXONOMY)
+        self.interface.taxonomyTree.setCurrentItem(
+            self.interface._taxonomy_items[root_id]
+        )
+        dialog = MagicMock()
+        dialog.exec.return_value = QDialog.Accepted
+        dialog.name.return_value = "新归类"
+        dialog.parentId.return_value = None
+
+        with patch(
+            "app.view.local_manga_interface.TaxonomyCreateDialog",
+            return_value=dialog,
+        ), patch.object(
+            self.interface,
+            "_refreshTagData",
+            side_effect=AssertionError("不应执行全量标签刷新"),
+        ), patch.object(self.interface, "applyFilters") as apply_filters:
+            self.interface._createTaxonomyLabel()
+            QThreadPool.globalInstance().waitForDone(3000)
+            QApplication.processEvents()
+
+        labels = self.repository.list_taxonomy_labels()
+        new_id = next(
+            label_id
+            for label_id, _parent, name, _count in labels
+            if name == "新归类"
+        )
+        self.assertIn(new_id, self.interface._taxonomy_items)
+        self.assertEqual(root_id, self.interface._taxonomy_filter_id)
+        apply_filters.assert_not_called()
+
+    def test_taxonomy_creation_incrementally_assigns_target_manga(self):
+        root_id = self.repository.create_taxonomy_label("父归类")
+        self.interface._refreshTagData()
+        self.interface._setTagMode(self.interface.TAG_TAXONOMY)
+        self.interface.taxonomyTree.setCurrentItem(
+            self.interface._taxonomy_items[root_id]
+        )
+        dialog = MagicMock()
+        dialog.exec.return_value = QDialog.Accepted
+        dialog.name.return_value = "子归类"
+        dialog.parentId.return_value = root_id
+
+        with patch(
+            "app.view.local_manga_interface.TaxonomyCreateDialog",
+            return_value=dialog,
+        ), patch.object(
+            self.interface,
+            "_refreshTagData",
+            side_effect=AssertionError("不应执行全量标签刷新"),
+        ):
+            self.interface._createTaxonomyLabel((1,))
+            QThreadPool.globalInstance().waitForDone(3000)
+            QApplication.processEvents()
+
+        labels = self.repository.list_taxonomy_labels()
+        child_id = next(
+            label_id
+            for label_id, parent_id, name, _count in labels
+            if parent_id == root_id and name == "子归类"
+        )
+        updated_item = next(
+            item for item in self.interface._all_items if item.gid == 1
+        )
+        self.assertEqual((child_id,), updated_item.taxonomy_label_ids)
+        self.assertEqual(
+            {1},
+            {item.gid for item in self.interface._filtered_items},
+        )
+
     def test_dialog_selection_changes_apply_in_bulk(self):
         playlist_id = self.repository.create_playlist("批量播放列表")
         taxonomy_id = self.repository.create_taxonomy_label("批量归类")
@@ -750,18 +875,23 @@ class LocalLibraryControlsTests(unittest.TestCase):
         history.deleteLater()
 
     def test_tag_tree_context_menus_delete_all_three_tag_types(self):
-        self.assertIsNone(
-            self.interface._buildTagTreeMenu(
-                self.interface.TAG_CATEGORY,
-                self.interface.primaryLabelTree.topLevelItem(0),
-            )
+        unclassified_menu = self.interface._buildTagTreeMenu(
+            self.interface.TAG_CATEGORY,
+            self.interface.primaryLabelTree.topLevelItem(0),
+        )
+        self.assertEqual(
+            ["全部加入播放列表最前方…"],
+            [action.text() for action in unclassified_menu.menuActions()],
         )
         self.interface._confirmDeleteTag = lambda _name, _description: False
         cancelled_menu = self.interface._buildTagTreeMenu(
             self.interface.TAG_CATEGORY,
             self.interface.primaryLabelTree.topLevelItem(1),
         )
-        cancelled_menu.menuActions()[0].trigger()
+        next(
+            action for action in cancelled_menu.menuActions()
+            if action.text() == "删除"
+        ).trigger()
         self.assertEqual([], self.source.primary_deletes)
 
         self.interface._confirmDeleteTag = lambda _name, _description: True
@@ -769,7 +899,10 @@ class LocalLibraryControlsTests(unittest.TestCase):
             self.interface.TAG_CATEGORY,
             self.interface.primaryLabelTree.topLevelItem(1),
         )
-        category_menu.menuActions()[0].trigger()
+        next(
+            action for action in category_menu.menuActions()
+            if action.text() == "删除"
+        ).trigger()
         QThreadPool.globalInstance().waitForDone(3000)
         QApplication.processEvents()
         self.assertEqual(["分类 A"], self.source.primary_deletes)
@@ -803,6 +936,35 @@ class LocalLibraryControlsTests(unittest.TestCase):
         self.assertNotIn(
             taxonomy_id,
             [entry[0] for entry in self.repository.list_taxonomy_labels()],
+        )
+
+    def test_category_context_action_prepends_all_items_without_search_filter(self):
+        categorized = tuple(
+            replace(item, primary_label="分类 A") for item in self.items
+        )
+        self.interface._onLoaded(
+            (categorized, ["分类 A", "分类 B"], [], [])
+        )
+        playlist_id = self.repository.create_playlist("目标列表")
+        self.repository.assign_label_to_mangas((99, 2), playlist_id)
+        self.repository.set_playlist_order(playlist_id, (99, 2))
+        self.interface._refreshTagData()
+        self.interface.searchEdit.setText("Manga 1")
+        dialog = MagicMock()
+        dialog.exec.return_value = QDialog.Accepted
+        dialog.playlistId.return_value = playlist_id
+
+        with patch(
+            "app.view.local_manga_interface.PlaylistTargetDialog",
+            return_value=dialog,
+        ):
+            self.interface._prependCategoryToPlaylist("分类 A", "分类 A")
+            QThreadPool.globalInstance().waitForDone(3000)
+            QApplication.processEvents()
+
+        self.assertEqual(
+            (2, 3, 1, 99),
+            self.repository.playlist_items(playlist_id),
         )
 
     def test_right_click_without_multi_select_opens_menu_not_gallery(self):

@@ -85,6 +85,7 @@ class MangaItem:
     newer_gallery_urls: Tuple[str, ...] = ()
     metadata_synced: bool = False
     progress_page_index: Optional[int] = None
+    reading_completed: bool = False
     taxonomy_label_ids: Tuple[int, ...] = ()
     taxonomy_labels: Tuple[str, ...] = ()
     is_favorite: bool = False

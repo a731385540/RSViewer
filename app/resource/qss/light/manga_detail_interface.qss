@@ -52,7 +52,7 @@ QLabel#galleryQualityBadge[qualityTone="base"] {
     color: #7145ad;
 }
 
-QLabel#mangaTagChip {
+QLabel#mangaTagChip, QLabel#mangaKeyTagChip {
     min-height: 24px;
     padding: 1px 9px;
     border: 1px solid #dcdfe6;
@@ -62,37 +62,37 @@ QLabel#mangaTagChip {
     font-size: 12px;
 }
 
-QLabel#mangaTagChip[tagTone="creator"] {
+QLabel#mangaTagChip[tagTone="creator"], QLabel#mangaKeyTagChip[tagTone="creator"] {
     border-color: #b3d8ff;
     background: #ecf5ff;
     color: #337ecc;
 }
 
-QLabel#mangaTagChip[tagTone="work"] {
+QLabel#mangaTagChip[tagTone="work"], QLabel#mangaKeyTagChip[tagTone="work"] {
     border-color: #cbb9f4;
     background: #f4efff;
     color: #7653b8;
 }
 
-QLabel#mangaTagChip[tagTone="language"] {
+QLabel#mangaTagChip[tagTone="language"], QLabel#mangaKeyTagChip[tagTone="language"] {
     border-color: #b3e19d;
     background: #f0f9eb;
     color: #529b2e;
 }
 
-QLabel#mangaTagChip[tagTone="female"] {
+QLabel#mangaTagChip[tagTone="female"], QLabel#mangaKeyTagChip[tagTone="female"] {
     border-color: #f3b7d3;
     background: #fdf2f8;
     color: #b94a7d;
 }
 
-QLabel#mangaTagChip[tagTone="male"] {
+QLabel#mangaTagChip[tagTone="male"], QLabel#mangaKeyTagChip[tagTone="male"] {
     border-color: #a5e4ef;
     background: #ecfbfe;
     color: #17829b;
 }
 
-QLabel#mangaTagChip[tagTone="mixed"] {
+QLabel#mangaTagChip[tagTone="mixed"], QLabel#mangaKeyTagChip[tagTone="mixed"] {
     border-color: #f3d19e;
     background: #fdf6ec;
     color: #b88230;

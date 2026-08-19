@@ -75,6 +75,12 @@ class EhTagSearchIndex:
             )
         self._entries = tuple(entries)
         self._namespace_aliases = namespace_aliases
+        self._translations = {
+            (entry.suggestion.namespace, entry.normalized_raw_tag):
+                entry.suggestion.translated_name
+            for entry in self._entries
+            if entry.suggestion.translated_name
+        }
         gram_index: Dict[str, List[int]] = {}
         for entry_index, entry in enumerate(self._entries):
             grams = set()
@@ -99,6 +105,15 @@ class EhTagSearchIndex:
 
     def __len__(self):
         return len(self._entries)
+
+    def translated_name(self, namespace: str, raw_tag: str) -> str:
+        """Return the exact imported translation without running a fuzzy search."""
+        canonical_namespace = self._namespace_aliases.get(
+            _normalize(namespace), str(namespace).casefold().strip()
+        )
+        return self._translations.get(
+            (canonical_namespace, _normalize(raw_tag)), ""
+        )
 
     @property
     def is_empty(self) -> bool:
