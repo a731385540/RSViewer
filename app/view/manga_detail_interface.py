@@ -480,6 +480,8 @@ class MangaDetailInterface(QWidget):
     progressResolved = Signal(int, int, int)
     readingRecordClearRequested = Signal(int)
     selectedTitleSearchRequested = Signal(int, str)
+    selectedTitleOnlineSearchRequested = Signal(str)
+    categorySelectionRequested = Signal(object)
     similarResultsRequested = Signal()
 
     def __init__(
@@ -717,6 +719,13 @@ class MangaDetailInterface(QWidget):
         )
         self.openFolderButton.clicked.connect(self._requestOpenFolder)
         action_layout.addWidget(self.openFolderButton)
+        self.categoryButton = PushButton(
+            FIF.TAG,
+            self.tr("选择分类"),
+            self.operationCard,
+        )
+        self.categoryButton.clicked.connect(self._requestCategorySelection)
+        action_layout.addWidget(self.categoryButton)
 
         self.downloadControls = QWidget(self.operationCard)
         self.downloadControls.setFixedWidth(160)
@@ -806,6 +815,7 @@ class MangaDetailInterface(QWidget):
         self.syncButton.hide()
         self.updateButton.hide()
         self.openFolderButton.hide()
+        self.categoryButton.hide()
         self.clearProgressButton.hide()
 
         self.previewCard = SimpleCardWidget(self)
@@ -981,6 +991,7 @@ class MangaDetailInterface(QWidget):
         self.deleteCompressedButton.hide()
         self.syncButton.show()
         self.openFolderButton.show()
+        self.categoryButton.show()
         self.clearProgressButton.setVisible(
             item.progress_page_index is not None or item.reading_completed
         )
@@ -1095,6 +1106,7 @@ class MangaDetailInterface(QWidget):
         self.syncButton.hide()
         self.updateButton.hide()
         self.openFolderButton.hide()
+        self.categoryButton.hide()
         self.clearProgressButton.hide()
         self.downloadButton.setEnabled(False)
         self.downloadButton.setText(self.tr("正在读取画廊信息…"))
@@ -1123,6 +1135,7 @@ class MangaDetailInterface(QWidget):
     def setOnlineDetail(
         self, detail: OnlineGalleryDetail, cover_data=b"", provider=None, cache=None
     ):
+        self.categoryButton.hide()
         self._online_gallery = detail.gallery
         self._online_detail = detail
         if provider is not None:
@@ -1544,6 +1557,10 @@ class MangaDetailInterface(QWidget):
     def _requestOpenFolder(self):
         if self._folder_open_item is not None:
             self.folderOpenRequested.emit(self._folder_open_item)
+
+    def _requestCategorySelection(self):
+        if self._item is not None and self._online_detail is None:
+            self.categorySelectionRequested.emit(self._item)
 
     def _requestClearProgress(self):
         item = self._item or self._folder_open_item
@@ -2056,10 +2073,8 @@ class MangaDetailInterface(QWidget):
         return "\n".join(values)
 
     def _detailedMetadataText(self, item: MangaItem) -> str:
-        playlists = "、".join(item.multiple_labels) or self.tr("无")
         taxonomy = "、".join(item.taxonomy_labels) or self.tr("无")
         values = [
-            self.tr("播放列表：{}").format(playlists),
             self.tr("归类：{}").format(taxonomy),
             self.tr("页数：{}").format(item.page_count or self.tr("读取中…")),
             self.tr("阅读进度：{}").format(self._progressText(item)),
@@ -2134,9 +2149,31 @@ class MangaDetailInterface(QWidget):
                 self._currentGalleryGid(), selected_text
             )
         )
+        online_search_action = QAction(
+            self.tr("在线搜索所选文本"), menu
+        )
+        online_search_action.setEnabled(effective_length >= 2)
+        online_search_action.triggered.connect(
+            lambda: self.selectedTitleOnlineSearchRequested.emit(
+                selected_text
+            )
+        )
         menu.addAction(copy_action)
         menu.addAction(search_action)
+        menu.addAction(online_search_action)
         menu.exec(label.mapToGlobal(position))
+
+    def updateLocalItem(self, item):
+        if (
+            self._item is None
+            or self._online_gallery is not None
+            or int(self._item.gid) != int(item.gid)
+        ):
+            return False
+        self._item = item
+        self._folder_open_item = item
+        self._setLocalMetadata(item, reset_details=False)
+        return True
 
     def setSimilarSearchRecord(self, record):
         gid = self._currentGalleryGid()

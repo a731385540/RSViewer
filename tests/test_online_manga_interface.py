@@ -9,18 +9,19 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QCoreApplication, QDate, QEvent, QPoint, Qt
 from PySide6.QtGui import QContextMenuEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 from qfluentwidgets import Theme, qconfig, setTheme
 
 from app.common.config import cfg
 from app.domain.online_gallery import OnlineGallery, OnlineGalleryPage
+from app.services.gallery_marker import gallery_matches_marker
 from app.view.online_manga_interface import (
     OnlineGalleryCard,
     OnlineGalleryExtendedCard,
     OnlineGalleryListCard,
     OnlineMangaInterface,
 )
-from app.view.setting_interface import SettingInterface
+from app.view.setting_interface import GalleryMarkerRulesDialog, SettingInterface
 
 
 class _FakeOnlineProvider:
@@ -134,6 +135,8 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
         self.old_view_mode = cfg.get(cfg.onlineEhViewMode)
         self.old_cover_concurrency = cfg.get(cfg.onlineEhThumbnailConcurrency)
         self.old_download_label = cfg.get(cfg.onlineEhDownloadLabel)
+        self.old_marker_title_rules = cfg.get(cfg.onlineEhMarkerTitleRules)
+        self.old_marker_tag_rules = cfg.get(cfg.onlineEhMarkerTagRules)
         self.old_cache_hours = cfg.get(cfg.onlineEhThumbnailCacheHours)
         cfg.set(cfg.onlineEhSite, "ehentai")
         cfg.set(cfg.onlineEhCookie, "token")
@@ -143,6 +146,8 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
         cfg.set(cfg.onlineEhViewMode, "card")
         cfg.set(cfg.onlineEhThumbnailConcurrency, 6)
         cfg.set(cfg.onlineEhDownloadLabel, "")
+        cfg.set(cfg.onlineEhMarkerTitleRules, [])
+        cfg.set(cfg.onlineEhMarkerTagRules, [])
         cfg.set(cfg.onlineEhThumbnailCacheHours, 168)
         _FakeOnlineProvider.instances.clear()
         _FakeOnlineProvider.queries.clear()
@@ -157,6 +162,8 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
         cfg.set(cfg.onlineEhViewMode, self.old_view_mode)
         cfg.set(cfg.onlineEhThumbnailConcurrency, self.old_cover_concurrency)
         cfg.set(cfg.onlineEhDownloadLabel, self.old_download_label)
+        cfg.set(cfg.onlineEhMarkerTitleRules, self.old_marker_title_rules)
+        cfg.set(cfg.onlineEhMarkerTagRules, self.old_marker_tag_rules)
         cfg.set(cfg.onlineEhThumbnailCacheHours, self.old_cache_hours)
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
         self.app.processEvents()
@@ -463,6 +470,202 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
             requested,
         )
         interface.deleteLater()
+
+    def test_selected_title_search_runs_exact_query_and_shows_return_button(self):
+        interface = OnlineMangaInterface(
+            provider_factory=_FakeOnlineProvider,
+            auto_load_on_show=False,
+        )
+        returned = []
+        interface.detailReturnRequested.connect(lambda: returned.append(True))
+        interface.setDetailReturnAvailable(True)
+
+        self.assertTrue(interface.searchForText('"Selected title"'))
+        self.assertTrue(self._wait_until(lambda: interface._search_worker is None))
+        self.assertEqual('"Selected title"', interface.searchEdit.text())
+        self.assertEqual(
+            '"Selected title"', _FakeOnlineProvider.queries[-1][1].keyword
+        )
+        self.assertFalse(interface.detailReturnButton.isHidden())
+        interface.detailReturnButton.click()
+        self.assertEqual([True], returned)
+
+        interface.setDetailReturnAvailable(False)
+        self.assertTrue(interface.detailReturnButton.isHidden())
+        interface.cancelLoad()
+        interface.searchThreadPool.waitForDone(1000)
+        interface.coverThreadPool.waitForDone(1000)
+        interface.deleteLater()
+
+    def test_gallery_marker_matches_title_and_exact_full_or_bare_tags(self):
+        gallery = OnlineGallery(
+            1,
+            "token",
+            "https://e-hentai.org/g/1/token/",
+            "[Circle] Warning chapter",
+            tags=("artist:Tester", "female:glasses"),
+        )
+
+        self.assertTrue(gallery_matches_marker(gallery, ("WARNING",), ()))
+        self.assertTrue(gallery_matches_marker(gallery, (), ("artist:tester",)))
+        self.assertTrue(gallery_matches_marker(gallery, (), ("TESTER",)))
+        self.assertFalse(gallery_matches_marker(gallery, (), ("test",)))
+        self.assertFalse(gallery_matches_marker(gallery, (), ("male:tester",)))
+
+    def test_gallery_marker_dialog_adds_deduplicates_and_removes_rules(self):
+        parent = QWidget()
+        dialog = GalleryMarkerRulesDialog(
+            ("Warning", "warning", ""),
+            ("artist:tester",),
+            parent,
+        )
+        try:
+            self.assertEqual(("Warning",), dialog.titleRules())
+            self.assertEqual(("artist:tester",), dialog.tagRules())
+
+            dialog.titleSection.inputEdit.setText("Another title")
+            QTest.mouseClick(dialog.titleSection.addButton, Qt.LeftButton)
+            self.assertEqual(("Warning", "Another title"), dialog.titleRules())
+
+            first_item = dialog.titleSection.listWidget.item(0)
+            first_row = dialog.titleSection.listWidget.itemWidget(first_item)
+            QTest.mouseClick(first_row.removeButton, Qt.LeftButton)
+            self.assertEqual(("Another title",), dialog.titleRules())
+
+            dialog.tagSection.inputEdit.setText("language:chinese")
+            dialog.tagSection.inputEdit.returnPressed.emit()
+            self.assertEqual(
+                ("artist:tester", "language:chinese"),
+                dialog.tagRules(),
+            )
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            parent.deleteLater()
+
+    def test_gallery_marker_setting_card_saves_dialog_rules(self):
+        class AcceptedMarkerDialog:
+            def __init__(self, title_rules, tag_rules, parent):
+                self.initial = (tuple(title_rules), tuple(tag_rules), parent)
+
+            def exec(self):
+                return True
+
+            def titleRules(self):
+                return ("warning",)
+
+            def tagRules(self):
+                return ("artist:tester", "chinese")
+
+        settings = SettingInterface()
+        try:
+            with patch(
+                "app.view.setting_interface.GalleryMarkerRulesDialog",
+                AcceptedMarkerDialog,
+            ):
+                settings.onlineGalleryMarkerCard.configureButton.click()
+            self.assertEqual(
+                ["warning"], cfg.get(cfg.onlineEhMarkerTitleRules)
+            )
+            self.assertEqual(
+                ["artist:tester", "chinese"],
+                cfg.get(cfg.onlineEhMarkerTagRules),
+            )
+            self.assertEqual(
+                "标题 1 项 · Tag 2 项",
+                settings.onlineGalleryMarkerCard.contentLabel.text(),
+            )
+            self.assertEqual(70, settings.onlineGalleryMarkerCard.height())
+        finally:
+            settings.deleteLater()
+
+    def test_gallery_markers_update_existing_cards_in_all_view_modes(self):
+        cfg.set(cfg.onlineEhMarkerTitleRules, ["warning"])
+        cfg.set(cfg.onlineEhMarkerTagRules, ["artist:tester"])
+        interface = OnlineMangaInterface(
+            provider_factory=_FakeOnlineProvider,
+            auto_load_on_show=False,
+        )
+        items = (
+            OnlineGallery(
+                1,
+                "one",
+                "https://e-hentai.org/g/1/one/",
+                "Warning title",
+            ),
+            OnlineGallery(
+                2,
+                "two",
+                "https://e-hentai.org/g/2/two/",
+                "Tag match",
+                tags=("artist:Tester",),
+            ),
+            OnlineGallery(
+                3,
+                "three",
+                "https://e-hentai.org/g/3/three/",
+                "Ordinary gallery",
+                tags=("artist:someone",),
+            ),
+        )
+
+        for view_mode, card_type in (
+            ("card", OnlineGalleryCard),
+            ("list", OnlineGalleryListCard),
+            ("extended", OnlineGalleryExtendedCard),
+        ):
+            with self.subTest(view_mode=view_mode):
+                cfg.set(cfg.onlineEhViewMode, view_mode)
+                interface._setItems(items)
+                self.assertTrue(all(isinstance(card, card_type) for card in interface._cards))
+                self.assertEqual(
+                    [True, True, False],
+                    [bool(card.property("galleryMarked")) for card in interface._cards],
+                )
+
+        cards = tuple(interface._cards)
+        cfg.set(cfg.onlineEhMarkerTitleRules, ["ordinary"])
+        cfg.set(cfg.onlineEhMarkerTagRules, [])
+        self.assertEqual(cards, tuple(interface._cards))
+        self.assertEqual(
+            [False, False, True],
+            [bool(card.property("galleryMarked")) for card in interface._cards],
+        )
+        interface.deleteLater()
+
+    def test_gallery_marker_border_is_drawn_deep_red_in_both_themes(self):
+        original_theme = qconfig.theme
+        cfg.set(cfg.onlineEhMarkerTitleRules, ["marked"])
+        interface = OnlineMangaInterface(
+            provider_factory=_FakeOnlineProvider,
+            auto_load_on_show=False,
+        )
+        interface.resize(700, 600)
+        interface._setItems(
+            (
+                OnlineGallery(
+                    1,
+                    "token",
+                    "https://e-hentai.org/g/1/token/",
+                    "Marked gallery",
+                ),
+            )
+        )
+        interface.show()
+        try:
+            for theme in (Theme.LIGHT, Theme.DARK):
+                with self.subTest(theme=theme):
+                    setTheme(theme)
+                    for _ in range(3):
+                        self.app.processEvents()
+                    card = interface._cards[0]
+                    pixel = card.grab().toImage().pixelColor(card.width() // 2, 1)
+                    self.assertGreater(pixel.red(), pixel.green() + 60)
+                    self.assertGreater(pixel.red(), pixel.blue() + 60)
+        finally:
+            setTheme(original_theme)
+            interface.close()
+            interface.deleteLater()
 
     def test_gallery_url_panel_validates_and_opens_with_current_site(self):
         interface = OnlineMangaInterface(

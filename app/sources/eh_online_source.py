@@ -320,10 +320,13 @@ class RefactoredEhOnlineProvider(EhOnlineProvider):
             trust_env=settings.proxy_mode == "system",
         )
         self._request_lock = Lock()
+        self._session_configuration_lock = Lock()
+        self._session_configuration_loaded = False
         self._active_responses = {}
         self._cancel_requested = False
 
     def fetch_page(self, query: OnlineGalleryQuery) -> OnlineGalleryPage:
+        self._ensure_session_configuration()
         if query.cursor:
             self._validate_list_url(query.cursor)
             result = self._crawler.getUrl(query.cursor)
@@ -636,11 +639,40 @@ class RefactoredEhOnlineProvider(EhOnlineProvider):
                     pass
 
     def set_display_mode(self, mode: str):
+        self._ensure_session_configuration()
         result = self._crawler.setDisplayMode(mode)
         if not isinstance(result, dict):
             raise EhOnlineError("画廊爬虫返回了未知的页面模式设置结果")
         if result.get("error"):
             raise EhOnlineError(str(result["error"]))
+
+    def _ensure_session_configuration(self):
+        """Load account capability cookies before the first list request."""
+        if self._session_configuration_loaded:
+            return
+        with self._session_configuration_lock:
+            if self._session_configuration_loaded:
+                return
+            self._session_configuration_loaded = True
+            if not self.settings.cookie:
+                return
+            request = getattr(self._crawler, "req", None)
+            session = getattr(request, "session", None)
+            cookies = getattr(session, "cookies", ())
+            try:
+                if any(cookie.name == "hath_perks" for cookie in cookies):
+                    return
+            except (AttributeError, TypeError):
+                pass
+            getter = getattr(request, "get", None)
+            if getter is None:
+                return
+            try:
+                getter(urljoin(self.settings.base_url, "uconfig.php"))
+            except Exception:
+                # Account preferences improve result counts, but a failed
+                # bootstrap must not make the gallery list unavailable.
+                return
 
     def _validate_list_url(self, url: str):
         parsed = urlparse(url)

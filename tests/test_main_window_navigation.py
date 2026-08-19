@@ -365,6 +365,86 @@ class MainWindowNavigationTests(unittest.TestCase):
         )
         self.assertEqual(0, len(window._detailNavigationHistory))
 
+    def test_selected_title_online_search_restores_local_detail(self):
+        window = self.window
+        detail_widget = QWidget(window)
+        detail_widget.setObjectName("sharedDetailInterface")
+        window.mangaDetailInterface = detail_widget
+        window.mangaReaderInterface = QWidget(window)
+        window.stackedWidget.addWidget(detail_widget)
+        window.switchTo(detail_widget)
+        source_item = SimpleNamespace(gid=123)
+        window._onlineSearchReturnState = None
+        window._detailNavigationHistory = deque()
+        window._readingSequenceContext = None
+        window._currentDetailNavigationEntry = lambda: ("local", source_item)
+        window.onlineMangaInterface.searchForText = MagicMock()
+        window.onlineMangaInterface.setDetailReturnAvailable = MagicMock()
+
+        window.searchSelectedTitleOnline('  Part "One"  ')
+
+        self.assertIs(
+            window.onlineMangaInterface,
+            window.stackedWidget.currentWidget(),
+        )
+        window.onlineMangaInterface.searchForText.assert_called_once_with(
+            '"Part One"'
+        )
+        window.onlineMangaInterface.setDetailReturnAvailable.assert_called_with(
+            True
+        )
+
+        window.openMangaDetail = MagicMock()
+        self.assertTrue(window.navigateBack())
+        window.openMangaDetail.assert_called_once_with(source_item)
+        self.assertIsNone(window._onlineSearchReturnState)
+
+    def test_selected_title_online_search_restores_online_detail_history(self):
+        window = self.window
+        detail_widget = QWidget(window)
+        detail_widget.setObjectName("sharedDetailInterface")
+        window.mangaDetailInterface = detail_widget
+        window.mangaReaderInterface = QWidget(window)
+        window.stackedWidget.addWidget(detail_widget)
+        window.switchTo(detail_widget)
+        earlier = ("local", SimpleNamespace(gid=100))
+        source_gallery = OnlineGallery(
+            123,
+            "abcdef0123",
+            "https://e-hentai.org/g/123/abcdef0123/",
+            "Source",
+        )
+        provider = SimpleNamespace(settings=SimpleNamespace(site="ehentai"))
+        source_entry = ("online", source_gallery, provider, b"cover")
+        window._onlineSearchReturnState = None
+        window._detailNavigationHistory = deque((earlier,))
+        window._readingSequenceContext = None
+        window._currentDetailNavigationEntry = lambda: source_entry
+        window.onlineMangaInterface.searchForText = MagicMock()
+        window.onlineMangaInterface.setDetailReturnAvailable = MagicMock()
+
+        window.searchSelectedTitleOnline("Source title")
+        window.openOnlineMangaDetail = MagicMock()
+
+        self.assertTrue(window.navigateBack())
+        window.openOnlineMangaDetail.assert_called_once_with(
+            source_gallery, provider, b"cover"
+        )
+        self.assertEqual([earlier], list(window._detailNavigationHistory))
+
+    def test_selected_title_online_search_return_expires_on_unrelated_page(self):
+        window = self.window
+        window._onlineSearchReturnState = {"entry": ("local", object())}
+        window.onlineMangaInterface.setDetailReturnAvailable = MagicMock()
+        window.switchTo(window.downloadManagerInterface)
+
+        window._onOnlineSearchPageChanged(0)
+
+        self.assertIsNone(window._onlineSearchReturnState)
+        window.onlineMangaInterface.setDetailReturnAvailable.assert_called_once_with(
+            False
+        )
+
     def test_batch_metadata_sync_runs_two_at_once_and_reloads_once(self):
         window = self.window
         window._localMetadataSyncWorker = None

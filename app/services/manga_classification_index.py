@@ -6,7 +6,6 @@ class MangaClassificationIndex:
 
     ALL = "all"
     CATEGORY = "category"
-    PLAYLIST = "playlist"
     TAXONOMY = "taxonomy"
     UNCLASSIFIED = "__none__"
 
@@ -14,7 +13,6 @@ class MangaClassificationIndex:
         self._all_gids = set()
         self._memberships = {
             self.CATEGORY: defaultdict(set),
-            self.PLAYLIST: defaultdict(set),
             self.TAXONOMY: defaultdict(set),
         }
         self._gid_memberships = {}
@@ -40,9 +38,6 @@ class MangaClassificationIndex:
         self.remove(gid)
         memberships = {
             self.CATEGORY: (str(item.primary_label or self.UNCLASSIFIED),),
-            self.PLAYLIST: tuple(
-                dict.fromkeys(str(name) for name in item.multiple_labels if name)
-            ),
             self.TAXONOMY: tuple(
                 dict.fromkeys(int(label_id) for label_id in item.taxonomy_label_ids)
             ),

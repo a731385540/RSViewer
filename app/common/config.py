@@ -95,6 +95,8 @@ class Config(QConfig):
         "OnlineEH", "DownloadThreads", 6, OptionsValidator([1, 2, 3, 4, 5, 6])
     )
     onlineEhDownloadLabel = ConfigItem("OnlineEH", "DownloadLabel", "")
+    onlineEhMarkerTitleRules = ConfigItem("OnlineEH", "MarkerTitleRules", [])
+    onlineEhMarkerTagRules = ConfigItem("OnlineEH", "MarkerTagRules", [])
     onlineEhThumbnailCacheHours = OptionsConfigItem(
         "OnlineEH",
         "ThumbnailCacheHours",
@@ -121,6 +123,9 @@ class Config(QConfig):
         OptionsValidator(["fit_window", "fit_width", "original"]),
     )
     readerScrollShortcut = ConfigItem("MangaReader", "ScrollShortcut", "Space")
+    readerNextMangaShortcut = ConfigItem(
+        "MangaReader", "NextMangaShortcut", "Ctrl+PageDown"
+    )
     readerAutoPageEnabled = ConfigItem(
         "MangaReader", "AutoPageEnabled", False, BoolValidator()
     )

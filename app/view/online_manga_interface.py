@@ -34,6 +34,7 @@ from qfluentwidgets import FluentIcon as FIF
 from app.common.config import cfg
 from app.common.style_sheet import StyleSheet
 from app.domain.online_gallery import OnlineGallery, OnlineGalleryPage, OnlineGalleryQuery
+from app.services.gallery_marker import gallery_matches_marker
 from app.services.online_thumbnail_cache import OnlineThumbnailCache
 from app.sources.eh_online_source import (
     EhOnlineError,
@@ -229,6 +230,7 @@ class _OnlineGalleryCardBase(CardWidget):
         self.downloadCallback = download_callback
         self.openFolderCallback = open_folder_callback
         self.isDownloaded = False
+        self.isMarked = False
         self.setCursor(Qt.PointingHandCursor)
         if open_callback is not None:
             self.clicked.connect(lambda: open_callback(item))
@@ -256,6 +258,16 @@ class _OnlineGalleryCardBase(CardWidget):
     def setGalleryStates(self, download_state, reading_state):
         self.stateIndicator.setStates(download_state, reading_state)
         self.stateIndicator.raise_()
+
+    def setMarked(self, marked):
+        marked = bool(marked)
+        if self.isMarked == marked and self.property("galleryMarked") is not None:
+            return
+        self.isMarked = marked
+        self.setProperty("galleryMarked", marked)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -541,6 +553,7 @@ class OnlineGalleryExtendedCard(_OnlineGalleryCardBase):
 class OnlineMangaInterface(QWidget):
     """Online EH/EX browser whose gallery cards open the shared detail page."""
 
+    detailReturnRequested = Signal()
     galleryActivated = Signal(object, object, bytes)
     galleryDownloadRequested = Signal(object, object, bytes)
     localFolderOpenRequested = Signal(int)
@@ -594,6 +607,11 @@ class OnlineMangaInterface(QWidget):
         self.threadPool = self.searchThreadPool
 
         self.titleLabel = TitleLabel(self.tr("在线资源"), self)
+        self.detailReturnButton = ToolButton(FIF.LEFT_ARROW, self)
+        self.detailReturnButton.setToolTip(self.tr("返回来源画廊"))
+        self.detailReturnButton.setAccessibleName(self.tr("返回来源画廊"))
+        self.detailReturnButton.clicked.connect(self.detailReturnRequested)
+        self.detailReturnButton.hide()
         self.siteSwitch = SegmentedWidget(self)
         self.siteSwitch.addItem("ehentai", "E-Hentai", lambda: self.setSite("ehentai"))
         self.siteSwitch.addItem("exhentai", "ExHentai", lambda: self.setSite("exhentai"))
@@ -678,6 +696,7 @@ class OnlineMangaInterface(QWidget):
         self.timeSearchPanel.hide()
 
         header = QHBoxLayout()
+        header.addWidget(self.detailReturnButton)
         header.addWidget(self.titleLabel)
         header.addStretch(1)
         header.addWidget(self.viewModeButton)
@@ -736,6 +755,12 @@ class OnlineMangaInterface(QWidget):
         cfg.onlineEhViewMode.valueChanged.connect(self._syncViewMode)
         cfg.onlineEhThumbnailConcurrency.valueChanged.connect(
             self._setCoverConcurrency
+        )
+        cfg.onlineEhMarkerTitleRules.valueChanged.connect(
+            self._refreshGalleryMarkers
+        )
+        cfg.onlineEhMarkerTagRules.valueChanged.connect(
+            self._refreshGalleryMarkers
         )
         StyleSheet.ONLINE_MANGA_INTERFACE.apply(self)
 
@@ -991,6 +1016,18 @@ class OnlineMangaInterface(QWidget):
         request = OnlinePageRequest(keyword=keyword, cursor="")
         self._requestPage(site, request)
 
+    def searchForText(self, text):
+        keyword = " ".join(str(text or "").split())
+        if not keyword:
+            return False
+        self.searchEdit.setText(keyword)
+        self.searchEdit.recordCurrentSearch()
+        self.search()
+        return True
+
+    def setDetailReturnAvailable(self, available):
+        self.detailReturnButton.setVisible(bool(available))
+
     def seekDate(self, *_args):
         date = self.timeSearchPicker.date
         if not date.isValid():
@@ -1185,6 +1222,7 @@ class OnlineMangaInterface(QWidget):
         ]
         self._cards_by_gid = {card.item.gid: card for card in self._cards}
         for card in self._cards:
+            card.setMarked(self._galleryMatchesMarker(card.item))
             card.setGalleryStates(
                 *self._gallery_states.get(
                     int(card.item.gid),
@@ -1198,6 +1236,17 @@ class OnlineMangaInterface(QWidget):
                 card.setCoverData(data)
         self._relayoutCards()
         self._scheduleRelayout()
+
+    def _galleryMatchesMarker(self, item):
+        return gallery_matches_marker(
+            item,
+            cfg.get(cfg.onlineEhMarkerTitleRules),
+            cfg.get(cfg.onlineEhMarkerTagRules),
+        )
+
+    def _refreshGalleryMarkers(self, _value=None):
+        for card in self._cards:
+            card.setMarked(self._galleryMatchesMarker(card.item))
 
     def _openGallery(self, item):
         site = self._rendered_site or self._current_site

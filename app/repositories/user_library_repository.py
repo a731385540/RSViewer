@@ -24,7 +24,7 @@ from app.repositories.ehviewer_schema import ensure_ehviewer_schema
 class UserLibraryRepository:
     """RSViewer's complete application and local-gallery database."""
 
-    SCHEMA_VERSION = 21
+    SCHEMA_VERSION = 22
 
     def __init__(self, database_path: Path):
         self.database_path = Path(database_path).resolve()
@@ -511,6 +511,29 @@ class UserLibraryRepository:
                     """
                 )
                 connection.execute("PRAGMA user_version = 21")
+            if version < 22:
+                progress_columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(manga_reading_progress)"
+                    )
+                }
+                if "started" not in progress_columns:
+                    connection.execute(
+                        "ALTER TABLE manga_reading_progress "
+                        "ADD COLUMN started INTEGER NOT NULL DEFAULT 1"
+                    )
+                    connection.execute(
+                        """
+                        UPDATE manga_reading_progress
+                        SET started = CASE
+                            WHEN cleared = 1 THEN 0
+                            WHEN completed = 1 OR page_index > 0 THEN 1
+                            ELSE 0
+                        END
+                        """
+                    )
+                connection.execute("PRAGMA user_version = 22")
 
     def list_labels(self) -> List[Tuple[int, str, int]]:
         self.initialize()
@@ -965,13 +988,13 @@ class UserLibraryRepository:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT page_index, completed, cleared
+                SELECT page_index, completed, cleared, started
                 FROM manga_reading_progress
                 WHERE gid = ?
                 """,
                 (int(gid),),
             ).fetchone()
-        if row is None or bool(row[2]):
+        if row is None or bool(row[2]) or not bool(row[3]):
             return None
         return int(row[0]), bool(row[1])
 
@@ -984,7 +1007,8 @@ class UserLibraryRepository:
             rows = connection.execute(
                 """
                 SELECT gid, page_index, completed
-                FROM manga_reading_progress WHERE cleared = 0
+                FROM manga_reading_progress
+                WHERE cleared = 0 AND started = 1
                 """
             )
             return {
@@ -1000,8 +1024,8 @@ class UserLibraryRepository:
             connection.execute(
                 """
                 INSERT INTO manga_reading_progress(
-                    gid, page_index, updated_at, completed, cleared
-                ) VALUES (?, ?, ?, ?, 0)
+                    gid, page_index, updated_at, completed, cleared, started
+                ) VALUES (?, ?, ?, ?, 0, 1)
                 ON CONFLICT(gid) DO UPDATE SET
                     page_index = excluded.page_index,
                     updated_at = excluded.updated_at,
@@ -1009,7 +1033,8 @@ class UserLibraryRepository:
                         manga_reading_progress.completed,
                         excluded.completed
                     ),
-                    cleared = 0
+                    cleared = 0,
+                    started = 1
                 """,
                 (int(gid), page_index, time.time_ns(), 1 if completed else 0),
             )
@@ -1020,13 +1045,14 @@ class UserLibraryRepository:
             connection.execute(
                 """
                 INSERT INTO manga_reading_progress(
-                    gid, page_index, updated_at, completed, cleared
-                ) VALUES (?, 0, ?, 0, 1)
+                    gid, page_index, updated_at, completed, cleared, started
+                ) VALUES (?, 0, ?, 0, 1, 0)
                 ON CONFLICT(gid) DO UPDATE SET
                     page_index = 0,
                     updated_at = excluded.updated_at,
                     completed = 0,
-                    cleared = 1
+                    cleared = 1,
+                    started = 0
                 """,
                 (int(gid), time.time_ns()),
             )
@@ -1085,16 +1111,22 @@ class UserLibraryRepository:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT page_index, cleared FROM manga_reading_progress
+                SELECT page_index, cleared, started
+                FROM manga_reading_progress
                 WHERE gid = ?
                 """,
                 (int(gid),),
             ).fetchone()
         if row is not None:
-            return None if bool(row[1]) else int(row[0])
+            if bool(row[1]):
+                return None
+            if bool(row[2]):
+                return int(row[0])
         if ehviewer_page_index is None:
             return None
         imported_progress = max(0, int(ehviewer_page_index))
+        if imported_progress == 0:
+            return None
         self.save_progress(gid, imported_progress)
         return imported_progress
 
@@ -1702,7 +1734,7 @@ class UserLibraryRepository:
                     f"DELETE FROM {table} WHERE gid = ?", (source_gid,)
                 )
             progress_row = connection.execute(
-                "SELECT page_index, completed, cleared "
+                "SELECT page_index, completed, cleared, started "
                 "FROM manga_reading_progress WHERE gid = ?",
                 (source_gid,),
             ).fetchone()
@@ -1714,11 +1746,20 @@ class UserLibraryRepository:
                 )
                 completed = int(progress_row[1]) if progress_row is not None else 0
                 cleared = int(progress_row[2]) if progress_row is not None else 0
+                started = (
+                    int(progress_row[3])
+                    if progress_row is not None
+                    else int(page_index > 0)
+                )
+                if cleared:
+                    started = 0
+                elif progress_page_index is not None and page_index > 0:
+                    started = 1
                 connection.execute(
                     """
                     INSERT INTO manga_reading_progress(
-                        gid, page_index, updated_at, completed, cleared
-                    ) VALUES (?, ?, ?, ?, ?)
+                        gid, page_index, updated_at, completed, cleared, started
+                    ) VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(gid) DO UPDATE SET
                         page_index = excluded.page_index,
                         updated_at = excluded.updated_at,
@@ -1726,9 +1767,17 @@ class UserLibraryRepository:
                             manga_reading_progress.completed,
                             excluded.completed
                         ),
-                        cleared = excluded.cleared
+                        cleared = excluded.cleared,
+                        started = excluded.started
                     """,
-                    (target_gid, page_index, time.time_ns(), completed, cleared),
+                    (
+                        target_gid,
+                        page_index,
+                        time.time_ns(),
+                        completed,
+                        cleared,
+                        started,
+                    ),
                 )
             connection.execute(
                 "DELETE FROM manga_reading_progress WHERE gid = ?", (source_gid,)

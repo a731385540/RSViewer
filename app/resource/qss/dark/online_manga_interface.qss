@@ -17,6 +17,12 @@ QWidget#onlineGalleryExtendedCard {
     border-radius: 8px;
 }
 
+QWidget#onlineGalleryCard[galleryMarked="true"],
+QWidget#onlineGalleryListCard[galleryMarked="true"],
+QWidget#onlineGalleryExtendedCard[galleryMarked="true"] {
+    border: 3px solid #7f1d1d;
+}
+
 QLabel#onlineGalleryCover {
     background: #292b2f;
     border: 1px solid #3b3e44;

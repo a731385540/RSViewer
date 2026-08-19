@@ -4,6 +4,7 @@ from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Event, Thread
 from time import perf_counter
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.domain.online_gallery import (
@@ -395,6 +396,67 @@ class EhOnlineProviderContractTests(unittest.TestCase):
         )
         provider.set_display_mode("extended")
         self.assertEqual("extended", crawler.mode)
+
+    def test_refactored_provider_bootstraps_account_session_once(self):
+        provider = RefactoredEhOnlineProvider(
+            EhOnlineSettings.create(
+                cookie="ipb_member_id=1; ipb_pass_hash=test",
+                proxy_mode="direct",
+            )
+        )
+
+        class FakeRequest:
+            def __init__(self):
+                self.session = SimpleNamespace(cookies=[])
+                self.urls = []
+
+            def get(self, url):
+                self.urls.append(url)
+                return SimpleNamespace(ok=True)
+
+        class FakeCrawler:
+            def __init__(self):
+                self.req = FakeRequest()
+                self.main_calls = 0
+
+            def getMain(self, search=None, time=None):
+                self.main_calls += 1
+                return {"data": [], "next_url": "", "prev_url": ""}
+
+        crawler = FakeCrawler()
+        provider._crawler = crawler
+
+        provider.search(OnlineGalleryQuery())
+        provider.search(OnlineGalleryQuery(keyword="second"))
+
+        self.assertEqual(
+            ["https://e-hentai.org/uconfig.php"], crawler.req.urls
+        )
+        self.assertEqual(2, crawler.main_calls)
+
+    def test_account_session_bootstrap_failure_does_not_block_search(self):
+        provider = RefactoredEhOnlineProvider(
+            EhOnlineSettings.create(
+                cookie="ipb_member_id=1; ipb_pass_hash=test",
+                proxy_mode="direct",
+            )
+        )
+
+        class FakeCrawler:
+            req = SimpleNamespace(
+                session=SimpleNamespace(cookies=[]),
+                get=lambda _url: (_ for _ in ()).throw(RuntimeError("offline")),
+            )
+
+            @staticmethod
+            def getMain(search=None, time=None):
+                return {"data": [], "next_url": "", "prev_url": ""}
+
+        provider._crawler = FakeCrawler()
+
+        page = provider.search(OnlineGalleryQuery())
+
+        self.assertEqual((), page.items)
 
     def test_refactored_provider_rejects_foreign_cursor(self):
         provider = RefactoredEhOnlineProvider(

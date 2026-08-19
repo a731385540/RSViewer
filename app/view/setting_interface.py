@@ -1,16 +1,21 @@
 from pathlib import Path
 
 from qfluentwidgets import (
+    BodyLabel,
     ColorSettingCard,
     ComboBox,
     CustomColorSettingCard,
     ExpandLayout,
     FolderListSettingCard,
+    ListWidget,
+    MessageBoxBase,
     OptionsSettingCard,
     ScrollArea,
     SettingCard,
     SettingCardGroup,
     SwitchSettingCard,
+    SubtitleLabel,
+    ToolButton,
     setTheme,
     setThemeColor,
     PushButton,
@@ -19,12 +24,20 @@ from qfluentwidgets import (
 )
 from qfluentwidgets import FluentIcon as FIF
 from qfluentwidgets import InfoBar
-from PySide6.QtCore import QEvent, QStandardPaths, Qt, Signal
+from PySide6.QtCore import QEvent, QSize, QStandardPaths, Qt, Signal
 from PySide6.QtGui import QKeySequence
-from PySide6.QtWidgets import QFileDialog, QLabel, QWidget
+from PySide6.QtWidgets import (
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QListWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
 
 from app.common.config import cfg
 from app.common.style_sheet import StyleSheet
+from app.services.gallery_marker import normalize_gallery_marker_rules
 
 
 class DataPathSettingCard(SettingCard):
@@ -188,6 +201,167 @@ class OnlineDownloadLabelSettingCard(SettingCard):
         index = self.comboBox.findData(str(value or ""))
         if index >= 0 and index != self.comboBox.currentIndex():
             self.comboBox.setCurrentIndex(index)
+
+
+class GalleryMarkerRuleRow(QWidget):
+    removeRequested = Signal(str)
+
+    def __init__(self, rule, parent=None):
+        super().__init__(parent)
+        self.rule = str(rule)
+        self.ruleLabel = BodyLabel(self.rule, self)
+        self.ruleLabel.setToolTip(self.rule)
+        self.removeButton = ToolButton(FIF.REMOVE, self)
+        self.removeButton.setFixedSize(28, 28)
+        self.removeButton.setToolTip(self.tr("删除此标记项"))
+        self.removeButton.clicked.connect(
+            lambda: self.removeRequested.emit(self.rule)
+        )
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 3, 4, 3)
+        layout.setSpacing(8)
+        layout.addWidget(self.ruleLabel, 1)
+        layout.addWidget(self.removeButton)
+
+
+class GalleryMarkerRuleSection(QWidget):
+    def __init__(self, title, placeholder, rules=(), parent=None):
+        super().__init__(parent)
+        self.titleLabel = BodyLabel(title, self)
+        self.inputEdit = LineEdit(self)
+        self.inputEdit.setPlaceholderText(placeholder)
+        self.addButton = ToolButton(FIF.ADD, self)
+        self.addButton.setFixedSize(32, 32)
+        self.addButton.setToolTip(self.tr("添加标记项"))
+        self.addButton.setEnabled(False)
+        self.listWidget = ListWidget(self)
+        self.listWidget.setFixedHeight(142)
+        self.listWidget.setSpacing(2)
+
+        input_layout = QHBoxLayout()
+        input_layout.setContentsMargins(0, 0, 0, 0)
+        input_layout.setSpacing(8)
+        input_layout.addWidget(self.inputEdit, 1)
+        input_layout.addWidget(self.addButton)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(7)
+        layout.addWidget(self.titleLabel)
+        layout.addLayout(input_layout)
+        layout.addWidget(self.listWidget)
+
+        self.inputEdit.textChanged.connect(
+            lambda text: self.addButton.setEnabled(bool(text.strip()))
+        )
+        self.inputEdit.returnPressed.connect(self.addCurrentRule)
+        self.addButton.clicked.connect(self.addCurrentRule)
+        self.setRules(rules)
+
+    def rules(self):
+        return tuple(
+            str(self.listWidget.item(index).data(Qt.UserRole))
+            for index in range(self.listWidget.count())
+        )
+
+    def setRules(self, rules):
+        self.listWidget.clear()
+        for rule in normalize_gallery_marker_rules(rules):
+            self._appendRule(rule)
+
+    def addCurrentRule(self):
+        rule = self.inputEdit.text().strip()
+        if not rule:
+            return
+        existing = {value.casefold() for value in self.rules()}
+        if rule.casefold() not in existing:
+            self._appendRule(rule)
+        self.inputEdit.clear()
+        self.inputEdit.setFocus()
+
+    def _appendRule(self, rule):
+        item = QListWidgetItem(self.listWidget)
+        item.setData(Qt.UserRole, rule)
+        item.setSizeHint(QSize(0, 38))
+        row = GalleryMarkerRuleRow(rule, self.listWidget)
+        row.removeRequested.connect(self.removeRule)
+        self.listWidget.setItemWidget(item, row)
+
+    def removeRule(self, rule):
+        target = str(rule).casefold()
+        for index in range(self.listWidget.count()):
+            item = self.listWidget.item(index)
+            if str(item.data(Qt.UserRole)).casefold() == target:
+                row = self.listWidget.itemWidget(item)
+                self.listWidget.takeItem(index)
+                if row is not None:
+                    row.deleteLater()
+                return
+
+
+class GalleryMarkerRulesDialog(MessageBoxBase):
+    def __init__(self, title_rules=(), tag_rules=(), parent=None):
+        super().__init__(parent)
+        self.widget.setMinimumWidth(620)
+        self.titleLabel = SubtitleLabel(self.tr("画廊标记"), self.widget)
+        self.titleSection = GalleryMarkerRuleSection(
+            self.tr("标题包含"),
+            self.tr("输入标题中需要包含的文字"),
+            title_rules,
+            self.widget,
+        )
+        self.tagSection = GalleryMarkerRuleSection(
+            self.tr("Tag 匹配"),
+            self.tr("输入 artist:name 或仅输入 name"),
+            tag_rules,
+            self.widget,
+        )
+        self.viewLayout.addWidget(self.titleLabel)
+        self.viewLayout.addWidget(self.titleSection)
+        self.viewLayout.addWidget(self.tagSection)
+        self.yesButton.setText(self.tr("保存"))
+        self.cancelButton.setText(self.tr("取消"))
+
+    def titleRules(self):
+        return self.titleSection.rules()
+
+    def tagRules(self):
+        return self.tagSection.rules()
+
+
+class GalleryMarkerSettingCard(SettingCard):
+    def __init__(self, parent=None):
+        super().__init__(FIF.FLAG, self.tr("画廊标记"), " ", parent)
+        self.configureButton = PushButton(self.tr("配置…"), self)
+        self.configureButton.clicked.connect(self._openDialog)
+        self.hBoxLayout.addWidget(self.configureButton)
+        self.hBoxLayout.addSpacing(16)
+        cfg.onlineEhMarkerTitleRules.valueChanged.connect(self._updateContent)
+        cfg.onlineEhMarkerTagRules.valueChanged.connect(self._updateContent)
+        self._updateContent()
+
+    def _openDialog(self):
+        dialog = GalleryMarkerRulesDialog(
+            cfg.get(cfg.onlineEhMarkerTitleRules),
+            cfg.get(cfg.onlineEhMarkerTagRules),
+            self.window(),
+        )
+        if not dialog.exec():
+            return
+        cfg.set(cfg.onlineEhMarkerTitleRules, list(dialog.titleRules()))
+        cfg.set(cfg.onlineEhMarkerTagRules, list(dialog.tagRules()))
+
+    def _updateContent(self, _value=None):
+        title_count = len(
+            normalize_gallery_marker_rules(cfg.get(cfg.onlineEhMarkerTitleRules))
+        )
+        tag_count = len(
+            normalize_gallery_marker_rules(cfg.get(cfg.onlineEhMarkerTagRules))
+        )
+        self.setContent(
+            self.tr("标题 {} 项 · Tag {} 项").format(title_count, tag_count)
+        )
 
 
 class ShortcutCaptureButton(PushButton):
@@ -445,6 +619,7 @@ class SettingInterface(ScrollArea):
         self.onlineDownloadLabelCard = OnlineDownloadLabelSettingCard(
             self.onlineGroup
         )
+        self.onlineGalleryMarkerCard = GalleryMarkerSettingCard(self.onlineGroup)
         self.onlineThumbnailCacheHoursCard = OptionsSettingCard(
             cfg.onlineEhThumbnailCacheHours,
             FIF.HISTORY,
@@ -542,6 +717,13 @@ class SettingInterface(ScrollArea):
             self.tr("长图模式下滚动一屏，到底后进入下一页"),
             self.readerGroup,
         )
+        self.readerNextMangaShortcutCard = ShortcutSettingCard(
+            cfg.readerNextMangaShortcut,
+            FIF.PAGE_RIGHT,
+            self.tr("下一本漫画"),
+            self.tr("阅读分类或归类时，直接进入序列中的下一本"),
+            self.readerGroup,
+        )
         self.readerAutoPageCard = SwitchSettingCard(
             FIF.PLAY,
             self.tr("自动翻页"),
@@ -598,6 +780,7 @@ class SettingInterface(ScrollArea):
         self.onlineGroup.addSettingCard(self.onlineDownloadConcurrencyCard)
         self.onlineGroup.addSettingCard(self.onlineDownloadThreadsCard)
         self.onlineGroup.addSettingCard(self.onlineDownloadLabelCard)
+        self.onlineGroup.addSettingCard(self.onlineGalleryMarkerCard)
         self.onlineGroup.addSettingCard(self.onlineThumbnailCacheHoursCard)
         self.personalGroup.addSettingCard(self.themeCard)
         self.personalGroup.addSettingCard(self.themeColorCard)
@@ -608,6 +791,7 @@ class SettingInterface(ScrollArea):
         self.readerGroup.addSettingCard(self.readerDirectionCard)
         self.readerGroup.addSettingCard(self.readerImageLoadSizeCard)
         self.readerGroup.addSettingCard(self.readerScrollShortcutCard)
+        self.readerGroup.addSettingCard(self.readerNextMangaShortcutCard)
         self.readerGroup.addSettingCard(self.readerAutoPageCard)
         self.readerGroup.addSettingCard(self.readerAutoPageIntervalCard)
         self.shortcutGroup.addSettingCard(self.searchShortcutCard)

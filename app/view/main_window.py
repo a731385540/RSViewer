@@ -94,7 +94,6 @@ from app.view.similar_gallery_browser_window import SimilarGalleryBrowserWindow
 from app.view.update_manager_interface import UpdateManagerInterface
 from app.workers.reading_progress_worker import (
     BrowsingHistorySaveWorker,
-    PlaylistPositionSaveWorker,
     ReadingProgressClearWorker,
     ReadingProgressSaveWorker,
 )
@@ -214,6 +213,7 @@ class MainWindow(FluentWindow):
         self._onlineDetailWorker = None
         self._onlineDetailProvider = None
         self._detailNavigationHistory = deque(maxlen=32)
+        self._onlineSearchReturnState = None
         self._localMetadataSyncWorker = None
         self._localMetadataBatchQueue = deque()
         self._localMetadataBatchWorkers = {}
@@ -240,17 +240,14 @@ class MainWindow(FluentWindow):
         self.progressSaveTimer.setInterval(180)
         self.progressSaveTimer.timeout.connect(self._flushReadingProgress)
         self._readerWasMaximized = False
-        self._playlistContext = None
-        self._playlistPageWorker = None
+        self._readingSequenceContext = None
+        self._readingSequencePageWorker = None
         self._libraryItems = []
         self._historyOrder = []
         self.localMangaInterface.libraryLoaded.connect(self._onLibraryLoaded)
         self.localMangaInterface.mangaActivated.connect(self.openMangaDetail)
-        self.localMangaInterface.playlistMangaActivated.connect(
-            self.openPlaylistMangaDetail
-        )
-        self.localMangaInterface.playlistPlayRequested.connect(
-            self.startPlaylistPlayback
+        self.localMangaInterface.readingSequenceMangaActivated.connect(
+            self.openReadingSequenceMangaDetail
         )
         self.localMangaInterface.metadataSyncRequested.connect(
             self.syncLocalGalleryMetadataBatch
@@ -269,6 +266,7 @@ class MainWindow(FluentWindow):
             interface.readingRecordClearRequested.connect(
                 self.clearReadingRecord
             )
+            interface.categoryChanged.connect(self._onCategoryChanged)
         self.favoriteMangaInterface.mangaActivated.connect(self.openMangaDetail)
         self.mangaHistoryInterface.localHistoryInterface.mangaActivated.connect(
             self.openMangaDetail
@@ -289,6 +287,12 @@ class MainWindow(FluentWindow):
         )
         self.mangaDetailInterface.selectedTitleSearchRequested.connect(
             self.searchSelectedTitleText
+        )
+        self.mangaDetailInterface.selectedTitleOnlineSearchRequested.connect(
+            self.searchSelectedTitleOnline
+        )
+        self.mangaDetailInterface.categorySelectionRequested.connect(
+            self.localMangaInterface.openCategorySelection
         )
         self.mangaDetailInterface.similarResultsRequested.connect(
             self.showSimilarGalleryResults
@@ -334,10 +338,10 @@ class MainWindow(FluentWindow):
             self.updateReadingProgress
         )
         self.mangaReaderInterface.nextMangaRequested.connect(
-            self._openNextPlaylistManga
+            self._openNextSequenceManga
         )
         self.mangaReaderInterface.previousMangaRequested.connect(
-            self._openPreviousPlaylistManga
+            self._openPreviousSequenceManga
         )
         self.mangaReaderInterface.localPageDownloadRequested.connect(
             self.downloadLocalGalleryPage
@@ -349,6 +353,9 @@ class MainWindow(FluentWindow):
         )
         self.onlineMangaInterface.galleryActivated.connect(
             self._openOnlineMangaDetailFromBrowser
+        )
+        self.onlineMangaInterface.detailReturnRequested.connect(
+            self.navigateBack
         )
         self.onlineMangaInterface.galleryDownloadRequested.connect(
             self.prepareOnlineGalleryDownload
@@ -413,6 +420,9 @@ class MainWindow(FluentWindow):
         self.initNavigation()
         self.stackedWidget.addWidget(self.mangaDetailInterface)
         self.stackedWidget.addWidget(self.mangaReaderInterface)
+        self.stackedWidget.currentChanged.connect(
+            self._onOnlineSearchPageChanged
+        )
         self.navigationResizeHandle = NavigationResizeHandle(
             self.navigationInterface,
             self,
@@ -639,7 +649,32 @@ class MainWindow(FluentWindow):
             self.reloadMangaSource(publish=False)
 
     def openMangaHome(self):
+        self._clearOnlineSearchReturn()
         self._setNavigationMode("manga")
+
+    def _clearOnlineSearchReturn(self):
+        self._onlineSearchReturnState = None
+        interface = getattr(self, "onlineMangaInterface", None)
+        if interface is not None:
+            setter = getattr(interface, "setDetailReturnAvailable", None)
+            if setter is not None:
+                setter(False)
+
+    def _onOnlineSearchPageChanged(self, _index):
+        if getattr(self, "_onlineSearchReturnState", None) is None:
+            return
+        current = self.stackedWidget.currentWidget()
+        allowed = {
+            interface
+            for interface in (
+                getattr(self, "onlineMangaInterface", None),
+                getattr(self, "mangaDetailInterface", None),
+                getattr(self, "mangaReaderInterface", None),
+            )
+            if interface is not None
+        }
+        if current not in allowed:
+            self._clearOnlineSearchReturn()
 
     def _setNavigationMode(self, mode: str, switch_page: bool = True):
         if mode not in self._navigationRoutes:
@@ -718,7 +753,7 @@ class MainWindow(FluentWindow):
             worker.cancel()
         self._cancelOrganizerTask()
         self.libraryOrganizerInterface.reset()
-        self._clearPlaylistContext()
+        self._clearReadingSequenceContext()
         self.mangaSource = self._createMangaSource()
         self._libraryItems = []
         self._historyOrder = []
@@ -1070,7 +1105,7 @@ class MainWindow(FluentWindow):
             reader_item is not None and int(reader_item.gid) in gids
         ):
             self.mangaReaderInterface.deactivate()
-            self._clearPlaylistContext()
+            self._clearReadingSequenceContext()
             self.openMangaHome()
 
     def _cancelTrashTask(self):
@@ -1217,9 +1252,10 @@ class MainWindow(FluentWindow):
         self.localMangaInterface.toggleClassification()
 
     def openMangaDetail(self, item):
+        self._clearOnlineSearchReturn()
         self._cancelOnlineDetailLoad()
         self._cancelLocalMetadataSync()
-        self._clearPlaylistContext()
+        self._clearReadingSequenceContext()
         self._recordLocalHistory(item)
         if self.mangaReaderInterface.isFullscreen:
             self.setReaderFullscreen(False)
@@ -1259,6 +1295,52 @@ class MainWindow(FluentWindow):
         )
         self._selectedTitleSearchWorker = worker
         self.similarSearchThreadPool.start(worker)
+
+    @staticmethod
+    def _onlineTitlePhraseQuery(selected_text):
+        phrase = " ".join(
+            str(selected_text or "").replace('"', " ").split()
+        )
+        return f'"{phrase}"' if len("".join(phrase.split())) >= 2 else ""
+
+    def searchSelectedTitleOnline(self, selected_text):
+        query = self._onlineTitlePhraseQuery(selected_text)
+        previous = self._currentDetailNavigationEntry()
+        if not query or previous is None:
+            InfoBar.warning(
+                title=self.tr("无法搜索"),
+                content=self.tr("至少选择两个有效字符。"),
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=2500,
+                parent=self.mangaDetailInterface,
+            )
+            return
+        reading_context = getattr(self, "_readingSequenceContext", None)
+        self._onlineSearchReturnState = {
+            "entry": previous,
+            "detail_history": tuple(self._detailNavigationHistory),
+            "reading_context": (
+                {
+                    "items": tuple(reading_context["items"]),
+                    "position": int(reading_context["position"]),
+                }
+                if reading_context is not None
+                else None
+            ),
+        }
+        self._setNavigationMode("manga", switch_page=False)
+        self.switchTo(self.onlineMangaInterface)
+        self.navigationInterface.setCurrentItem(
+            self.onlineMangaInterface.objectName()
+        )
+        self.onlineMangaInterface.setDetailReturnAvailable(True)
+        self.onlineMangaInterface.searchForText(query)
+
+    def _onCategoryChanged(self, item):
+        self._applyLocalGalleryItem(item, publish=False)
+        self.mangaDetailInterface.updateLocalItem(item)
 
     def _finishSelectedTitleSearch(self, worker, result):
         if self._selectedTitleSearchWorker is not worker:
@@ -1380,10 +1462,10 @@ class MainWindow(FluentWindow):
             parent=self,
         )
 
-    def openPlaylistMangaDetail(self, item, playlist_id, items, position):
+    def openReadingSequenceMangaDetail(self, item, items, position):
         self._cancelOnlineDetailLoad()
         self._cancelLocalMetadataSync()
-        self._setPlaylistContext(playlist_id, items, position)
+        self._setReadingSequenceContext(items, position)
         self._recordLocalHistory(item)
         if self.mangaReaderInterface.isFullscreen:
             self.setReaderFullscreen(False)
@@ -1439,7 +1521,7 @@ class MainWindow(FluentWindow):
     def openOnlineMangaDetail(self, item, provider, cover_data=b""):
         self._cancelOnlineDetailLoad()
         self._cancelLocalMetadataSync()
-        self._clearPlaylistContext()
+        self._clearReadingSequenceContext()
         if self.mangaReaderInterface.isFullscreen:
             self.setReaderFullscreen(False)
         self._onlineDetailProvider = provider
@@ -1510,7 +1592,7 @@ class MainWindow(FluentWindow):
         if provider is None or not detail.page_count:
             return
         self.mangaDetailInterface.cancelLoads()
-        self.mangaReaderInterface.setPlaylistContinuation(False, False)
+        self.mangaReaderInterface.setSequenceContinuation(False, False)
         self.mangaReaderInterface.setOnlineGallery(
             detail,
             provider,
@@ -3822,33 +3904,28 @@ class MainWindow(FluentWindow):
         if cancel_requests is not None:
             cancel_requests()
 
-    def startPlaylistPlayback(self, playlist_id, items, position, continue_previous):
-        self._setPlaylistContext(playlist_id, items, position)
-        self._loadPlaylistManga(position, -1 if continue_previous else 0)
-
-    def _setPlaylistContext(self, playlist_id, items, position):
-        self._cancelPlaylistLoad()
+    def _setReadingSequenceContext(self, items, position):
+        self._cancelReadingSequenceLoad()
         if self._selectedTitleSearchWorker is not None:
             self._selectedTitleSearchWorker.cancelled = True
             self._selectedTitleSearchWorker = None
-        self._playlistContext = {
-            "playlist_id": int(playlist_id),
+        self._readingSequenceContext = {
             "items": tuple(items),
             "position": int(position),
         }
 
-    def _clearPlaylistContext(self):
-        self._cancelPlaylistLoad()
-        self._playlistContext = None
-        self.mangaReaderInterface.setPlaylistContinuation(False, False)
+    def _clearReadingSequenceContext(self):
+        self._cancelReadingSequenceLoad()
+        self._readingSequenceContext = None
+        self.mangaReaderInterface.setSequenceContinuation(False, False)
 
-    def _cancelPlaylistLoad(self):
-        if self._playlistPageWorker is not None:
-            self._playlistPageWorker.cancelled = True
-            self._playlistPageWorker = None
+    def _cancelReadingSequenceLoad(self):
+        if self._readingSequencePageWorker is not None:
+            self._readingSequencePageWorker.cancelled = True
+            self._readingSequencePageWorker = None
 
-    def _loadPlaylistManga(self, position, page_index=0):
-        context = self._playlistContext
+    def _loadReadingSequenceManga(self, position, page_index=0):
+        context = self._readingSequenceContext
         if context is None or not 0 <= position < len(context["items"]):
             return
         direction = -1 if page_index == -2 else 1
@@ -3858,59 +3935,86 @@ class MainWindow(FluentWindow):
         ):
             position += direction
         if not 0 <= position < len(context["items"]):
-            self.mangaReaderInterface.setPlaylistContinuation(False, False)
+            self._syncReadingSequenceContinuation()
             return
-        self._cancelPlaylistLoad()
-        self.mangaReaderInterface.setPlaylistContinuation(False, False)
+        self._cancelReadingSequenceLoad()
+        self.mangaReaderInterface.setSequenceContinuation(False, False)
         item = context["items"][position]
         worker = PageDiscoveryWorker(
             self.mangaSource, self.userLibraryRepository, item
         )
         worker.signals.loaded.connect(
-            lambda loaded_item: self._finishPlaylistLoad(
+            lambda loaded_item: self._finishReadingSequenceLoad(
                 worker, position, page_index, loaded_item
             )
         )
         worker.signals.failed.connect(
-            lambda _message: self._finishFailedPlaylistLoad(worker)
+            lambda _message: self._finishFailedReadingSequenceLoad(worker)
         )
-        self._playlistPageWorker = worker
+        self._readingSequencePageWorker = worker
         QThreadPool.globalInstance().start(worker)
 
-    def _finishPlaylistLoad(self, worker, position, page_index, item):
-        if self._playlistPageWorker is not worker or self._playlistContext is None:
+    def _finishReadingSequenceLoad(self, worker, position, page_index, item):
+        if (
+            self._readingSequencePageWorker is not worker
+            or self._readingSequenceContext is None
+        ):
             return
-        self._playlistPageWorker = None
-        context = self._playlistContext
+        self._readingSequencePageWorker = None
+        context = self._readingSequenceContext
         items = list(context["items"])
         items[position] = item
         context["items"] = tuple(items)
         context["position"] = position
+        self.mangaDetailInterface.setManga(item)
+        self.mangaDetailInterface.setSimilarSearchRecord(self._latestSimilarSearch)
+        self._syncCurrentGalleryUpdate(item.gid)
         self.openMangaReader(item, page_index)
 
-    def _finishFailedPlaylistLoad(self, worker):
-        if self._playlistPageWorker is worker:
-            self._playlistPageWorker = None
+    def _finishFailedReadingSequenceLoad(self, worker):
+        if self._readingSequencePageWorker is worker:
+            self._readingSequencePageWorker = None
+            self._syncReadingSequenceContinuation()
 
-    def _openNextPlaylistManga(self):
-        if self._playlistContext is None:
+    def _openNextSequenceManga(self):
+        if self._readingSequenceContext is None:
             return
-        next_position = self._playlistContext["position"] + 1
-        if next_position >= len(self._playlistContext["items"]):
-            self.mangaReaderInterface.setPlaylistContinuation(False)
+        next_position = self._readingSequenceContext["position"] + 1
+        if next_position >= len(self._readingSequenceContext["items"]):
+            self._syncReadingSequenceContinuation()
             return
-        self._loadPlaylistManga(next_position, 0)
+        self._loadReadingSequenceManga(next_position, 0)
 
-    def _openPreviousPlaylistManga(self):
-        if self._playlistContext is None:
+    def _openPreviousSequenceManga(self):
+        if self._readingSequenceContext is None:
             return
-        previous_position = self._playlistContext["position"] - 1
+        previous_position = self._readingSequenceContext["position"] - 1
         if previous_position < 0:
-            self.mangaReaderInterface.setPlaylistContinuation(
-                bool(len(self._playlistContext["items"]) > 1), False
-            )
+            self._syncReadingSequenceContinuation()
             return
-        self._loadPlaylistManga(previous_position, -2)
+        self._loadReadingSequenceManga(previous_position, -2)
+
+    def _syncReadingSequenceContinuation(self):
+        context = self._readingSequenceContext
+        if context is None:
+            self.mangaReaderInterface.setSequenceContinuation(False, False)
+            return
+        position = int(context["position"])
+        self.mangaReaderInterface.setSequenceContinuation(
+            self._sequenceHasAvailableManga(position, 1),
+            self._sequenceHasAvailableManga(position, -1),
+        )
+
+    def _sequenceHasAvailableManga(self, position, direction):
+        context = self._readingSequenceContext
+        if context is None:
+            return False
+        position += direction
+        while 0 <= position < len(context["items"]):
+            if not self._isGalleryUpdating(context["items"][position].gid):
+                return True
+            position += direction
+        return False
 
     def openMangaReader(self, item, page_index=-1):
         if self._isGalleryUpdating(item.gid):
@@ -3923,28 +4027,18 @@ class MainWindow(FluentWindow):
             page_index = local_page_slot_count(item) - 1
         elif page_index < 0:
             page_index = item.progress_page_index or 0
-        context = self._playlistContext
+        context = self._readingSequenceContext
         if context is not None:
             position = context["position"]
             if context["items"][position].gid == item.gid:
                 items = list(context["items"])
                 items[position] = item
                 context["items"] = tuple(items)
-                self.mangaReaderInterface.setPlaylistContinuation(
-                    position + 1 < len(items),
-                    position > 0,
-                )
-                self.progressThreadPool.start(
-                    PlaylistPositionSaveWorker(
-                        self.userLibraryRepository,
-                        context["playlist_id"],
-                        item.gid,
-                    )
-                )
+                self._syncReadingSequenceContinuation()
             else:
-                self._clearPlaylistContext()
+                self._clearReadingSequenceContext()
         else:
-            self.mangaReaderInterface.setPlaylistContinuation(False, False)
+            self.mangaReaderInterface.setSequenceContinuation(False, False)
         self.mangaReaderInterface.setManga(item, page_index)
         self.switchTo(self.mangaReaderInterface)
         self._syncCurrentDownload(item.gid)
@@ -4076,11 +4170,7 @@ class MainWindow(FluentWindow):
                 self.setReaderFullscreen(False)
             else:
                 self.mangaReaderInterface.deactivate()
-                if self._playlistContext is None:
-                    self.switchTo(self.mangaDetailInterface)
-                else:
-                    self.openMangaHome()
-                    self._clearPlaylistContext()
+                self.switchTo(self.mangaDetailInterface)
             return True
         if current is self.mangaDetailInterface:
             if self.mangaDetailInterface.isOnlineGallery:
@@ -4102,7 +4192,28 @@ class MainWindow(FluentWindow):
                 )
                 return True
             self.openMangaHome()
-            self._clearPlaylistContext()
+            self._clearReadingSequenceContext()
+            return True
+        if (
+            current is self.onlineMangaInterface
+            and self._onlineSearchReturnState is not None
+        ):
+            state = self._onlineSearchReturnState
+            self._onlineSearchReturnState = None
+            self.onlineMangaInterface.setDetailReturnAvailable(False)
+            self._detailNavigationHistory.clear()
+            self._detailNavigationHistory.extend(state["detail_history"])
+            entry = state["entry"]
+            if entry[0] == "online":
+                self.openOnlineMangaDetail(*entry[1:])
+            else:
+                context = state["reading_context"]
+                if context is None:
+                    self.openMangaDetail(entry[1])
+                else:
+                    self.openReadingSequenceMangaDetail(
+                        entry[1], context["items"], context["position"]
+                    )
             return True
         if current in {
             self.localMangaInterface,
@@ -4165,7 +4276,7 @@ class MainWindow(FluentWindow):
         had_original_workers = bool(self._originalFileWorkers)
         had_organizer_worker = self._organizerWorker is not None
         had_trash_worker = self._trashWorker is not None
-        self._cancelPlaylistLoad()
+        self._cancelReadingSequenceLoad()
         self._cancelOnlineDetailLoad()
         self._cancelLocalMetadataSync()
         self._cancelLocalMetadataBatchSync()

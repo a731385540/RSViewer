@@ -30,6 +30,7 @@ from qfluentwidgets import (
     CaptionLabel,
     SimpleCardWidget,
     SpinBox,
+    Slider,
     SubtitleLabel,
     ToolButton,
     TransparentToolButton,
@@ -161,6 +162,10 @@ class MangaReaderInterface(QWidget):
         self.titleLabel = BodyLabel("", self)
         self.titleLabel.setMinimumWidth(120)
 
+        self.nextMangaButton = ToolButton(FIF.PAGE_RIGHT, self)
+        self.nextMangaButton.clicked.connect(self.requestNextManga)
+        self.nextMangaButton.setEnabled(False)
+
         self.fitButton = ToolButton(FIF.FIT_PAGE, self)
         self.fitButton.setToolTip(self.tr("适应窗口"))
         self.fitButton.clicked.connect(self.fitToWindow)
@@ -201,6 +206,7 @@ class MangaReaderInterface(QWidget):
         download_status_layout.addWidget(self.downloadStatusProgress)
         self.downloadStatusWidget.hide()
         toolbar.addWidget(self.downloadStatusWidget)
+        toolbar.addWidget(self.nextMangaButton)
         toolbar.addWidget(self.zoomOutButton)
         toolbar.addWidget(self.actualSizeButton)
         toolbar.addWidget(self.fitButton)
@@ -261,19 +267,39 @@ class MangaReaderInterface(QWidget):
         self.pageSpinBox.valueChanged.connect(self._jumpToPage)
         self.zoomLabel = QLabel("100%", self)
 
+        self.pageProgressSliderHost = QWidget(self)
+        self.pageProgressSliderHost.setFixedHeight(24)
+        progress_layout = QHBoxLayout(self.pageProgressSliderHost)
+        progress_layout.setContentsMargins(28, 2, 28, 0)
+        self.pageProgressSlider = Slider(
+            Qt.Horizontal, self.pageProgressSliderHost
+        )
+        self.pageProgressSlider.setRange(1, 1)
+        self.pageProgressSlider.sliderMoved.connect(self._scrubToPage)
+        self.pageProgressSlider.sliderReleased.connect(
+            self._finishProgressScrub
+        )
+        self.pageProgressSlider.hide()
+        progress_layout.addWidget(self.pageProgressSlider)
+
         self.navigationWidget = QWidget(self)
-        navigation = QHBoxLayout(self.navigationWidget)
-        navigation.setContentsMargins(18, 8, 18, 12)
-        navigation.setSpacing(8)
-        navigation.addStretch(1)
-        navigation.addWidget(self.previousButton)
-        navigation.addWidget(CaptionLabel(self.tr("跳转到"), self))
-        navigation.addWidget(self.pageSpinBox)
-        navigation.addWidget(CaptionLabel(self.tr("页"), self))
-        navigation.addWidget(self.nextButton)
-        navigation.addSpacing(12)
-        navigation.addWidget(self.zoomLabel)
-        navigation.addStretch(1)
+        navigation = QVBoxLayout(self.navigationWidget)
+        navigation.setContentsMargins(0, 0, 0, 0)
+        navigation.setSpacing(0)
+        controls = QHBoxLayout()
+        controls.setContentsMargins(18, 4, 18, 12)
+        controls.setSpacing(8)
+        navigation.addWidget(self.pageProgressSliderHost)
+        navigation.addLayout(controls)
+        controls.addStretch(1)
+        controls.addWidget(self.previousButton)
+        controls.addWidget(CaptionLabel(self.tr("跳转到"), self))
+        controls.addWidget(self.pageSpinBox)
+        controls.addWidget(CaptionLabel(self.tr("页"), self))
+        controls.addWidget(self.nextButton)
+        controls.addSpacing(12)
+        controls.addWidget(self.zoomLabel)
+        controls.addStretch(1)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -294,10 +320,14 @@ class MangaReaderInterface(QWidget):
         cfg.readerScrollShortcut.valueChanged.connect(
             lambda _value: self._updateDirectionControls()
         )
+        cfg.readerNextMangaShortcut.valueChanged.connect(
+            self._updateNextMangaButton
+        )
         cfg.readerAutoPageEnabled.valueChanged.connect(self._updateAutoPageTimer)
         cfg.readerAutoPageInterval.valueChanged.connect(self._updateAutoPageTimer)
         self._applyBackgroundColor(cfg.get(cfg.readerBackgroundColor))
         self._updateDirectionControls()
+        self._updateNextMangaButton()
         self._updateAutoPageTimer()
 
     @property
@@ -329,10 +359,7 @@ class MangaReaderInterface(QWidget):
         self.downloadStatusWidget.hide()
         self.titleLabel.setText(item.display_title)
         page_count = local_page_slot_count(item)
-        self.pageSpinBox.blockSignals(True)
-        self.pageSpinBox.setRange(1, max(1, page_count))
-        self.pageSpinBox.setValue(1 if not page_count else page_index + 1)
-        self.pageSpinBox.blockSignals(False)
+        self._syncPageSelectors(page_count, page_index)
         if not page_count:
             self._page_index = 0
             self._updatePageIndicator(0)
@@ -357,10 +384,7 @@ class MangaReaderInterface(QWidget):
         self.downloadStatusWidget.hide()
         self.titleLabel.setText(detail.title)
         page_count = int(detail.page_count)
-        self.pageSpinBox.blockSignals(True)
-        self.pageSpinBox.setRange(1, max(1, page_count))
-        self.pageSpinBox.setValue(1 if not page_count else int(page_index) + 1)
-        self.pageSpinBox.blockSignals(False)
+        self._syncPageSelectors(page_count, int(page_index))
         if not page_count:
             self._page_index = 0
             self._updatePageIndicator(0)
@@ -404,10 +428,7 @@ class MangaReaderInterface(QWidget):
             self._pending_local_page_index = None
             self._stopMovie()
             self._preloadAround(current_index, include_current=True)
-        self.pageSpinBox.blockSignals(True)
-        self.pageSpinBox.setRange(1, max(1, slot_count))
-        self.pageSpinBox.setValue(current_index + 1 if slot_count else 1)
-        self.pageSpinBox.blockSignals(False)
+        self._syncPageSelectors(slot_count, current_index)
         self._page_index = current_index
         self._updatePageIndicator(slot_count)
         self._updateControls()
@@ -427,9 +448,7 @@ class MangaReaderInterface(QWidget):
                 index,
                 page_count,
             )
-        self.pageSpinBox.blockSignals(True)
-        self.pageSpinBox.setValue(index + 1)
-        self.pageSpinBox.blockSignals(False)
+        self._syncPageSelectors(page_count, index)
         self._updatePageIndicator(page_count)
         self._updateControls()
         self._auto_page_timer.stop()
@@ -500,6 +519,12 @@ class MangaReaderInterface(QWidget):
             return
         self.showPage(self._page_index + 1)
 
+    def requestNextManga(self):
+        if not self._has_following_manga:
+            return
+        self._auto_page_timer.stop()
+        self.nextMangaRequested.emit()
+
     def previousPage(self):
         if self._page_index <= 0 and self._has_previous_manga:
             self._auto_page_timer.stop()
@@ -548,13 +573,21 @@ class MangaReaderInterface(QWidget):
         self.cancelLoads()
         self._stopMovie()
 
-    def setPlaylistContinuation(
+    def setSequenceContinuation(
         self, has_following_manga: bool, has_previous_manga: bool = False
     ):
         self._has_following_manga = bool(has_following_manga)
         self._has_previous_manga = bool(has_previous_manga)
         self._updateControls()
         self._updateAutoPageTimer()
+
+    def _updateNextMangaButton(self, _value=None):
+        shortcut = str(cfg.get(cfg.readerNextMangaShortcut) or "").strip()
+        text = self.tr("下一本")
+        self.nextMangaButton.setToolTip(
+            f"{text} ({shortcut})" if shortcut else text
+        )
+        self.nextMangaButton.setEnabled(self._has_following_manga)
 
     def toggleFullscreen(self):
         self.setFullscreenState(not self._fullscreen, emit_request=True)
@@ -883,16 +916,60 @@ class MangaReaderInterface(QWidget):
             self._page_index + 1 < page_count or self._has_following_manga
         )
         self.pageSpinBox.setEnabled(page_count > 0)
+        self.pageProgressSlider.setEnabled(page_count > 0)
+        self.nextMangaButton.setEnabled(self._has_following_manga)
 
-    def _matchesScrollShortcut(self, event: QKeyEvent) -> bool:
+    def _syncPageSelectors(self, page_count: int, page_index: int):
+        maximum = max(1, int(page_count))
+        value = (
+            1
+            if page_count <= 0
+            else min(max(0, int(page_index)), maximum - 1) + 1
+        )
+        for selector in (self.pageSpinBox, self.pageProgressSlider):
+            selector.blockSignals(True)
+            selector.setRange(1, maximum)
+            selector.setValue(value)
+            selector.blockSignals(False)
+
+    def _scrubToPage(self, page_number: int):
+        if self._pageCount() > 0 and int(page_number) != self.currentPage:
+            self.showPage(int(page_number) - 1)
+
+    def _finishProgressScrub(self):
+        self._scrubToPage(self.pageProgressSlider.value())
+        if not self.navigationWidget.underMouse():
+            self.pageProgressSlider.hide()
+
+    @staticmethod
+    def _matchesConfiguredShortcut(event: QKeyEvent, value: str) -> bool:
         pressed = QKeySequence(event.keyCombination()).toString(
             QKeySequence.PortableText
         )
-        return bool(pressed and pressed == cfg.get(cfg.readerScrollShortcut))
+        shortcut = str(value or "").replace("PageDown", "PgDown").replace(
+            "PageUp", "PgUp"
+        )
+        expected = QKeySequence(shortcut).toString(
+            QKeySequence.PortableText
+        )
+        return bool(pressed and expected and pressed == expected)
+
+    def _matchesNextMangaShortcut(self, event: QKeyEvent) -> bool:
+        return self._matchesConfiguredShortcut(
+            event, cfg.get(cfg.readerNextMangaShortcut)
+        )
+
+    def _matchesScrollShortcut(self, event: QKeyEvent) -> bool:
+        return self._matchesConfiguredShortcut(
+            event, cfg.get(cfg.readerScrollShortcut)
+        )
 
     def _isReaderKey(self, event: QKeyEvent) -> bool:
         next_key, previous_key, _next_icon, _previous_icon = self._directionKeys()
-        if self._matchesScrollShortcut(event):
+        if (
+            self._matchesNextMangaShortcut(event)
+            or self._matchesScrollShortcut(event)
+        ):
             return True
         if event.modifiers() & Qt.ControlModifier:
             return event.key() in (Qt.Key_Plus, Qt.Key_Equal, Qt.Key_Minus)
@@ -917,6 +994,10 @@ class MangaReaderInterface(QWidget):
                 self.setFullscreenState(False, emit_request=True)
             else:
                 self.backRequested.emit()
+            return True
+
+        if self._matchesNextMangaShortcut(event):
+            self.requestNextManga()
             return True
 
         if self._matchesScrollShortcut(event):
@@ -953,6 +1034,15 @@ class MangaReaderInterface(QWidget):
         return local_page_slot_count(self._item) if self._item is not None else 0
 
     def eventFilter(self, watched, event):
+        navigation_widget = getattr(self, "navigationWidget", None)
+        if navigation_widget is not None and watched is navigation_widget:
+            if event.type() == QEvent.Enter:
+                self.pageProgressSlider.show()
+            elif (
+                event.type() == QEvent.Leave
+                and not self.pageProgressSlider.isSliderDown()
+            ):
+                self.pageProgressSlider.hide()
         if self._fullscreen and event.type() == QEvent.MouseMove:
             self._updateFullscreenControlsForPointer(event)
         if watched is self.graphicsView.viewport() and event.type() == QEvent.Resize:

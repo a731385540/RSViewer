@@ -7,7 +7,7 @@ from app.domain.manga import MangaItem
 from app.services.manga_classification_index import MangaClassificationIndex
 
 
-def make_item(root, gid, category="", playlists=(), taxonomy=()):
+def make_item(root, gid, category="", legacy_playlists=(), taxonomy=()):
     return MangaItem(
         gid=gid,
         english_title=f"Gallery {gid}",
@@ -15,7 +15,7 @@ def make_item(root, gid, category="", playlists=(), taxonomy=()):
         category=0,
         category_name="",
         primary_label=category,
-        multiple_labels=tuple(playlists),
+        multiple_labels=tuple(legacy_playlists),
         tags=(),
         folder=root / str(gid),
         cover_path=root / f"{gid}.jpg",
@@ -27,7 +27,7 @@ def make_item(root, gid, category="", playlists=(), taxonomy=()):
 
 
 class MangaClassificationIndexTests(unittest.TestCase):
-    def test_all_and_three_classification_kinds_share_one_gid_index(self):
+    def test_category_and_taxonomy_share_one_gid_index(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             index = MangaClassificationIndex()
@@ -50,7 +50,6 @@ class MangaClassificationIndexTests(unittest.TestCase):
                 {2},
                 set(index.gids_for(index.CATEGORY, index.UNCLASSIFIED)),
             )
-            self.assertEqual({1, 2}, set(index.gids_for(index.PLAYLIST, "Queue")))
             self.assertEqual({1, 2}, set(index.gids_for(index.TAXONOMY, 10)))
 
     def test_upsert_moves_gid_without_leaving_stale_memberships(self):
@@ -70,11 +69,18 @@ class MangaClassificationIndexTests(unittest.TestCase):
             )
 
             self.assertFalse(index.gids_for(index.CATEGORY, "A"))
-            self.assertFalse(index.gids_for(index.PLAYLIST, "Old"))
             self.assertFalse(index.gids_for(index.TAXONOMY, 1))
             self.assertEqual({7}, set(index.gids_for(index.CATEGORY, "B")))
-            self.assertEqual({7}, set(index.gids_for(index.PLAYLIST, "New")))
             self.assertEqual({7}, set(index.gids_for(index.TAXONOMY, 2)))
+
+    def test_legacy_playlist_memberships_are_not_indexed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            index = MangaClassificationIndex()
+            index.rebuild((make_item(root, 1, "A", ("Legacy",), ()),))
+
+            self.assertEqual({1}, set(index.all_gids()))
+            self.assertNotIn("playlist", index._memberships)
 
 
 if __name__ == "__main__":

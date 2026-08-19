@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, Qt, QThreadPool
+from PySide6.QtCore import QEvent, QPoint, Qt, QThreadPool
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -40,6 +40,7 @@ class MangaReaderInterfaceTests(unittest.TestCase):
                 cfg.readerPageDirection,
                 cfg.readerImageLoadSize,
                 cfg.readerScrollShortcut,
+                cfg.readerNextMangaShortcut,
                 cfg.readerAutoPageEnabled,
                 cfg.readerAutoPageInterval,
             )
@@ -48,6 +49,7 @@ class MangaReaderInterfaceTests(unittest.TestCase):
         cfg.set(cfg.readerPageDirection, "right_to_left")
         cfg.set(cfg.readerImageLoadSize, "fit_window")
         cfg.set(cfg.readerScrollShortcut, "Space")
+        cfg.set(cfg.readerNextMangaShortcut, "Ctrl+PageDown")
         cfg.set(cfg.readerAutoPageEnabled, False)
         cfg.set(cfg.readerAutoPageInterval, 5)
         self.temp_directory = tempfile.TemporaryDirectory()
@@ -126,6 +128,41 @@ class MangaReaderInterfaceTests(unittest.TestCase):
         self.assertEqual(2, self.reader.currentPage)
         self.assertEqual("第 2 / 4 页", self.reader.pageIndicatorLabel.text())
         self.assertIsNotNone(self.reader._pixmap_item)
+
+    def test_hover_progress_slider_scrubs_pages_and_stays_synchronized(self):
+        self.reader.setManga(self.item)
+        self._wait_for_load()
+
+        QApplication.sendEvent(
+            self.reader.navigationWidget, QEvent(QEvent.Leave)
+        )
+        self.assertTrue(self.reader.pageProgressSlider.isHidden())
+        self.assertEqual(4, self.reader.pageProgressSlider.maximum())
+        self.assertEqual(1, self.reader.pageProgressSlider.value())
+        self.assertLess(
+            self.reader.pageProgressSliderHost.mapTo(
+                self.reader,
+                self.reader.pageProgressSliderHost.rect().bottomLeft(),
+            ).y(),
+            self.reader.previousButton.mapTo(
+                self.reader, self.reader.previousButton.rect().topLeft()
+            ).y(),
+        )
+
+        QApplication.sendEvent(
+            self.reader.navigationWidget, QEvent(QEvent.Enter)
+        )
+        self.assertFalse(self.reader.pageProgressSlider.isHidden())
+
+        self.reader.pageProgressSlider.setValue(4)
+        self.reader.pageProgressSlider.sliderMoved.emit(4)
+        self.assertEqual(4, self.reader.currentPage)
+        self.assertEqual(4, self.reader.pageSpinBox.value())
+
+        QApplication.sendEvent(
+            self.reader.navigationWidget, QEvent(QEvent.Leave)
+        )
+        self.assertTrue(self.reader.pageProgressSlider.isHidden())
 
     def test_reader_accepts_page_from_resumed_download(self):
         self.reader.setManga(self.item, len(self.item.page_paths) - 1)
@@ -286,10 +323,10 @@ class MangaReaderInterfaceTests(unittest.TestCase):
         self.reader.nextPage()
         self.assertIsNone(self.reader._active_movie)
 
-    def test_last_page_requests_next_playlist_manga(self):
+    def test_last_page_requests_next_sequence_manga(self):
         requested = []
         self.reader.nextMangaRequested.connect(lambda: requested.append(True))
-        self.reader.setPlaylistContinuation(True)
+        self.reader.setSequenceContinuation(True)
         self.reader.setManga(self.item, len(self.item.page_paths) - 1)
         self._wait_for_load()
 
@@ -298,10 +335,10 @@ class MangaReaderInterfaceTests(unittest.TestCase):
         self.assertEqual([True], requested)
         self.assertEqual(len(self.item.page_paths), self.reader.currentPage)
 
-    def test_first_page_requests_previous_playlist_manga(self):
+    def test_first_page_requests_previous_sequence_manga(self):
         requested = []
         self.reader.previousMangaRequested.connect(lambda: requested.append(True))
-        self.reader.setPlaylistContinuation(True, True)
+        self.reader.setSequenceContinuation(True, True)
         self.reader.setManga(self.item, 0)
         self._wait_for_load()
 
@@ -309,6 +346,33 @@ class MangaReaderInterfaceTests(unittest.TestCase):
         self.reader.previousPage()
         self.assertEqual([True], requested)
         self.assertEqual(1, self.reader.currentPage)
+
+    def test_next_manga_button_and_shortcut_work_from_any_page(self):
+        requested = []
+        self.reader.nextMangaRequested.connect(lambda: requested.append(True))
+        self.reader.setSequenceContinuation(True)
+        self.reader.setManga(self.item, 1)
+        self._wait_for_load()
+
+        self.assertTrue(self.reader.nextMangaButton.isEnabled())
+        self.reader.nextMangaButton.click()
+        QTest.keyClick(
+            self.reader.graphicsView.viewport(),
+            Qt.Key_PageDown,
+            Qt.ControlModifier,
+        )
+
+        self.assertEqual([True, True], requested)
+        self.assertEqual(2, self.reader.currentPage)
+        self.assertIn("Ctrl+PageDown", self.reader.nextMangaButton.toolTip())
+
+        cfg.set(cfg.readerNextMangaShortcut, "Alt+N")
+        QApplication.processEvents()
+        QTest.keyClick(
+            self.reader.graphicsView.viewport(), Qt.Key_N, Qt.AltModifier
+        )
+        self.assertEqual([True, True, True], requested)
+        self.assertIn("Alt+N", self.reader.nextMangaButton.toolTip())
 
     def test_fullscreen_request_and_escape(self):
         states = []
@@ -420,6 +484,10 @@ class MangaReaderInterfaceTests(unittest.TestCase):
         self.assertEqual(
             "Ctrl+J",
             global_settings.readerScrollShortcutCard.captureButton.sequence,
+        )
+        self.assertEqual(
+            "Ctrl+PageDown",
+            global_settings.readerNextMangaShortcutCard.captureButton.sequence,
         )
         self.assertEqual(
             "Ctrl+J", local_settings.scrollShortcutCard.captureButton.sequence

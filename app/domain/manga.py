@@ -125,7 +125,6 @@ class MangaItem:
             self.english_title,
             self.original_title,
             self.primary_label,
-            *self.multiple_labels,
             *self.taxonomy_labels,
             *self.tags,
         )

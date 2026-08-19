@@ -8,6 +8,7 @@ from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -150,10 +151,46 @@ class ReadingProgressTests(unittest.TestCase):
         self.assertIn("page_modes_json", original_columns)
         self.assertIn("gallery_links_json", online_comment_columns)
         self.assertIn("gallery_links_json", sync_comment_columns)
-        self.assertTrue({"completed", "cleared"}.issubset(progress_columns))
+        self.assertTrue(
+            {"completed", "cleared", "started"}.issubset(progress_columns)
+        )
         self.assertEqual(("latest_similar_search",), similar_table)
 
+    def test_v21_migration_distinguishes_default_sidecar_page_from_reading(self):
+        with closing(sqlite3.connect(str(self.repository.database_path))) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE manga_reading_progress (
+                    gid INTEGER PRIMARY KEY,
+                    page_index INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    completed INTEGER NOT NULL DEFAULT 0,
+                    cleared INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT INTO manga_reading_progress VALUES (1, 0, 1, 0, 0);
+                INSERT INTO manga_reading_progress VALUES (2, 1, 2, 0, 0);
+                INSERT INTO manga_reading_progress VALUES (3, 0, 3, 1, 0);
+                INSERT INTO manga_reading_progress VALUES (4, 0, 4, 0, 1);
+                PRAGMA user_version = 21;
+                """
+            )
+
+        self.repository.initialize()
+
+        self.assertIsNone(self.repository.reading_state_for_manga(1))
+        self.assertEqual((1, False), self.repository.reading_state_for_manga(2))
+        self.assertEqual((0, True), self.repository.reading_state_for_manga(3))
+        self.assertIsNone(self.repository.reading_state_for_manga(4))
+        with closing(sqlite3.connect(str(self.repository.database_path))) as connection:
+            started = connection.execute(
+                "SELECT gid, started FROM manga_reading_progress ORDER BY gid"
+            ).fetchall()
+        self.assertEqual([(1, 0), (2, 1), (3, 1), (4, 0)], started)
+
     def test_completed_reading_is_permanent_until_explicit_clear(self):
+        self.repository.save_progress(122, 0)
+        self.assertEqual((0, False), self.repository.reading_state_for_manga(122))
+
         self.repository.save_progress(123, 9, completed=True)
         self.repository.save_progress(123, 2)
 
@@ -444,8 +481,17 @@ class ReadingProgressTests(unittest.TestCase):
 
     def test_ehviewer_hex_progress_import_and_own_progress_precedence(self):
         sidecar = self.root / ".ehviewer"
-        sidecar.write_text("VERSION2\n0000008f\n123\n", encoding="ascii")
+        sidecar.write_text("VERSION2\n00000000\n123\n", encoding="ascii")
         item = make_item(self.root)
+
+        default_progress = EhViewerDataSource.read_ehviewer_progress(item)
+        self.assertEqual(0, default_progress)
+        self.assertIsNone(
+            self.repository.resolve_progress(item.gid, default_progress)
+        )
+        self.assertIsNone(self.repository.reading_state_for_manga(item.gid))
+
+        sidecar.write_text("VERSION2\n0000008f\n123\n", encoding="ascii")
 
         external_progress = EhViewerDataSource.read_ehviewer_progress(item)
         self.assertEqual(143, external_progress)
@@ -606,7 +652,6 @@ class ReadingProgressTests(unittest.TestCase):
         self.assertIn("评分：4.75", detail.metadataLabel.text())
         self.assertIn("语言：Chinese", detail.metadataLabel.text())
         for field in (
-            "播放列表：",
             "归类：",
             "页数：",
             "阅读进度：",
@@ -620,7 +665,7 @@ class ReadingProgressTests(unittest.TestCase):
         QTest.mouseClick(detail.detailMetadataButton, Qt.LeftButton)
         self.assertFalse(detail.detailMetadataLabel.isHidden())
         self.assertEqual("收起详细", detail.detailMetadataButton.text())
-        self.assertIn("播放列表：稍后阅读", detail.detailMetadataLabel.text())
+        self.assertNotIn("播放列表：", detail.detailMetadataLabel.text())
         self.assertIn("归类：单行本", detail.detailMetadataLabel.text())
         self.assertIn("页数：1", detail.detailMetadataLabel.text())
         self.assertIn("已下载：1 / 1 页", detail.detailMetadataLabel.text())
@@ -684,6 +729,7 @@ class ReadingProgressTests(unittest.TestCase):
         )
         detail_widget.setOnlineLoading(gallery, provider, cache)
         self.assertTrue(detail_widget.openFolderButton.isHidden())
+        self.assertTrue(detail_widget.categoryButton.isHidden())
         local_item = SimpleNamespace(gid=gallery.gid, folder=self.root)
         detail_widget.setFolderOpenTarget(local_item)
         self.assertFalse(detail_widget.openFolderButton.isHidden())
@@ -806,15 +852,70 @@ class ReadingProgressTests(unittest.TestCase):
         self.assertEqual([online_detail], download_requested)
 
         page = self._create_pages(1)[0]
-        detail_widget.setManga(make_item(self.root, (page,)))
+        local_detail_item = make_item(self.root, (page,))
+        category_requests = []
+        detail_widget.categorySelectionRequested.connect(
+            category_requests.append
+        )
+        detail_widget.setManga(local_detail_item)
         QApplication.processEvents()
         self.assertFalse(detail_widget.isOnlineGallery)
+        self.assertFalse(detail_widget.categoryButton.isHidden())
+        detail_widget.categoryButton.click()
+        self.assertEqual([local_detail_item], category_requests)
         self.assertTrue(detail_widget.commentsCard.isHidden())
         self.assertFalse(detail_widget.operationCard.isHidden())
         self.assertFalse(detail_widget.previewCard.isHidden())
         detail_widget.cancelLoads()
         detail_widget.close()
         detail_widget.deleteLater()
+        QApplication.processEvents()
+
+    def test_detail_selected_title_can_search_local_or_online(self):
+        page = self._create_pages(1)[0]
+        detail = MangaDetailInterface(
+            EhViewerDataSource(self.root / "unused.db", self.root),
+            self.repository,
+        )
+        item = replace(
+            make_item(self.root, (page,)),
+            english_title="A long selected title",
+        )
+        detail.setManga(item)
+        local_requests = []
+        online_requests = []
+        detail.selectedTitleSearchRequested.connect(
+            lambda *args: local_requests.append(args)
+        )
+        detail.selectedTitleOnlineSearchRequested.connect(
+            online_requests.append
+        )
+        class SelectedLabel(QLabel):
+            def selectedText(self):
+                return "long"
+
+        selected_label = SelectedLabel(detail)
+        menus = []
+
+        with patch(
+            "app.view.manga_detail_interface.RoundMenu.exec",
+            lambda menu, _position: menus.append(menu),
+        ):
+            detail._showTitleContextMenu(
+                selected_label,
+                selected_label.rect().center(),
+            )
+
+        actions = {action.text(): action for action in menus[0].menuActions()}
+        self.assertIn("在本地搜索所选文本", actions)
+        self.assertIn("在线搜索所选文本", actions)
+        actions["在本地搜索所选文本"].trigger()
+        actions["在线搜索所选文本"].trigger()
+        selected = selected_label.selectedText()
+        self.assertEqual([(item.gid, selected)], local_requests)
+        self.assertEqual([selected], online_requests)
+        detail.cancelLoads()
+        detail.deleteLater()
         QApplication.processEvents()
 
     def test_local_detail_sync_updates_comments_and_old_parent_status(self):
