@@ -1316,20 +1316,13 @@ class MainWindow(FluentWindow):
             self.windowCoordinator.similarGalleryWindow = window
         else:
             window.setSource(self.mangaSource)
-        for signal in (
-            window.readRequested,
-            window.folderOpenRequested,
-            window.readingRecordClearRequested,
-            window.selectedTitleSearchRequested,
-        ):
-            try:
-                signal.disconnect()
-            except (RuntimeError, TypeError):
-                pass
-        window.readRequested.connect(self.openMangaReader)
-        window.folderOpenRequested.connect(self.openGalleryFolder)
-        window.readingRecordClearRequested.connect(self.clearReadingRecord)
-        window.selectedTitleSearchRequested.connect(self.searchSelectedTitleText)
+        window.bindActions(
+            self,
+            self.openMangaReader,
+            self.openGalleryFolder,
+            self.clearReadingRecord,
+            self.searchSelectedTitleText,
+        )
         window.setSearch(record, items)
         window.show()
         window.raise_()

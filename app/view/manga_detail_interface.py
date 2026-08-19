@@ -143,14 +143,33 @@ def _enable_text_copy(label: QLabel):
     label.setCursor(Qt.IBeamCursor)
 
 
+def _translated_tag_value(tag_search_index, namespace: str, raw_value: str) -> str:
+    if tag_search_index is None:
+        return raw_value
+    translated = str(
+        tag_search_index.translated_name(namespace, raw_value) or ""
+    ).strip()
+    return translated or raw_value
+
+
 class TagChip(QLabel):
     """Theme-aware, selectable tag chip similar to Element's el-tag."""
 
-    def __init__(self, text: str, namespace: str, tone: str, parent=None):
+    def __init__(
+        self,
+        text: str,
+        namespace: str,
+        tone: str,
+        parent=None,
+        raw_text=None,
+    ):
         super().__init__(text, parent)
+        raw_tag = str(text if raw_text is None else raw_text)
         self.setObjectName("mangaTagChip")
         self.setProperty("tagTone", tone)
-        self.setToolTip(f"{namespace}:{text}")
+        self.setProperty("tagNamespace", namespace)
+        self.setProperty("rawTag", raw_tag)
+        self.setToolTip(f"{namespace}:{raw_tag}")
         _enable_text_copy(self)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
@@ -165,7 +184,15 @@ class GalleryQualityBadge(QLabel):
 
 
 class TagGroupWidget(QWidget):
-    def __init__(self, title: str, namespace: str, tone: str, values, parent=None):
+    def __init__(
+        self,
+        title: str,
+        namespace: str,
+        tone: str,
+        values,
+        parent=None,
+        tag_search_index=None,
+    ):
         super().__init__(parent)
         self.setObjectName("mangaTagGroup")
         layout = QVBoxLayout(self)
@@ -181,7 +208,15 @@ class TagGroupWidget(QWidget):
         chip_layout.setHorizontalSpacing(8)
         chip_layout.setVerticalSpacing(7)
         for value in values:
-            chip_layout.addWidget(TagChip(value, namespace, tone, chip_container))
+            chip_layout.addWidget(
+                TagChip(
+                    _translated_tag_value(tag_search_index, namespace, value),
+                    namespace,
+                    tone,
+                    chip_container,
+                    raw_text=value,
+                )
+            )
         layout.addWidget(chip_container)
 
 
@@ -2142,20 +2177,16 @@ class MangaDetailInterface(QWidget):
             ("artist", self.tr("作者"), "creator"),
         ):
             for value in key_groups.get(namespace, ()):
-                translation = (
-                    self.tagSearchIndex.translated_name(namespace, value)
-                    if self.tagSearchIndex is not None
-                    else ""
+                display_value = _translated_tag_value(
+                    self.tagSearchIndex, namespace, value
                 )
-                display_value = value
-                if translation and translation.casefold() != value.casefold():
-                    display_value = f"{value}（{translation}）"
                 chip = TagChip(
-                        f"{title}：{display_value}",
-                        namespace,
-                        tone,
-                        self.keyTagsWidget,
-                    )
+                    f"{title}：{display_value}",
+                    namespace,
+                    tone,
+                    self.keyTagsWidget,
+                    raw_text=value,
+                )
                 chip.setObjectName("mangaKeyTagChip")
                 labels.append(chip)
         for chip in labels:
@@ -2183,6 +2214,7 @@ class MangaDetailInterface(QWidget):
                 tone,
                 values,
                 self.tagGroupsWidget,
+                tag_search_index=self.tagSearchIndex,
             )
             group.setProperty("tagNamespace", namespace)
             self._tagGroupWidgets.append(group)

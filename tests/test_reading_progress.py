@@ -3,6 +3,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+import warnings
 from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
@@ -31,6 +32,7 @@ from app.domain.online_gallery import (
     OnlineGalleryPreview,
 )
 from app.repositories.user_library_repository import UserLibraryRepository
+from app.services.eh_tag_search import EhTagSearchIndex
 from app.services.online_gallery_memory_cache import OnlineGalleryMemoryCache
 from app.sources.ehviewer_source import EhViewerDataSource
 from app.view.local_manga_interface import manga_metadata_text
@@ -56,6 +58,16 @@ def make_item(folder: Path, pages=(), progress=None):
         page_paths=tuple(pages),
         page_count=len(pages),
         progress_page_index=progress,
+    )
+
+
+def make_tag_search_index():
+    return EhTagSearchIndex(
+        (
+            ("artist", "a", "[]", "Alice", "爱丽丝", "作者"),
+            ("language", "l", '["lang"]', "chinese", "汉语", "语言"),
+            ("female", "f", "[]", "full color", "全彩", "女性"),
+        )
     )
 
 
@@ -194,6 +206,31 @@ class ReadingProgressTests(unittest.TestCase):
         browser.setSearch(replacement, (second,))
         self.assertEqual(1, browser.resultList.count())
         self.assertIn("Other", browser.summaryLabel.text())
+
+        calls = []
+        first_owner = object()
+        second_owner = object()
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            browser.bindActions(
+                first_owner,
+                lambda *_args: calls.append("first-read"),
+                lambda *_args: None,
+                lambda *_args: None,
+                lambda *_args: None,
+            )
+            browser.bindActions(
+                second_owner,
+                lambda *_args: calls.append("second-read"),
+                lambda *_args: None,
+                lambda *_args: None,
+                lambda *_args: None,
+            )
+        browser.readRequested.emit(first, 0)
+        self.assertEqual(["second-read"], calls)
+        self.assertFalse(
+            any(issubclass(entry.category, RuntimeWarning) for entry in captured)
+        )
         browser.close()
         browser.deleteLater()
 
@@ -510,6 +547,7 @@ class ReadingProgressTests(unittest.TestCase):
         detail = MangaDetailInterface(
             EhViewerDataSource(self.root / "unused.db", self.root),
             self.repository,
+            tag_search_index=make_tag_search_index(),
         )
         detail.setManga(item)
         detail.show()
@@ -517,8 +555,26 @@ class ReadingProgressTests(unittest.TestCase):
 
         chips = detail.findChildren(QLabel, "mangaTagChip")
         self.assertEqual(
-            {"Alice", "Bob", "full color", "chinese"},
+            {"爱丽丝", "Bob", "全彩", "汉语"},
             {chip.text() for chip in chips},
+        )
+        self.assertEqual(
+            {
+                "artist:Alice",
+                "artist:Bob",
+                "female:full color",
+                "language:chinese",
+            },
+            {chip.toolTip() for chip in chips},
+        )
+        self.assertEqual(
+            {"Alice", "Bob", "full color", "chinese"},
+            {chip.property("rawTag") for chip in chips},
+        )
+        key_chips = detail.findChildren(QLabel, "mangaKeyTagChip")
+        self.assertEqual(
+            {"作者：爱丽丝", "作者：Bob", "语言：汉语"},
+            {chip.text() for chip in key_chips},
         )
         self.assertEqual(
             ["artist", "language", "female"],
@@ -578,7 +634,11 @@ class ReadingProgressTests(unittest.TestCase):
 
     def test_shared_detail_page_switches_between_online_comments_and_local_preview(self):
         source = EhViewerDataSource(self.root / "unused.db", self.root)
-        detail_widget = MangaDetailInterface(source, self.repository)
+        detail_widget = MangaDetailInterface(
+            source,
+            self.repository,
+            tag_search_index=make_tag_search_index(),
+        )
         folder_requests = []
         detail_widget.folderOpenRequested.connect(folder_requests.append)
         sprite = QImage(4, 2, QImage.Format_RGB32)
@@ -674,6 +734,15 @@ class ReadingProgressTests(unittest.TestCase):
         detail_widget.setOnlineDetail(online_detail, provider=provider, cache=cache)
         detail_widget.waitForOnlineLoads(3000)
         QApplication.processEvents()
+        online_tag_chips = detail_widget.findChildren(QLabel, "mangaTagChip")
+        self.assertEqual(
+            {"someone", "汉语"},
+            {chip.text() for chip in online_tag_chips},
+        )
+        self.assertEqual(
+            {"artist:someone", "language:chinese"},
+            {chip.toolTip() for chip in online_tag_chips},
+        )
         comment_bodies = detail_widget.findChildren(QLabel, "onlineCommentBody")
         self.assertEqual(["copyable comment"], [label.text() for label in comment_bodies])
         selectable = Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard

@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
@@ -7,18 +5,27 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
-    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import BodyLabel, CaptionLabel, SubtitleLabel, TitleLabel
+from qfluentwidgets import (
+    BodyLabel,
+    CaptionLabel,
+    FluentWindow,
+    SubtitleLabel,
+    TitleLabel,
+)
+from qfluentwidgets import FluentIcon as FIF
 
+from app.common.style_sheet import StyleSheet
 from app.view.manga_detail_interface import MangaDetailInterface
 
 
 class SimilarGalleryResultRow(QWidget):
     def __init__(self, item, parent=None):
         super().__init__(parent)
+        self.setObjectName("similarGalleryResultRow")
+        self.setAttribute(Qt.WA_StyledBackground, True)
         cover = QLabel(self)
         cover.setFixedSize(72, 96)
         cover.setAlignment(Qt.AlignCenter)
@@ -59,7 +66,7 @@ class SimilarGalleryResultRow(QWidget):
         layout.addLayout(text_layout, 1)
 
 
-class SimilarGalleryBrowserWindow(QWidget):
+class SimilarGalleryBrowserWindow(FluentWindow):
     """One reusable non-modal window for the latest selected-title search."""
 
     readRequested = Signal(object, int)
@@ -68,20 +75,29 @@ class SimilarGalleryBrowserWindow(QWidget):
     selectedTitleSearchRequested = Signal(int, str)
 
     def __init__(self, source, repository, tag_search_index=None, parent=None):
-        super().__init__(parent, Qt.Window)
+        super().__init__(parent)
         self.setObjectName("similarGalleryBrowserWindow")
         self.setWindowTitle(self.tr("相似画廊浏览窗口"))
+        self.setWindowIcon(FIF.SEARCH.icon())
         self.resize(980, 720)
         self._items = {}
+        self._boundOwner = None
+        self._actionConnections = ()
+        self.navigationInterface.hide()
+        self.widgetLayout.setContentsMargins(0, 48, 0, 0)
 
-        self.stack = QStackedWidget(self)
+        self.stack = self.stackedWidget
+        self.stack.setAnimationEnabled(False)
         self.resultPage = QWidget(self.stack)
+        self.resultPage.setObjectName("similarGalleryResultPage")
+        self.resultPage.setAttribute(Qt.WA_StyledBackground, True)
         result_layout = QVBoxLayout(self.resultPage)
         result_layout.setContentsMargins(24, 22, 24, 22)
         result_layout.setSpacing(12)
         self.titleLabel = TitleLabel(self.tr("相似画廊"), self.resultPage)
         self.summaryLabel = BodyLabel("", self.resultPage)
         self.resultList = QListWidget(self.resultPage)
+        self.resultList.setObjectName("similarGalleryResultList")
         self.resultList.setIconSize(QSize(72, 96))
         self.resultList.setSpacing(4)
         self.resultList.itemDoubleClicked.connect(self._openResult)
@@ -106,10 +122,34 @@ class SimilarGalleryBrowserWindow(QWidget):
         )
         self.stack.addWidget(self.resultPage)
         self.stack.addWidget(self.detail)
+        self.stack.setCurrentWidget(self.resultPage)
+        StyleSheet.SIMILAR_GALLERY_BROWSER_WINDOW.apply(self)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.stack)
+    def bindActions(
+        self,
+        owner,
+        read_action,
+        folder_action,
+        clear_action,
+        search_action,
+    ):
+        """Route singleton-window actions without blind signal disconnection."""
+        if self._boundOwner is owner:
+            return
+        for signal, slot in self._actionConnections:
+            try:
+                signal.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+        self._boundOwner = owner
+        self._actionConnections = (
+            (self.readRequested, read_action),
+            (self.folderOpenRequested, folder_action),
+            (self.readingRecordClearRequested, clear_action),
+            (self.selectedTitleSearchRequested, search_action),
+        )
+        for signal, slot in self._actionConnections:
+            signal.connect(slot)
 
     def setSource(self, source):
         self.detail.setSource(source)
@@ -145,3 +185,8 @@ class SimilarGalleryBrowserWindow(QWidget):
     def closeEvent(self, event):
         self.detail.cancelLoads()
         super().closeEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.titleBar.move(0, 0)
+        self.titleBar.resize(self.width(), self.titleBar.height())

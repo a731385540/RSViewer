@@ -54,6 +54,10 @@ from app.workers.eh_online_worker import OnlineCoverWorker, OnlineSearchWorker
 
 PageCacheKey = Tuple[str, str, str, str]
 MAX_MEMORY_PAGES_PER_SITE = 64
+ONLINE_CARD_WIDTH = 229
+ONLINE_CARD_MIN_HEIGHT = 367
+ONLINE_CARD_COVER_HEIGHT = 241
+ONLINE_CARD_GRID_SPACING = 14
 
 
 @dataclass
@@ -314,13 +318,13 @@ class OnlineGalleryCard(_OnlineGalleryCardBase):
             open_folder_callback,
         )
         self.setObjectName("onlineGalleryCard")
-        self.setFixedWidth(254)
-        self.setMinimumHeight(408)
+        self.setFixedWidth(ONLINE_CARD_WIDTH)
+        self.setMinimumHeight(ONLINE_CARD_MIN_HEIGHT)
 
         self.coverLabel = OnlineCoverLabel(self)
         self.coverLabel.setObjectName("onlineGalleryCover")
         self.coverLabel.setAlignment(Qt.AlignCenter)
-        self.coverLabel.setFixedHeight(268)
+        self.coverLabel.setFixedHeight(ONLINE_CARD_COVER_HEIGHT)
         self.coverLabel.setText(
             self.tr("加载封面…") if item.thumbnail_url else self.tr("封面不可用")
         )
@@ -700,7 +704,7 @@ class OnlineMangaInterface(QWidget):
         self.scrollWidget.setObjectName("onlineMangaScrollWidget")
         self.gridLayout = QGridLayout(self.scrollWidget)
         self.gridLayout.setContentsMargins(0, 4, 0, 12)
-        self.gridLayout.setSpacing(14)
+        self.gridLayout.setSpacing(ONLINE_CARD_GRID_SPACING)
         self.gridLayout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         self.scrollArea.setWidget(self.scrollWidget)
 
@@ -1305,8 +1309,12 @@ class OnlineMangaInterface(QWidget):
                 self.gridLayout.addWidget(card, index, 0)
             return
 
-        width = max(254, self.scrollArea.viewport().width())
-        columns = max(1, (width + 14) // (254 + 14))
+        width = max(ONLINE_CARD_WIDTH, self.scrollArea.viewport().width())
+        columns = max(
+            1,
+            (width + ONLINE_CARD_GRID_SPACING)
+            // (ONLINE_CARD_WIDTH + ONLINE_CARD_GRID_SPACING),
+        )
         for index, card in enumerate(self._cards):
             self.gridLayout.addWidget(card, index // columns, index % columns)
 
