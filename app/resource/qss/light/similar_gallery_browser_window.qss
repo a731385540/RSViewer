@@ -1,0 +1,32 @@
+SimilarGalleryBrowserWindow,
+QWidget#similarGalleryResultPage {
+    background: #f5f5f5;
+}
+
+QListWidget#similarGalleryResultList {
+    background: transparent;
+    border: none;
+    outline: none;
+    padding: 2px;
+}
+
+QListWidget#similarGalleryResultList::item {
+    background: #ffffff;
+    border: 1px solid #e2e4e8;
+    border-radius: 6px;
+    margin: 3px 0;
+}
+
+QListWidget#similarGalleryResultList::item:hover {
+    background: #f0f6ff;
+    border-color: #b7d2f2;
+}
+
+QListWidget#similarGalleryResultList::item:selected {
+    background: #e8f2ff;
+    border-color: #76a9e0;
+}
+
+QWidget#similarGalleryResultRow {
+    background: transparent;
+}
