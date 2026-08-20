@@ -33,11 +33,14 @@ class GalleryPageDownloadScheduler(QObject):
         self._round_robin = deque()
         self._active_count = 0
         self._max_threads = 1
+        self._shutting_down = False
         self.setThreadCount(max_threads)
 
     def setThreadCount(self, count):
         count = min(6, max(1, int(count)))
         with self._lock:
+            if self._shutting_down:
+                return
             self._max_threads = count
             self.threadPool.setMaxThreadCount(count)
             pending = self._takeRunnableTasksLocked()
@@ -51,13 +54,20 @@ class GalleryPageDownloadScheduler(QObject):
         if not tasks:
             return
         with self._lock:
-            queue = self._queues.get(gallery_key)
-            if queue is None:
-                queue = deque()
-                self._queues[gallery_key] = queue
-                self._round_robin.append(gallery_key)
-            queue.extend(tasks)
-            pending = self._takeRunnableTasksLocked()
+            if self._shutting_down:
+                cancelled = list(tasks)
+                pending = []
+            else:
+                cancelled = []
+                queue = self._queues.get(gallery_key)
+                if queue is None:
+                    queue = deque()
+                    self._queues[gallery_key] = queue
+                    self._round_robin.append(gallery_key)
+                queue.extend(tasks)
+                pending = self._takeRunnableTasksLocked()
+        for task in cancelled:
+            task.cancelPending()
         self._startTasks(pending)
 
     def cancel(self, gallery_key):
@@ -76,15 +86,33 @@ class GalleryPageDownloadScheduler(QObject):
         with self._lock:
             return sum(len(queue) for queue in self._queues.values())
 
+    def shutdown(self, timeout=3000):
+        with self._lock:
+            if not self._shutting_down:
+                self._shutting_down = True
+                cancelled = [
+                    task
+                    for queue in self._queues.values()
+                    for task in queue
+                ]
+                self._queues.clear()
+                self._round_robin.clear()
+            else:
+                cancelled = []
+        for task in cancelled:
+            task.cancelPending()
+        self.threadPool.clear()
+        return self.threadPool.waitForDone(max(0, int(timeout)))
+
     def _taskFinished(self, gallery_key, keep_gallery_queued):
         with self._lock:
             self._active_count = max(0, self._active_count - 1)
             cancelled = (
                 []
-                if keep_gallery_queued
+                if keep_gallery_queued and not self._shutting_down
                 else self._removeQueuedTasksLocked(gallery_key)
             )
-            pending = self._takeRunnableTasksLocked()
+            pending = [] if self._shutting_down else self._takeRunnableTasksLocked()
         for task in cancelled:
             task.cancelPending()
         self._startTasks(pending)

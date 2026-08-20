@@ -1,3 +1,5 @@
+import time
+
 from PySide6.QtCore import QObject, QThreadPool, Signal
 
 from app.services.gallery_page_download_scheduler import (
@@ -14,6 +16,7 @@ class MultiWindowCoordinator(QObject):
         super().__init__(parent)
         self._windows = []
         self._startupRecoveryClaimed = False
+        self._shuttingDown = False
         self.similarGalleryWindow = None
         self.onlineDownloadThreadPool = QThreadPool(self)
         self.onlineDownloadThreadPool.setMaxThreadCount(3)
@@ -36,6 +39,8 @@ class MultiWindowCoordinator(QObject):
         return True
 
     def register(self, window):
+        if self._shuttingDown:
+            raise RuntimeError("应用正在退出，不能再注册窗口")
         if window not in self._windows:
             self._windows.append(window)
 
@@ -44,9 +49,35 @@ class MultiWindowCoordinator(QObject):
             self._windows.remove(window)
         except ValueError:
             pass
+        return not self._windows
 
     def windows(self):
         return tuple(self._windows)
+
+    def shutdown(self, timeout=4000):
+        """Stop process-wide queues after the final application window closes."""
+
+        if self._shuttingDown:
+            return True
+        self._shuttingDown = True
+        timeout = max(0, int(timeout))
+        deadline = time.monotonic() + timeout / 1000
+        pools = (
+            self.onlineDownloadThreadPool,
+            self.downloadRegistrationThreadPool,
+            self.galleryUpdateThreadPool,
+            self.originalFileThreadPool,
+            self.organizerThreadPool,
+            self.trashThreadPool,
+        )
+        for pool in pools:
+            pool.clear()
+        remaining = max(0, round((deadline - time.monotonic()) * 1000))
+        completed = self.galleryPageDownloadScheduler.shutdown(remaining)
+        for pool in pools:
+            remaining = max(0, round((deadline - time.monotonic()) * 1000))
+            completed = pool.waitForDone(remaining) and completed
+        return completed
 
     def publish(self, source, scope, payload=None):
         self.stateChanged.emit(source, str(scope), payload)

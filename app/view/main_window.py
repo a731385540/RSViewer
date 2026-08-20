@@ -24,7 +24,8 @@ from qfluentwidgets import (
 )
 from qfluentwidgets import FluentIcon as FIF
 
-from app.common.config import PROJECT_ROOT, cfg
+from app.common.app_paths import DATABASE_PATH, prepare_database_path
+from app.common.config import cfg
 from app.domain.online_download import (
     DOWNLOAD_MODE_ORIGINAL_DIRECT,
     DOWNLOAD_MODE_ORIGINAL_LOCAL,
@@ -130,9 +131,8 @@ class MainWindow(FluentWindow):
         self.initWindow()
         self.themeListener = SystemThemeListener(self)
 
-        self.userLibraryRepository = UserLibraryRepository(
-            PROJECT_ROOT / "app" / "data" / "rsviewer.db"
-        )
+        prepare_database_path()
+        self.userLibraryRepository = UserLibraryRepository(DATABASE_PATH)
         self.userLibraryRepository.initialize()
         self._latestSimilarSearch = (
             self.userLibraryRepository.latest_similar_search()
@@ -248,6 +248,9 @@ class MainWindow(FluentWindow):
         self.localMangaInterface.mangaActivated.connect(self.openMangaDetail)
         self.localMangaInterface.readingSequenceMangaActivated.connect(
             self.openReadingSequenceMangaDetail
+        )
+        self.localMangaInterface.customSortChanged.connect(
+            self._onCustomSortChanged
         )
         self.localMangaInterface.metadataSyncRequested.connect(
             self.syncLocalGalleryMetadataBatch
@@ -607,6 +610,8 @@ class MainWindow(FluentWindow):
                 self.localMangaInterface.reload()
         elif scope == "library_refresh":
             self.localMangaInterface.reload()
+        elif scope == "custom_sort":
+            self.localMangaInterface.refreshCustomSort(payload)
         elif scope == "favorites":
             gids, favorite = payload
             self._applyFavoriteChanged(gids, favorite)
@@ -651,6 +656,9 @@ class MainWindow(FluentWindow):
     def openMangaHome(self):
         self._clearOnlineSearchReturn()
         self._setNavigationMode("manga")
+
+    def _onCustomSortChanged(self, scope):
+        self._publishSharedState("custom_sort", tuple(scope))
 
     def _clearOnlineSearchReturn(self):
         self._onlineSearchReturnState = None
@@ -1581,10 +1589,16 @@ class MainWindow(FluentWindow):
         self._onlineDetailWorker = None
         self.mangaDetailInterface.setOnlineError(message)
 
-    def _cancelOnlineDetailLoad(self):
+    def _cancelOnlineDetailLoad(self, cancel_provider=False):
         if self._onlineDetailWorker is not None:
             self._onlineDetailWorker.cancelled = True
             self._onlineDetailWorker = None
+        if cancel_provider and self._onlineDetailProvider is not None:
+            cancel = getattr(
+                self._onlineDetailProvider, "cancel_pending_requests", None
+            )
+            if cancel is not None:
+                cancel()
         self._onlineDetailProvider = None
 
     def openOnlineMangaReader(self, detail, page_index=0):
@@ -2915,13 +2929,20 @@ class MainWindow(FluentWindow):
 
     def _cancelLocalMetadataSync(self):
         if self._localMetadataSyncWorker is not None:
-            self._localMetadataSyncWorker.cancelled = True
+            worker = self._localMetadataSyncWorker
+            worker.cancelled = True
+            cancel = getattr(worker.provider, "cancel_pending_requests", None)
+            if cancel is not None:
+                cancel()
             self._localMetadataSyncWorker = None
 
     def _cancelLocalMetadataBatchSync(self):
         self._localMetadataBatchQueue.clear()
         for worker in tuple(self._localMetadataBatchWorkers):
             worker.cancelled = True
+            cancel = getattr(worker.provider, "cancel_pending_requests", None)
+            if cancel is not None:
+                cancel()
         self._localMetadataBatchWorkers.clear()
         self._localMetadataBatchTotal = 0
         self._localMetadataBatchCompleted = 0
@@ -4269,15 +4290,8 @@ class MainWindow(FluentWindow):
     def closeEvent(self, e):
         self._closing = True
         self.hide()
-        had_download_workers = bool(
-            self._onlineDownloadWorkers or self._localDownloadPrepareWorkers
-        )
-        had_update_workers = bool(self._galleryUpdateWorkers)
-        had_original_workers = bool(self._originalFileWorkers)
-        had_organizer_worker = self._organizerWorker is not None
-        had_trash_worker = self._trashWorker is not None
         self._cancelReadingSequenceLoad()
-        self._cancelOnlineDetailLoad()
+        self._cancelOnlineDetailLoad(cancel_provider=True)
         self._cancelLocalMetadataSync()
         self._cancelLocalMetadataBatchSync()
         self._cancelOrganizerTask()
@@ -4292,35 +4306,36 @@ class MainWindow(FluentWindow):
         self.localMangaInterface.cancelLoad()
         self.favoriteMangaInterface.cancelLoad()
         self.mangaHistoryInterface.cancelLoad()
-        self.onlineMangaInterface.cancelLoad()
-        self.mangaDetailInterface.cancelLoads()
+        self.onlineMangaInterface.shutdown(2000)
+        self.mangaDetailInterface.shutdown(2000)
         self.mangaReaderInterface.deactivate()
         self.progressSaveTimer.stop()
         self._flushReadingProgress()
-        self.progressThreadPool.waitForDone(3000)
-        self.onlineDetailThreadPool.waitForDone(3000)
-        self.similarSearchThreadPool.waitForDone(3000)
-        if had_download_workers:
-            self.onlineDownloadThreadPool.waitForDone(1000)
-        if had_update_workers:
-            self.galleryUpdateThreadPool.waitForDone(1000)
-        if had_original_workers:
-            self.originalFileThreadPool.waitForDone(1000)
-        if had_organizer_worker:
-            self.organizerThreadPool.waitForDone(1000)
-        if had_trash_worker:
-            self.trashThreadPool.waitForDone(1000)
-        self.mangaDetailInterface.waitForOnlineLoads(3000)
+        for pool in (
+            self.progressThreadPool,
+            self.onlineDetailThreadPool,
+            self.similarSearchThreadPool,
+        ):
+            pool.clear()
+            pool.waitForDone(1500)
         QApplication.instance().removeEventFilter(self)
         self.themeListener.terminate()
+        self.themeListener.wait(1000)
         self.themeListener.deleteLater()
         similar_window = self.windowCoordinator.similarGalleryWindow
         if similar_window is not None:
             similar_window.close()
             similar_window.deleteLater()
             self.windowCoordinator.similarGalleryWindow = None
-        self.windowCoordinator.unregister(self)
+        is_last_window = self.windowCoordinator.unregister(self)
+        if is_last_window:
+            self.windowCoordinator.shutdown(4000)
+            global_pool = QThreadPool.globalInstance()
+            global_pool.clear()
+            global_pool.waitForDone(3000)
         super().closeEvent(e)
+        if is_last_window:
+            QApplication.instance().quit()
 
 
     def _onThemeChangedFinished(self):

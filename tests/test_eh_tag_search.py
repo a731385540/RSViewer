@@ -111,6 +111,21 @@ class EhTagImportAndSearchTests(unittest.TestCase):
             ("other:full color", "language:chinese"),
             index.local_query_terms('o:"full color" l:chinese'),
         )
+        self.assertEqual(
+            'l:"chinese$"', index.exact_query_token("lang", "chinese")
+        )
+        self.assertEqual(
+            'f:"full color$"',
+            index.exact_query_token("female", "full color"),
+        )
+        self.assertEqual(
+            ("other:full color", "language:chinese"),
+            index.local_query_terms('o:"full color$" l:"chinese$"'),
+        )
+        self.assertEqual(
+            'cos:"unknown name$"',
+            EhTagSearchIndex().exact_query_token("cosplayer", "unknown name"),
+        )
 
     def test_completion_replaces_only_current_space_delimited_tag(self):
         self._import()

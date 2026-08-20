@@ -19,6 +19,9 @@ class MultiWindowCoordinatorTests(unittest.TestCase):
     def setUp(self):
         self.coordinator = MultiWindowCoordinator()
 
+    def tearDown(self):
+        self.coordinator.shutdown(3000)
+
     @staticmethod
     def _window(downloads=(), preparations=(), updates=(), originals=()):
         return SimpleNamespace(
@@ -35,6 +38,15 @@ class MultiWindowCoordinatorTests(unittest.TestCase):
     def test_startup_recovery_is_claimed_only_once(self):
         self.assertTrue(self.coordinator.claimStartupRecovery())
         self.assertFalse(self.coordinator.claimStartupRecovery())
+
+    def test_unregister_reports_only_the_final_window(self):
+        first = self._window(downloads=(1,))
+        second = self._window(downloads=(2,))
+        self.coordinator.register(first)
+        self.coordinator.register(second)
+
+        self.assertFalse(self.coordinator.unregister(first))
+        self.assertTrue(self.coordinator.unregister(second))
 
     def test_activity_and_owner_are_aggregated_across_windows(self):
         first = self._window(downloads=(1,), updates=(7,))

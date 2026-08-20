@@ -154,8 +154,31 @@ class MangaReaderInterfaceTests(unittest.TestCase):
         )
         self.assertFalse(self.reader.pageProgressSlider.isHidden())
 
-        self.reader.pageProgressSlider.setValue(4)
-        self.reader.pageProgressSlider.sliderMoved.emit(4)
+        slider = self.reader.pageProgressSlider
+        QTest.mouseMove(
+            slider,
+            QPoint(slider.width() - 12, slider.rect().center().y()),
+        )
+        QApplication.processEvents()
+        self.assertEqual(1, slider.value())
+        self.assertEqual(1, self.reader.currentPage)
+
+        QTest.mousePress(
+            slider,
+            Qt.LeftButton,
+            pos=QPoint(11, slider.rect().center().y()),
+        )
+        QTest.mouseMove(
+            slider,
+            QPoint(slider.width() - 11, slider.rect().center().y()),
+        )
+        QApplication.processEvents()
+        self.assertEqual(4, self.reader.currentPage)
+        QTest.mouseRelease(
+            slider,
+            Qt.LeftButton,
+            pos=QPoint(slider.width() - 11, slider.rect().center().y()),
+        )
         self.assertEqual(4, self.reader.currentPage)
         self.assertEqual(4, self.reader.pageSpinBox.value())
 

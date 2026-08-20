@@ -38,6 +38,7 @@ from app.view.gallery_state_indicator import (
     READING_NONE,
     READING_PARTIAL,
 )
+from app.view.custom_manga_sort_dialog import CustomMangaSortDialog
 from app.view.manga_history_interface import MangaHistoryInterface
 
 
@@ -65,6 +66,12 @@ class EmptySource:
 
     def clear_primary_label(self, gids):
         self.primary_clears.append(tuple(gids))
+
+    def find_cover_path(self, item):
+        return item.cover_image_path
+
+    def find_first_page_path(self, item):
+        return item.cover_image_path
 
 
 def make_item(root: Path, gid: int, added_time: int):
@@ -214,6 +221,102 @@ class LocalLibraryControlsTests(unittest.TestCase):
             [1, 3, 2],
             [item.gid for item in self.interface._filtered_items],
         )
+
+    def test_custom_sort_option_controls_cards_and_complete_reading_sequence(self):
+        category = UserLibraryRepository.CUSTOM_SORT_CATEGORY
+        self.assertEqual(
+            ["desc", "asc", "add_custom"],
+            [
+                self.interface.sortCombo.itemData(index)
+                for index in range(self.interface.sortCombo.count())
+            ],
+        )
+        self.assertTrue(self.interface.editSortButton.isHidden())
+
+        self.repository.save_custom_sort(category, "__none__", (3, 1, 2))
+        self.interface.refreshCustomSort((category, "__none__"))
+        custom_index = next(
+            index
+            for index in range(self.interface.sortCombo.count())
+            if self.interface.sortCombo.itemData(index) == "custom"
+        )
+        self.interface.sortCombo.setCurrentIndex(custom_index)
+        QApplication.processEvents()
+
+        self.assertEqual(
+            ["desc", "asc", "custom"],
+            [
+                self.interface.sortCombo.itemData(index)
+                for index in range(self.interface.sortCombo.count())
+            ],
+        )
+        self.assertFalse(self.interface.editSortButton.isHidden())
+        self.assertEqual(
+            [3, 1, 2],
+            [item.gid for item in self.interface._filtered_items],
+        )
+        newest = make_item(self.root, 4, 100)
+        self.interface.upsertItem(newest)
+        self.assertEqual(
+            [3, 1, 2, 4],
+            [item.gid for item in self.interface._filtered_items],
+        )
+        self.interface._setMangaPrimaryLabel((1,), "")
+        self.assertEqual(
+            (3, 1, 2),
+            self.repository.custom_sort_gids(category, "__none__"),
+        )
+
+        requests = []
+        self.interface.readingSequenceMangaActivated.connect(
+            lambda item, items, position: requests.append(
+                (item.gid, tuple(current.gid for current in items), position)
+            )
+        )
+        self.interface._activateManga(self.items[0])
+        self.assertEqual([(1, (3, 1, 2, 4), 1)], requests)
+
+        self.interface._setMangaPrimaryLabel((1,), "分类 A")
+        QThreadPool.globalInstance().waitForDone(3000)
+        QApplication.processEvents()
+        self.assertEqual(
+            (3, 2), self.repository.custom_sort_gids(category, "__none__")
+        )
+        self.assertEqual(
+            [3, 2, 4],
+            [item.gid for item in self.interface._filtered_items],
+        )
+
+        self.interface._showAllManga()
+        self.assertEqual(
+            ["desc", "asc"],
+            [
+                self.interface.sortCombo.itemData(index)
+                for index in range(self.interface.sortCombo.count())
+            ],
+        )
+        self.assertTrue(self.interface.editSortButton.isHidden())
+
+    def test_custom_sort_dialog_moves_multiple_selected_rows_as_a_group(self):
+        dialog = CustomMangaSortDialog(
+            "未分类", self.items, self.source, self.interface
+        )
+        dialog.listWidget.item(1).setSelected(True)
+        dialog.listWidget.item(2).setSelected(True)
+        dialog.listWidget._setHoverRow(1)
+        dialog.listWidget._setPressedRow(1)
+        self.assertEqual(1, dialog.listWidget.delegate.hoverRow)
+        self.assertEqual(1, dialog.listWidget.delegate.pressedRow)
+        dialog.listWidget.moveSelection(-1)
+
+        self.assertEqual((2, 3, 1), dialog.orderedGids())
+        self.assertFalse(dialog.upButton.isEnabled())
+        self.assertTrue(dialog.downButton.isEnabled())
+
+        dialog.listWidget.moveSelection(1)
+        self.assertEqual((1, 2, 3), dialog.orderedGids())
+        dialog.reject()
+        dialog.deleteLater()
 
     def test_download_refresh_reveals_new_gallery_and_ignores_old_filters(self):
         downloaded = replace(

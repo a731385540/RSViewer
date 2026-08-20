@@ -5,10 +5,10 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from app.common.app_paths import ONLINE_THUMBNAIL_CACHE_DIR
 
-DEFAULT_THUMBNAIL_CACHE_DIR = (
-    Path(__file__).resolve().parents[1] / "cache" / "online_thumbnails"
-)
+
+DEFAULT_THUMBNAIL_CACHE_DIR = ONLINE_THUMBNAIL_CACHE_DIR
 
 
 class OnlineThumbnailCache:

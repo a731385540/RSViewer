@@ -1,7 +1,8 @@
 from enum import Enum
-from pathlib import Path
 
 from qfluentwidgets import StyleSheetBase, Theme, qconfig
+
+from app.common.app_paths import QSS_ROOT
 
 
 class StyleSheet(StyleSheetBase, Enum):
@@ -15,5 +16,4 @@ class StyleSheet(StyleSheetBase, Enum):
 
     def path(self, theme=Theme.AUTO):
         theme = qconfig.theme if theme == Theme.AUTO else theme
-        resource_dir = Path(__file__).resolve().parent.parent / "resource" / "qss"
-        return str(resource_dir / theme.value.lower() / f"{self.value}.qss")
+        return str(QSS_ROOT / theme.value.lower() / f"{self.value}.qss")

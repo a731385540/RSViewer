@@ -1415,6 +1415,23 @@ class OnlineMangaInterface(QWidget):
             self._search_worker = None
         self._cancelCoverLoads()
 
+    def shutdown(self, timeout=3000):
+        """Cancel network work before application-owned pools are destroyed."""
+
+        self._saveActiveState()
+        self.cancelLoad()
+        for provider in tuple(self._site_providers.values()):
+            cancel = getattr(provider, "cancel_pending_requests", None)
+            if cancel is not None:
+                cancel()
+        self.searchThreadPool.clear()
+        self.coverThreadPool.clear()
+        timeout = max(0, int(timeout))
+        first_timeout = timeout // 2
+        search_done = self.searchThreadPool.waitForDone(first_timeout)
+        cover_done = self.coverThreadPool.waitForDone(timeout - first_timeout)
+        return search_done and cover_done
+
     def _pageCacheKey(self, keyword, cursor, seek_date=""):
         return (
             keyword,

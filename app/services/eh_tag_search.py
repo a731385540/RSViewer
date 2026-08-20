@@ -6,6 +6,35 @@ from dataclasses import dataclass
 from typing import Dict, List, Sequence, Tuple
 
 
+DEFAULT_NAMESPACE_ABBREVIATIONS = {
+    "artist": "a",
+    "character": "c",
+    "cosplayer": "cos",
+    "female": "f",
+    "group": "g",
+    "language": "l",
+    "location": "loc",
+    "male": "m",
+    "misc": "misc",
+    "mixed": "x",
+    "other": "o",
+    "parody": "p",
+    "reclass": "r",
+}
+
+
+def exact_tag_query_token(namespace: str, raw_tag: str, abbreviation="") -> str:
+    """Return an EH exact-tag token such as ``l:\"chinese$\"``."""
+    namespace = str(namespace or "").casefold().strip()
+    raw_tag = str(raw_tag or "").strip()
+    if not namespace or not raw_tag:
+        return ""
+    prefix = str(abbreviation or "").casefold().strip()
+    prefix = prefix or DEFAULT_NAMESPACE_ABBREVIATIONS.get(namespace, namespace)
+    escaped_tag = raw_tag.replace("\\", "\\\\").replace('"', '\\"')
+    return f'{prefix}:"{escaped_tag}$"'
+
+
 @dataclass(frozen=True)
 class EhTagSuggestion:
     namespace: str
@@ -75,6 +104,10 @@ class EhTagSearchIndex:
             )
         self._entries = tuple(entries)
         self._namespace_aliases = namespace_aliases
+        self._namespace_abbreviations = {
+            entry.suggestion.namespace: entry.suggestion.abbreviation
+            for entry in self._entries
+        }
         self._translations = {
             (entry.suggestion.namespace, entry.normalized_raw_tag):
                 entry.suggestion.translated_name
@@ -113,6 +146,16 @@ class EhTagSearchIndex:
         )
         return self._translations.get(
             (canonical_namespace, _normalize(raw_tag)), ""
+        )
+
+    def exact_query_token(self, namespace: str, raw_tag: str) -> str:
+        canonical_namespace = self._namespace_aliases.get(
+            _normalize(namespace), str(namespace).casefold().strip()
+        )
+        return exact_tag_query_token(
+            canonical_namespace,
+            raw_tag,
+            self._namespace_abbreviations.get(canonical_namespace, ""),
         )
 
     @property
@@ -176,9 +219,13 @@ class EhTagSearchIndex:
         for token in _split_query_tokens(query):
             if ":" in token:
                 prefix, value = token.split(":", 1)
+                if value.endswith("$"):
+                    value = value[:-1]
                 namespace = self._namespace_aliases.get(_normalize(prefix))
                 if namespace:
                     token = f"{namespace}:{value}"
+                else:
+                    token = f"{prefix}:{value}"
             normalized_token = _normalize(token)
             if normalized_token:
                 terms.append(normalized_token)

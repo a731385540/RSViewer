@@ -73,6 +73,7 @@ from app.domain.online_download import (
 from app.repositories.user_library_repository import UserLibraryRepository
 from app.services.manga_classification_index import MangaClassificationIndex
 from app.sources.ehviewer_source import EhViewerDataSource
+from app.view.custom_manga_sort_dialog import CustomMangaSortDialog
 from app.view.eh_tag_search_line_edit import EhTagSearchLineEdit
 from app.view.gallery_state_indicator import (
     DOWNLOAD_COMPLETE,
@@ -1091,6 +1092,7 @@ class LocalMangaInterface(QWidget):
     folderOpenRequested = Signal(object)
     readingRecordClearRequested = Signal(int)
     categoryChanged = Signal(object)
+    customSortChanged = Signal(object)
 
     def __init__(
         self,
@@ -1130,6 +1132,8 @@ class LocalMangaInterface(QWidget):
         self._selected_gids: Set[int] = set()
         self._label_workers = set()
         self._sort_order = cfg.get(cfg.mangaSortOrder)
+        self._custom_sort_exists_cache = {}
+        self._custom_sort_gids_cache = {}
         self._page = 1
         self._page_size = cfg.get(cfg.mangaPageSize)
         self._last_columns = 0
@@ -1186,10 +1190,11 @@ class LocalMangaInterface(QWidget):
         self.tagButton.clicked.connect(self.toggleClassification)
 
         self.sortCombo = ComboBox(self)
-        self.sortCombo.addItem(self.tr("添加时间：最新优先"), userData="desc")
-        self.sortCombo.addItem(self.tr("添加时间：最早优先"), userData="asc")
-        self.sortCombo.setCurrentIndex(0 if self._sort_order == "desc" else 1)
-        self.sortCombo.setFixedWidth(176)
+        self.sortCombo.setFixedWidth(116)
+        self.editSortButton = ToolButton(FIF.EDIT, self)
+        self.editSortButton.setFixedSize(36, 36)
+        self.editSortButton.setToolTip(self.tr("编辑自定排序"))
+        self.editSortButton.hide()
 
         self.multiSelectCheckBox = CheckBox(self)
         self.multiSelectCheckBox.setText(self.tr("复选"))
@@ -1225,6 +1230,7 @@ class LocalMangaInterface(QWidget):
         header_layout.addWidget(self.selectAllButton)
         header_layout.addWidget(self.multiSelectCheckBox)
         header_layout.addWidget(self.sortCombo)
+        header_layout.addWidget(self.editSortButton)
         header_layout.addWidget(self.layoutSwitch)
         header_layout.addWidget(self.tagButton)
         header_layout.addWidget(self.searchButton)
@@ -1395,6 +1401,7 @@ class LocalMangaInterface(QWidget):
         self.multiSelectCheckBox.toggled.connect(self._onSelectionModeChanged)
         self.selectAllButton.clicked.connect(self._toggleSelectAll)
         self.sortCombo.currentIndexChanged.connect(self._onSortOrderChanged)
+        self.editSortButton.clicked.connect(self._openCustomSortEditor)
         self.pageSizeCombo.currentIndexChanged.connect(self._onPageSizeChanged)
         self.pageSpinBox.valueChanged.connect(self._onPageChanged)
         self.firstPageButton.clicked.connect(lambda: self.setPage(1))
@@ -1408,6 +1415,7 @@ class LocalMangaInterface(QWidget):
             self.resultLabel.setText(self.tr("暂无内容"))
             self._renderCards()
         else:
+            self._refreshSortControls()
             self.reload()
 
     def setSource(self, source: EhViewerDataSource):
@@ -1547,6 +1555,7 @@ class LocalMangaInterface(QWidget):
 
     def reload(self, reveal_gid=None):
         self.cancelLoad()
+        self._invalidateCustomSortCache()
         self._pending_reveal_gid = (
             int(reveal_gid) if reveal_gid is not None else None
         )
@@ -1615,6 +1624,7 @@ class LocalMangaInterface(QWidget):
             self._show_all_manga = True
         else:
             self._show_all_manga = show_all_manga
+        self._refreshSortControls()
         self.applyFilters(reset_page=reveal_gid is not None)
         if reveal_gid is not None:
             for index, item in enumerate(self._filtered_items):
@@ -1699,6 +1709,7 @@ class LocalMangaInterface(QWidget):
         self._clearSimilarSearch(clear_query=True)
         self._show_all_manga = False
         cfg.set(cfg.mangaPrimaryLabelFilter, value)
+        self._refreshSortControls()
         self.applyFilters(reset_page=True)
 
     def _onTaxonomyChanged(self, current, previous=None):
@@ -1708,6 +1719,7 @@ class LocalMangaInterface(QWidget):
         self._clearSimilarSearch(clear_query=True)
         self._show_all_manga = False
         if self._tag_mode == self.TAG_TAXONOMY:
+            self._refreshSortControls()
             self.applyFilters(reset_page=True)
 
     def _setTagMode(self, mode: str, reset_page=True):
@@ -1723,6 +1735,7 @@ class LocalMangaInterface(QWidget):
         }[mode])
         self.sortCombo.setEnabled(True)
         self._updateTitleLabel()
+        self._refreshSortControls()
         if self._all_items:
             self.applyFilters(reset_page=reset_page)
 
@@ -1730,6 +1743,7 @@ class LocalMangaInterface(QWidget):
         self._clearSimilarSearch(clear_query=True)
         self._show_all_manga = True
         self.sortCombo.setEnabled(True)
+        self._refreshSortControls()
         self.applyFilters(reset_page=True)
 
     def _createPrimaryLabel(self):
@@ -1880,8 +1894,15 @@ class LocalMangaInterface(QWidget):
         if not self._confirmDeleteTag(name, descriptions[tag_mode]):
             return
         if tag_mode == self.TAG_CATEGORY:
+            def delete_category():
+                self.source.delete_primary_label(name)
+                self.userRepository.delete_custom_sort(
+                    UserLibraryRepository.CUSTOM_SORT_CATEGORY,
+                    str(value),
+                )
+
             self._startLabelMutation(
-                lambda: self.source.delete_primary_label(name),
+                delete_category,
                 lambda: self._finishDeletePrimaryLabel(name),
             )
         else:
@@ -1901,6 +1922,7 @@ class LocalMangaInterface(QWidget):
         return bool(dialog.exec())
 
     def _finishDeletePrimaryLabel(self, name: str):
+        self._invalidateCustomSortCache()
         target = name.casefold()
         self._primary_labels = [
             label for label in self._primary_labels
@@ -1922,6 +1944,7 @@ class LocalMangaInterface(QWidget):
         self.applyFilters(reset_page=True)
 
     def _refreshTagData(self):
+        self._invalidateCustomSortCache()
         self._taxonomy_labels = self.userRepository.list_taxonomy_labels()
         taxonomy = self.userRepository.taxonomy_for_mangas(
             [item.gid for item in self._all_items]
@@ -1943,6 +1966,7 @@ class LocalMangaInterface(QWidget):
             self._taxonomy_labels,
         )
         self._populateTaxonomy(self._taxonomy_labels)
+        self._refreshSortControls()
         self.applyFilters(reset_page=False)
 
 
@@ -2093,9 +2117,20 @@ class LocalMangaInterface(QWidget):
     def _setMangaPrimaryLabel(self, gids, label_name: str):
         target_gids = tuple(dict.fromkeys(int(gid) for gid in gids))
         normalized_label = label_name.strip()
+        current_labels = {
+            int(item.gid): str(item.primary_label or "").strip()
+            for item in self._all_items
+        }
+        changed_gids = tuple(
+            gid
+            for gid in target_gids
+            if current_labels.get(gid) != normalized_label
+        )
+        if not changed_gids:
+            return
 
         def update_items():
-            target_gid_set = set(target_gids)
+            target_gid_set = set(changed_gids)
             self._all_items = [
                 replace(item, primary_label=normalized_label)
                 if item.gid in target_gid_set else item
@@ -2104,17 +2139,23 @@ class LocalMangaInterface(QWidget):
             for item in self._all_items:
                 if item.gid in target_gid_set:
                     self._classification_index.upsert(item)
+            self._invalidateCustomSortCache()
+            self._refreshSortControls()
             self.applyFilters(reset_page=False)
             for item in self._all_items:
                 if item.gid in target_gid_set:
                     self.categoryChanged.emit(item)
 
-        if normalized_label:
-            operation = lambda: self.source.set_primary_label(
-                target_gids, normalized_label
+        def operation():
+            if normalized_label:
+                self.source.set_primary_label(changed_gids, normalized_label)
+            else:
+                self.source.clear_primary_label(changed_gids)
+            self.userRepository.remove_custom_sort_entries(
+                UserLibraryRepository.CUSTOM_SORT_CATEGORY,
+                changed_gids,
             )
-        else:
-            operation = lambda: self.source.clear_primary_label(target_gids)
+
         self._startLabelMutation(
             operation,
             update_items,
@@ -2179,10 +2220,14 @@ class LocalMangaInterface(QWidget):
             if card.item.gid in target_gids:
                 card.setItem(update(card.item))
 
-    def _startLabelMutation(self, operation, on_success):
+    def _startLabelMutation(
+        self, operation, on_success, emit_library_mutated=True
+    ):
         worker = LabelMutationWorker(operation)
         worker.signals.succeeded.connect(
-            lambda: self._finishLabelMutation(worker, on_success)
+            lambda: self._finishLabelMutation(
+                worker, on_success, emit_library_mutated
+            )
         )
         worker.signals.failed.connect(
             lambda message: self._failLabelMutation(worker, message)
@@ -2190,10 +2235,13 @@ class LocalMangaInterface(QWidget):
         self._label_workers.add(worker)
         QThreadPool.globalInstance().start(worker)
 
-    def _finishLabelMutation(self, worker, on_success):
+    def _finishLabelMutation(
+        self, worker, on_success, emit_library_mutated=True
+    ):
         self._label_workers.discard(worker)
         on_success()
-        self.libraryMutated.emit()
+        if emit_library_mutated:
+            self.libraryMutated.emit()
 
     def _failLabelMutation(self, worker, message: str):
         self._label_workers.discard(worker)
@@ -2343,11 +2391,159 @@ class LocalMangaInterface(QWidget):
 
     def _onSortOrderChanged(self):
         order = self.sortCombo.currentData()
-        if order not in ("desc", "asc"):
+        if order == "add_custom":
+            self._refreshSortControls()
+            QTimer.singleShot(0, self._openCustomSortEditor)
+            return
+        if order not in ("desc", "asc", "custom"):
             return
         self._sort_order = order
         cfg.set(cfg.mangaSortOrder, order)
+        self.editSortButton.setVisible(order == "custom")
         self.applyFilters(reset_page=True)
+
+    def _activeCustomSortScope(self):
+        if self._collection_kind or self._show_all_manga:
+            return None
+        if self._tag_mode == self.TAG_CATEGORY:
+            return (
+                UserLibraryRepository.CUSTOM_SORT_CATEGORY,
+                str(self._primary_label_filter),
+            )
+        if self._taxonomy_filter_id is None:
+            return None
+        return (
+            UserLibraryRepository.CUSTOM_SORT_TAXONOMY,
+            str(int(self._taxonomy_filter_id)),
+        )
+
+    def _customSortExists(self, scope):
+        if scope is None:
+            return False
+        if scope not in self._custom_sort_exists_cache:
+            self._custom_sort_exists_cache[scope] = (
+                self.userRepository.has_custom_sort(*scope)
+            )
+        return self._custom_sort_exists_cache[scope]
+
+    def _customSortGids(self, scope):
+        if scope is None:
+            return ()
+        if scope not in self._custom_sort_gids_cache:
+            self._custom_sort_gids_cache[scope] = (
+                self.userRepository.custom_sort_gids(*scope)
+            )
+        return self._custom_sort_gids_cache[scope]
+
+    def _refreshSortControls(self):
+        if self._collection_kind:
+            return
+        scope = self._activeCustomSortScope()
+        has_custom = self._customSortExists(scope)
+        available = [
+            (self.tr("时间倒序"), "desc"),
+            (self.tr("时间升序"), "asc"),
+        ]
+        if scope is not None:
+            available.append(
+                (self.tr("自定"), "custom")
+                if has_custom
+                else ("+", "add_custom")
+            )
+        effective_order = (
+            self._sort_order
+            if self._sort_order in {value for _text, value in available}
+            else "desc"
+        )
+        self.sortCombo.blockSignals(True)
+        self.sortCombo.clear()
+        for text, value in available:
+            self.sortCombo.addItem(text, userData=value)
+        index = next(
+            (
+                index
+                for index in range(self.sortCombo.count())
+                if self.sortCombo.itemData(index) == effective_order
+            ),
+            0,
+        )
+        self.sortCombo.setCurrentIndex(index)
+        self.sortCombo.blockSignals(False)
+        self.editSortButton.setVisible(effective_order == "custom")
+
+    def _invalidateCustomSortCache(self, scope=None):
+        if scope is None:
+            self._custom_sort_exists_cache.clear()
+            self._custom_sort_gids_cache.clear()
+            return
+        scope = tuple(scope)
+        self._custom_sort_exists_cache.pop(scope, None)
+        self._custom_sort_gids_cache.pop(scope, None)
+
+    def refreshCustomSort(self, scope=None):
+        self._invalidateCustomSortCache(scope)
+        self._refreshSortControls()
+        self.applyFilters(reset_page=False)
+
+    def _sortItems(self, items, order=None):
+        items = list(items)
+        order = str(order or self._sort_order)
+        scope = self._activeCustomSortScope()
+        if order == "custom" and self._customSortExists(scope):
+            positions = {
+                gid: position
+                for position, gid in enumerate(self._customSortGids(scope))
+            }
+            return sorted(
+                items,
+                key=lambda item: (
+                    0 if int(item.gid) in positions else 1,
+                    positions.get(int(item.gid), 0),
+                    -int(item.added_time),
+                    -int(item.gid),
+                ),
+            )
+        return sorted(
+            items,
+            key=lambda item: (item.added_time, item.gid),
+            reverse=order != "asc",
+        )
+
+    def _openCustomSortEditor(self):
+        scope = self._activeCustomSortScope()
+        if scope is None:
+            return
+        active_gids = self._activeTagGids()
+        items = [
+            item for item in self._all_items if int(item.gid) in active_gids
+        ]
+        if self._customSortExists(scope):
+            items = self._sortItems(items, "custom")
+        else:
+            items = self._sortItems(items, "desc")
+        dialog = CustomMangaSortDialog(
+            self.titleLabel.text(), items, self.source, self.window()
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        ordered_gids = dialog.orderedGids()
+
+        def finish():
+            self._custom_sort_exists_cache[scope] = True
+            self._custom_sort_gids_cache[scope] = tuple(ordered_gids)
+            self._sort_order = "custom"
+            cfg.set(cfg.mangaSortOrder, "custom")
+            self._refreshSortControls()
+            self.applyFilters(reset_page=True)
+            self.customSortChanged.emit(scope)
+
+        self._startLabelMutation(
+            lambda: self.userRepository.save_custom_sort(
+                scope[0], scope[1], ordered_gids
+            ),
+            finish,
+            emit_library_mutated=False,
+        )
 
     def toggleSearch(self):
         if self._search_pinned:
@@ -2511,10 +2707,7 @@ class LocalMangaInterface(QWidget):
             if int(item.gid) in active_gids
             and item.matches_terms(query_terms)
         ]
-        self._filtered_items.sort(
-            key=lambda item: (item.added_time, item.gid),
-            reverse=self._sort_order == "desc",
-        )
+        self._filtered_items = self._sortItems(self._filtered_items)
         if reset_page:
             self._page = 1
         self._page = min(max(1, self._page), self.pageCount())
@@ -2660,10 +2853,8 @@ class LocalMangaInterface(QWidget):
         if self._collection_kind or self._show_all_manga:
             return []
         active_gids = self._activeTagGids()
-        return sorted(
-            (item for item in self._all_items if item.gid in active_gids),
-            key=lambda item: (item.added_time, item.gid),
-            reverse=True,
+        return self._sortItems(
+            item for item in self._all_items if item.gid in active_gids
         )
 
     def _activateManga(self, item: MangaItem):

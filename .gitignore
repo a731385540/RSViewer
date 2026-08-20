@@ -13,8 +13,10 @@ venv/
 app/config/config.json
 app/cache/
 app/data/
+/data/
 *.log
 
 build/
 dist/
 *.spec
+!RSViewer.spec

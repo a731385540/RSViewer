@@ -59,6 +59,7 @@ from app.domain.online_gallery import (
     OnlineGalleryPreviewPage,
 )
 from app.repositories.user_library_repository import UserLibraryRepository
+from app.services.eh_tag_search import exact_tag_query_token
 from app.sources.ehviewer_source import EhViewerDataSource
 from app.view.local_manga_interface import CoverLabel
 from app.workers.eh_online_worker import (
@@ -162,6 +163,7 @@ class TagChip(QLabel):
         tone: str,
         parent=None,
         raw_text=None,
+        tag_search_index=None,
     ):
         super().__init__(text, parent)
         raw_tag = str(text if raw_text is None else raw_text)
@@ -170,8 +172,31 @@ class TagChip(QLabel):
         self.setProperty("tagNamespace", namespace)
         self.setProperty("rawTag", raw_tag)
         self.setToolTip(f"{namespace}:{raw_tag}")
+        self._queryToken = (
+            tag_search_index.exact_query_token(namespace, raw_tag)
+            if tag_search_index is not None
+            else exact_tag_query_token(namespace, raw_tag)
+        )
         _enable_text_copy(self)
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._showContextMenu)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+    def queryToken(self):
+        return self._queryToken
+
+    def _buildContextMenu(self):
+        menu = RoundMenu(parent=self)
+        copy_action = QAction(self.tr("复制 Tag"), menu)
+        copy_action.setEnabled(bool(self._queryToken))
+        copy_action.triggered.connect(
+            lambda: QApplication.clipboard().setText(self._queryToken)
+        )
+        menu.addAction(copy_action)
+        return menu
+
+    def _showContextMenu(self, position):
+        self._buildContextMenu().exec(self.mapToGlobal(position))
 
 
 class GalleryQualityBadge(QLabel):
@@ -215,6 +240,7 @@ class TagGroupWidget(QWidget):
                     tone,
                     chip_container,
                     raw_text=value,
+                    tag_search_index=tag_search_index,
                 )
             )
         layout.addWidget(chip_container)
@@ -2223,6 +2249,7 @@ class MangaDetailInterface(QWidget):
                     tone,
                     self.keyTagsWidget,
                     raw_text=value,
+                    tag_search_index=self.tagSearchIndex,
                 )
                 chip.setObjectName("mangaKeyTagChip")
                 labels.append(chip)
@@ -2532,7 +2559,12 @@ class MangaDetailInterface(QWidget):
         self._local_preview_page_workers.clear()
 
     def waitForOnlineLoads(self, timeout=3000):
-        self.onlineThreadPool.waitForDone(timeout)
+        return self.onlineThreadPool.waitForDone(timeout)
+
+    def shutdown(self, timeout=3000):
+        self.cancelLoads()
+        self.onlineThreadPool.clear()
+        return self.waitForOnlineLoads(timeout)
 
     def _setPreviewImage(self, worker, index: int, image):
         if self._preview_worker is not worker:

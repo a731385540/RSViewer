@@ -86,6 +86,49 @@ def _format_download_speed(bytes_per_second):
     return f"{speed:.{precision}f} {unit}"
 
 
+class _DragOnlySlider(Slider):
+    """Fluent slider that changes value only during a left-button drag."""
+
+    dragMoved = Signal(int)
+    dragFinished = Signal()
+
+    def __init__(self, orientation, parent=None):
+        super().__init__(orientation, parent)
+        self._left_button_dragging = False
+        self.handle.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            event.ignore()
+            return
+        self._left_button_dragging = True
+        self.setSliderDown(True)
+        self.setValue(self._posToValue(event.position().toPoint()))
+        self.dragMoved.emit(self.value())
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        if (
+            not self._left_button_dragging
+            or not event.buttons() & Qt.LeftButton
+        ):
+            event.ignore()
+            return
+        self.setValue(self._posToValue(event.position().toPoint()))
+        self.dragMoved.emit(self.value())
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() != Qt.LeftButton or not self._left_button_dragging:
+            event.ignore()
+            return
+        self.setValue(self._posToValue(event.position().toPoint()))
+        self._left_button_dragging = False
+        self.setSliderDown(False)
+        self.dragFinished.emit()
+        event.accept()
+
+
 class ReaderLoadWorker(QRunnable):
     """Decode the current page first, then preload nearby pages."""
 
@@ -271,12 +314,12 @@ class MangaReaderInterface(QWidget):
         self.pageProgressSliderHost.setFixedHeight(24)
         progress_layout = QHBoxLayout(self.pageProgressSliderHost)
         progress_layout.setContentsMargins(28, 2, 28, 0)
-        self.pageProgressSlider = Slider(
+        self.pageProgressSlider = _DragOnlySlider(
             Qt.Horizontal, self.pageProgressSliderHost
         )
         self.pageProgressSlider.setRange(1, 1)
-        self.pageProgressSlider.sliderMoved.connect(self._scrubToPage)
-        self.pageProgressSlider.sliderReleased.connect(
+        self.pageProgressSlider.dragMoved.connect(self._scrubToPage)
+        self.pageProgressSlider.dragFinished.connect(
             self._finishProgressScrub
         )
         self.pageProgressSlider.hide()

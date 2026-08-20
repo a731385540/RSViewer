@@ -144,6 +144,15 @@ class ReadingProgressTests(unittest.TestCase):
                 "SELECT name FROM sqlite_master "
                 "WHERE type = 'table' AND name = 'latest_similar_search'"
             ).fetchone()
+            custom_sort_tables = {
+                row[0]
+                for row in connection.execute(
+                    """
+                    SELECT name FROM sqlite_master
+                    WHERE type = 'table' AND name LIKE 'manga_custom_sort_%'
+                    """
+                )
+            }
         self.assertEqual(UserLibraryRepository.SCHEMA_VERSION, version)
         self.assertIn("download_mode", download_columns)
         self.assertEqual(("gallery_original_states",), original_table)
@@ -155,6 +164,67 @@ class ReadingProgressTests(unittest.TestCase):
             {"completed", "cleared", "started"}.issubset(progress_columns)
         )
         self.assertEqual(("latest_similar_search",), similar_table)
+        self.assertEqual(
+            {"manga_custom_sort_rules", "manga_custom_sort_entries"},
+            custom_sort_tables,
+        )
+
+    def test_category_and_taxonomy_custom_orders_survive_membership_changes(self):
+        category = UserLibraryRepository.CUSTOM_SORT_CATEGORY
+        taxonomy = UserLibraryRepository.CUSTOM_SORT_TAXONOMY
+        self.repository.save_custom_sort(category, "分类 A", (30, 10, 20))
+        root_id = self.repository.create_taxonomy_label("作者")
+        child_id = self.repository.create_taxonomy_label("系列", root_id)
+        self.repository.assign_taxonomy_to_mangas((10, 20), child_id)
+        self.repository.save_custom_sort(taxonomy, root_id, (20, 10))
+        self.repository.save_custom_sort(taxonomy, child_id, ())
+
+        self.assertTrue(self.repository.has_custom_sort(category, "分类 a"))
+        self.assertEqual(
+            (30, 10, 20),
+            self.repository.custom_sort_gids(category, "分类 A"),
+        )
+        self.assertTrue(self.repository.has_custom_sort(taxonomy, child_id))
+        self.assertEqual((), self.repository.custom_sort_gids(taxonomy, child_id))
+
+        self.repository.unassign_taxonomy_from_mangas((10,), child_id)
+        self.assertEqual(
+            (20,), self.repository.custom_sort_gids(taxonomy, root_id)
+        )
+        self.repository.promote_gallery_gid(20, 21)
+        self.assertEqual(
+            (21,), self.repository.custom_sort_gids(taxonomy, root_id)
+        )
+        self.repository.remove_custom_sort_entries(category, (10,))
+        self.assertEqual(
+            (30, 21), self.repository.custom_sort_gids(category, "分类 A")
+        )
+        self.repository.purge_gallery(30)
+        self.assertEqual(
+            (21,), self.repository.custom_sort_gids(category, "分类 A")
+        )
+        self.repository.delete_taxonomy_label(root_id)
+        self.assertFalse(self.repository.has_custom_sort(taxonomy, root_id))
+        self.assertFalse(self.repository.has_custom_sort(taxonomy, child_id))
+
+    def test_parent_custom_order_survives_overlapping_child_membership(self):
+        taxonomy = UserLibraryRepository.CUSTOM_SORT_TAXONOMY
+        root_id = self.repository.create_taxonomy_label("作者")
+        first_child_id = self.repository.create_taxonomy_label("短篇", root_id)
+        second_child_id = self.repository.create_taxonomy_label("长篇", root_id)
+        self.repository.assign_taxonomy_to_mangas((10, 20), first_child_id)
+        self.repository.save_custom_sort(taxonomy, root_id, (10, 20))
+
+        self.repository.assign_taxonomy_to_mangas((10,), second_child_id)
+        self.repository.unassign_taxonomy_from_mangas((10,), first_child_id)
+        self.assertEqual(
+            (10, 20), self.repository.custom_sort_gids(taxonomy, root_id)
+        )
+
+        self.repository.unassign_taxonomy_from_mangas((10,), second_child_id)
+        self.assertEqual(
+            (20,), self.repository.custom_sort_gids(taxonomy, root_id)
+        )
 
     def test_v21_migration_distinguishes_default_sidecar_page_from_reading(self):
         with closing(sqlite3.connect(str(self.repository.database_path))) as connection:
@@ -617,10 +687,34 @@ class ReadingProgressTests(unittest.TestCase):
             {"Alice", "Bob", "full color", "chinese"},
             {chip.property("rawTag") for chip in chips},
         )
+        self.assertEqual(
+            {
+                'a:"Alice$"',
+                'a:"Bob$"',
+                'f:"full color$"',
+                'l:"chinese$"',
+            },
+            {chip.queryToken() for chip in chips},
+        )
+        language_chip = next(
+            chip for chip in chips if chip.property("rawTag") == "chinese"
+        )
+        tag_menu = language_chip._buildContextMenu()
+        self.assertEqual(
+            ["复制 Tag"],
+            [action.text() for action in tag_menu.menuActions()],
+        )
+        QApplication.clipboard().clear()
+        tag_menu.menuActions()[0].trigger()
+        self.assertEqual('l:"chinese$"', QApplication.clipboard().text())
         key_chips = detail.findChildren(QLabel, "mangaKeyTagChip")
         self.assertEqual(
             {"作者：爱丽丝", "作者：Bob", "语言：汉语"},
             {chip.text() for chip in key_chips},
+        )
+        self.assertEqual(
+            {'a:"Alice$"', 'a:"Bob$"', 'l:"chinese$"'},
+            {chip.queryToken() for chip in key_chips},
         )
         self.assertEqual(
             ["artist", "language", "female"],

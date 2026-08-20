@@ -1,7 +1,6 @@
 # coding:utf-8
 import sys
 from enum import Enum
-from pathlib import Path
 
 from PySide6.QtCore import QLocale
 from qfluentwidgets import (
@@ -15,6 +14,8 @@ from qfluentwidgets import (
     QConfig,
     qconfig,
 )
+
+from app.common.app_paths import CONFIG_PATH, prepare_config_path
 
 
 class Language(Enum):
@@ -49,7 +50,10 @@ class Config(QConfig):
     mangaPageSize = OptionsConfigItem(
         "Library", "MangaPageSize", 40, OptionsValidator([20, 40, 60, 100]))
     mangaSortOrder = OptionsConfigItem(
-        "Library", "MangaSortOrder", "desc", OptionsValidator(["desc", "asc"])
+        "Library",
+        "MangaSortOrder",
+        "desc",
+        OptionsValidator(["desc", "asc", "custom"]),
     )
     mangaPrimaryLabelFilter = ConfigItem(
         "Library", "MangaPrimaryLabelFilter", "__none__"
@@ -144,6 +148,8 @@ class Config(QConfig):
         "MainWindow", "Language", Language.AUTO, OptionsValidator(Language), LanguageSerializer(), restart=True)
 
 cfg = Config()
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-CONFIG_PATH = PROJECT_ROOT / "app" / "config" / "config.json"
+prepare_config_path()
+config_exists = CONFIG_PATH.is_file()
 qconfig.load(str(CONFIG_PATH), cfg)
+if not config_exists:
+    cfg.save()

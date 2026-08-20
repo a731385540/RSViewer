@@ -183,7 +183,7 @@ class SimilarGalleryBrowserWindow(FluentWindow):
         self.stack.setCurrentWidget(self.detail)
 
     def closeEvent(self, event):
-        self.detail.cancelLoads()
+        self.detail.shutdown(1500)
         super().closeEvent(event)
 
     def resizeEvent(self, event):

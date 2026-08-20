@@ -24,7 +24,9 @@ from app.repositories.ehviewer_schema import ensure_ehviewer_schema
 class UserLibraryRepository:
     """RSViewer's complete application and local-gallery database."""
 
-    SCHEMA_VERSION = 22
+    SCHEMA_VERSION = 23
+    CUSTOM_SORT_CATEGORY = "category"
+    CUSTOM_SORT_TAXONOMY = "taxonomy"
 
     def __init__(self, database_path: Path):
         self.database_path = Path(database_path).resolve()
@@ -534,6 +536,145 @@ class UserLibraryRepository:
                         """
                     )
                 connection.execute("PRAGMA user_version = 22")
+            if version < 23:
+                connection.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS manga_custom_sort_rules (
+                        scope_type TEXT NOT NULL,
+                        scope_key TEXT NOT NULL COLLATE NOCASE,
+                        updated_at INTEGER NOT NULL,
+                        PRIMARY KEY(scope_type, scope_key),
+                        CHECK(scope_type IN ('category', 'taxonomy'))
+                    );
+
+                    CREATE TABLE IF NOT EXISTS manga_custom_sort_entries (
+                        scope_type TEXT NOT NULL,
+                        scope_key TEXT NOT NULL COLLATE NOCASE,
+                        gid INTEGER NOT NULL,
+                        position INTEGER NOT NULL CHECK(position >= 0),
+                        PRIMARY KEY(scope_type, scope_key, gid),
+                        UNIQUE(scope_type, scope_key, position),
+                        FOREIGN KEY(scope_type, scope_key)
+                            REFERENCES manga_custom_sort_rules(scope_type, scope_key)
+                            ON DELETE CASCADE
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_manga_custom_sort_entries_gid
+                        ON manga_custom_sort_entries(gid);
+                    """
+                )
+                connection.execute("PRAGMA user_version = 23")
+
+    @classmethod
+    def _custom_sort_scope(cls, scope_type, scope_key):
+        scope_type = str(scope_type or "").strip().casefold()
+        if scope_type not in {
+            cls.CUSTOM_SORT_CATEGORY,
+            cls.CUSTOM_SORT_TAXONOMY,
+        }:
+            raise ValueError("未知的自定义排序作用域")
+        if scope_type == cls.CUSTOM_SORT_TAXONOMY:
+            scope_key = str(int(scope_key))
+        else:
+            scope_key = str(scope_key or "").strip()
+            if not scope_key:
+                raise ValueError("分类排序作用域不能为空")
+        return scope_type, scope_key
+
+    def has_custom_sort(self, scope_type, scope_key) -> bool:
+        self.initialize()
+        scope_type, scope_key = self._custom_sort_scope(scope_type, scope_key)
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM manga_custom_sort_rules
+                WHERE scope_type = ? AND scope_key = ? COLLATE NOCASE
+                LIMIT 1
+                """,
+                (scope_type, scope_key),
+            ).fetchone()
+        return row is not None
+
+    def custom_sort_gids(self, scope_type, scope_key) -> Tuple[int, ...]:
+        self.initialize()
+        scope_type, scope_key = self._custom_sort_scope(scope_type, scope_key)
+        with self._connect() as connection:
+            return tuple(
+                int(row[0])
+                for row in connection.execute(
+                    """
+                    SELECT gid FROM manga_custom_sort_entries
+                    WHERE scope_type = ? AND scope_key = ? COLLATE NOCASE
+                    ORDER BY position, gid
+                    """,
+                    (scope_type, scope_key),
+                )
+            )
+
+    def save_custom_sort(self, scope_type, scope_key, gids: Sequence[int]):
+        self.initialize()
+        scope_type, scope_key = self._custom_sort_scope(scope_type, scope_key)
+        ordered_gids = tuple(dict.fromkeys(int(gid) for gid in gids))
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO manga_custom_sort_rules(scope_type, scope_key, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(scope_type, scope_key) DO UPDATE SET
+                    updated_at = excluded.updated_at
+                """,
+                (scope_type, scope_key, time.time_ns()),
+            )
+            connection.execute(
+                """
+                DELETE FROM manga_custom_sort_entries
+                WHERE scope_type = ? AND scope_key = ? COLLATE NOCASE
+                """,
+                (scope_type, scope_key),
+            )
+            connection.executemany(
+                """
+                INSERT INTO manga_custom_sort_entries(
+                    scope_type, scope_key, gid, position
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    (scope_type, scope_key, gid, position)
+                    for position, gid in enumerate(ordered_gids)
+                ),
+            )
+
+    def delete_custom_sort(self, scope_type, scope_key):
+        self.initialize()
+        scope_type, scope_key = self._custom_sort_scope(scope_type, scope_key)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                DELETE FROM manga_custom_sort_rules
+                WHERE scope_type = ? AND scope_key = ? COLLATE NOCASE
+                """,
+                (scope_type, scope_key),
+            )
+
+    def remove_custom_sort_entries(self, scope_type, gids: Sequence[int]):
+        self.initialize()
+        scope_type = str(scope_type or "").strip().casefold()
+        if scope_type not in {
+            self.CUSTOM_SORT_CATEGORY,
+            self.CUSTOM_SORT_TAXONOMY,
+        }:
+            raise ValueError("未知的自定义排序作用域")
+        target_gids = tuple(dict.fromkeys(int(gid) for gid in gids))
+        if not target_gids:
+            return
+        with self._connect() as connection:
+            connection.executemany(
+                """
+                DELETE FROM manga_custom_sort_entries
+                WHERE scope_type = ? AND gid = ?
+                """,
+                ((scope_type, gid) for gid in target_gids),
+            )
 
     def list_labels(self) -> List[Tuple[int, str, int]]:
         self.initialize()
@@ -830,6 +971,28 @@ class UserLibraryRepository:
         """Delete a taxonomy node; foreign keys cascade its subtree and links."""
         self.initialize()
         with self._connect() as connection:
+            descendant_ids = tuple(
+                int(row[0])
+                for row in connection.execute(
+                    """
+                    WITH RECURSIVE descendants(id) AS (
+                        SELECT id FROM taxonomy_labels WHERE id = ?
+                        UNION ALL
+                        SELECT labels.id FROM taxonomy_labels AS labels
+                        JOIN descendants ON labels.parent_id = descendants.id
+                    )
+                    SELECT id FROM descendants
+                    """,
+                    (int(label_id),),
+                )
+            )
+            connection.executemany(
+                """
+                DELETE FROM manga_custom_sort_rules
+                WHERE scope_type = 'taxonomy' AND scope_key = ?
+                """,
+                ((str(current_id),) for current_id in descendant_ids),
+            )
             connection.execute(
                 "DELETE FROM taxonomy_labels WHERE id = ?",
                 (int(label_id),),
@@ -862,6 +1025,9 @@ class UserLibraryRepository:
         self.initialize()
         target_gids = tuple(dict.fromkeys(int(gid) for gid in gids))
         with self._connect() as connection:
+            self._invalidate_taxonomy_sort_entries_for_absent_memberships(
+                connection, target_gids, (int(label_id),)
+            )
             connection.executemany(
                 """
                 INSERT OR IGNORE INTO manga_taxonomy_labels(gid, label_id)
@@ -881,6 +1047,77 @@ class UserLibraryRepository:
                 """,
                 ((gid, int(label_id)) for gid in target_gids),
             )
+            self._invalidate_taxonomy_sort_entries_for_absent_memberships(
+                connection, target_gids, (int(label_id),)
+            )
+
+    @staticmethod
+    def _invalidate_taxonomy_sort_entries_for_absent_memberships(
+        connection, gids, label_ids
+    ):
+        gids = tuple(dict.fromkeys(int(gid) for gid in gids))
+        label_ids = tuple(dict.fromkeys(int(label_id) for label_id in label_ids))
+        if not gids or not label_ids:
+            return
+        placeholders = ",".join("?" for _ in label_ids)
+        ancestor_ids = tuple(
+            int(row[0])
+            for row in connection.execute(
+                f"""
+                WITH RECURSIVE ancestors(id, parent_id) AS (
+                    SELECT id, parent_id FROM taxonomy_labels
+                    WHERE id IN ({placeholders})
+                    UNION
+                    SELECT labels.id, labels.parent_id
+                    FROM taxonomy_labels AS labels
+                    JOIN ancestors ON ancestors.parent_id = labels.id
+                )
+                SELECT DISTINCT id FROM ancestors
+                """,
+                label_ids,
+            )
+        )
+        if not ancestor_ids:
+            return
+        absent_memberships = []
+        ancestor_placeholders = ",".join("?" for _ in ancestor_ids)
+        for offset in range(0, len(gids), 500):
+            gid_batch = gids[offset:offset + 500]
+            gid_placeholders = ",".join("?" for _ in gid_batch)
+            existing_memberships = {
+                (int(root_id), int(gid))
+                for root_id, gid in connection.execute(
+                    f"""
+                    WITH RECURSIVE descendants(root_id, id) AS (
+                        SELECT id, id FROM taxonomy_labels
+                        WHERE id IN ({ancestor_placeholders})
+                        UNION ALL
+                        SELECT descendants.root_id, labels.id
+                        FROM taxonomy_labels AS labels
+                        JOIN descendants ON labels.parent_id = descendants.id
+                    )
+                    SELECT DISTINCT descendants.root_id, assignments.gid
+                    FROM descendants
+                    JOIN manga_taxonomy_labels AS assignments
+                        ON assignments.label_id = descendants.id
+                    WHERE assignments.gid IN ({gid_placeholders})
+                    """,
+                    (*ancestor_ids, *gid_batch),
+                )
+            }
+            absent_memberships.extend(
+                (str(ancestor_id), gid)
+                for ancestor_id in ancestor_ids
+                for gid in gid_batch
+                if (ancestor_id, gid) not in existing_memberships
+            )
+        connection.executemany(
+            """
+            DELETE FROM manga_custom_sort_entries
+            WHERE scope_type = 'taxonomy' AND scope_key = ? AND gid = ?
+            """,
+            absent_memberships,
+        )
 
     def primary_labels_for_mangas(self, gids: Sequence[int]) -> Dict[int, str]:
         self.initialize()
@@ -1503,6 +1740,7 @@ class UserLibraryRepository:
                 ("gallery_original_states", "gid"),
                 ("online_gallery_downloads", "gid"),
                 ("gallery_sync_records", "gid"),
+                ("manga_custom_sort_entries", "gid"),
             ):
                 connection.execute(
                     f"DELETE FROM {table} WHERE {column} = ?", (gid,)
@@ -1702,6 +1940,47 @@ class UserLibraryRepository:
         if source_gid == target_gid:
             return
         with self._connect() as connection:
+            custom_sort_scopes = connection.execute(
+                """
+                SELECT DISTINCT scope_type, scope_key
+                FROM manga_custom_sort_entries WHERE gid = ?
+                """,
+                (source_gid,),
+            ).fetchall()
+            for scope_type, scope_key in custom_sort_scopes:
+                ordered_gids = [
+                    int(row[0])
+                    for row in connection.execute(
+                        """
+                        SELECT gid FROM manga_custom_sort_entries
+                        WHERE scope_type = ? AND scope_key = ? COLLATE NOCASE
+                        ORDER BY position, gid
+                        """,
+                        (scope_type, scope_key),
+                    )
+                ]
+                ordered_gids = list(dict.fromkeys(
+                    target_gid if gid == source_gid else gid
+                    for gid in ordered_gids
+                ))
+                connection.execute(
+                    """
+                    DELETE FROM manga_custom_sort_entries
+                    WHERE scope_type = ? AND scope_key = ? COLLATE NOCASE
+                    """,
+                    (scope_type, scope_key),
+                )
+                connection.executemany(
+                    """
+                    INSERT INTO manga_custom_sort_entries(
+                        scope_type, scope_key, gid, position
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        (scope_type, scope_key, gid, position)
+                        for position, gid in enumerate(ordered_gids)
+                    ),
+                )
             for table, extra_columns in (
                 ("manga_multi_labels", "label_id, sort_order, added_at"),
                 ("manga_taxonomy_labels", "label_id"),

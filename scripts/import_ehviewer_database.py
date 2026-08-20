@@ -18,7 +18,7 @@ def parse_args():
     parser.add_argument(
         "--database",
         type=Path,
-        default=PROJECT_ROOT / "app" / "data" / "rsviewer.db",
+        default=PROJECT_ROOT / "data" / "rsviewer.db",
         help="RSViewer database path",
     )
     parser.add_argument(
