@@ -319,12 +319,15 @@ class GalleryUpdateWorker(QRunnable):
         previews = {
             int(preview.page_index): preview
             for preview in detail.previews
-            if preview.page_token
+            if preview.page_token and 0 <= int(preview.page_index) < total
         }
+        # EH/EX may return 20 or 40 previews per response depending on the
+        # account setting. Fetch response pages in order instead of assuming
+        # that one response always maps to a fixed 20-index block.
         page_count = max(1, math.ceil(total / 20))
         for page_number in range(1, page_count + 1):
-            if all(index in previews for index in range((page_number - 1) * 20, min(total, page_number * 20))):
-                continue
+            if len(previews) >= total:
+                break
             page = self.gallery_cache.get_preview_page(
                 self.record.site, detail.gallery, page_number
             )
@@ -334,10 +337,14 @@ class GalleryUpdateWorker(QRunnable):
                 )
                 self.gallery_cache.put_preview_page(self.record.site, page)
             for preview in page.items:
-                if preview.page_token:
-                    previews[int(preview.page_index)] = preview
-        if set(previews).intersection(range(total)) != set(range(total)):
-            raise ValueError("最新画廊页面 ID 不完整")
+                index = int(preview.page_index)
+                if preview.page_token and 0 <= index < total:
+                    previews[index] = preview
+        missing = set(range(total)).difference(previews)
+        if missing:
+            raise ValueError(
+                f"最新画廊页面 ID 不完整，缺少 {len(missing)} 页"
+            )
         return tuple(previews[index].page_token for index in range(total))
 
     def _tag_source_files(self, source_sidecar):

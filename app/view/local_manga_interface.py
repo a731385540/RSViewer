@@ -2962,7 +2962,7 @@ class LocalMangaInterface(QWidget):
             layout_item = self.contentLayout.takeAt(0)
             widget = layout_item.widget()
             if widget is not None:
-                widget.setParent(None)
+                widget.hide()
                 widget.deleteLater()
         for column in range(self._last_columns):
             self.contentLayout.setColumnStretch(column, 0)

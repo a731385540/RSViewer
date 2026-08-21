@@ -128,6 +128,7 @@ class MainWindow(FluentWindow):
         )
         self._closing = False
         self._sharedLibrarySignature = None
+        self._suppressNextLibrarySnapshot = False
         self.initWindow()
         self.themeListener = SystemThemeListener(self)
 
@@ -239,6 +240,13 @@ class MainWindow(FluentWindow):
         self.progressSaveTimer.setSingleShot(True)
         self.progressSaveTimer.setInterval(180)
         self.progressSaveTimer.timeout.connect(self._flushReadingProgress)
+        self._downloadActivityPublishPending = False
+        self.downloadActivityTimer = QTimer(self)
+        self.downloadActivityTimer.setSingleShot(True)
+        self.downloadActivityTimer.setInterval(500)
+        self.downloadActivityTimer.timeout.connect(
+            self._flushDownloadActivityRefresh
+        )
         self._readerWasMaximized = False
         self._readingSequenceContext = None
         self._readingSequencePageWorker = None
@@ -431,12 +439,12 @@ class MainWindow(FluentWindow):
             self,
         )
         self.searchShortcut = QShortcut(self)
-        self.searchShortcut.setContext(Qt.ApplicationShortcut)
+        self.searchShortcut.setContext(Qt.WindowShortcut)
         self._updateSearchShortcut(cfg.get(cfg.searchShortcut))
         self.searchShortcut.activated.connect(self.openLocalMangaSearch)
         cfg.searchShortcut.valueChanged.connect(self._updateSearchShortcut)
         self.tagSidebarShortcut = QShortcut(self)
-        self.tagSidebarShortcut.setContext(Qt.ApplicationShortcut)
+        self.tagSidebarShortcut.setContext(Qt.WindowShortcut)
         self._updateTagSidebarShortcut(cfg.get(cfg.tagSidebarShortcut))
         self.tagSidebarShortcut.activated.connect(self.toggleLocalMangaTags)
         cfg.tagSidebarShortcut.valueChanged.connect(
@@ -607,9 +615,9 @@ class MainWindow(FluentWindow):
             self._applyLocalGalleryItem(payload, publish=False)
         elif scope == "library_snapshot":
             if payload != self._sharedLibrarySignature:
-                self.localMangaInterface.reload()
+                self._reloadLocalLibraryFromSharedState()
         elif scope == "library_refresh":
-            self.localMangaInterface.reload()
+            self._reloadLocalLibraryFromSharedState()
         elif scope == "custom_sort":
             self.localMangaInterface.refreshCustomSort(payload)
         elif scope == "favorites":
@@ -636,6 +644,9 @@ class MainWindow(FluentWindow):
             item = self.mangaDetailInterface.currentItem
             if item is not None:
                 self._syncLocalDownloadState(item, publish=False)
+        elif scope == "download_activity":
+            self._refreshDownloadActivity(publish=False)
+            self._syncVisibleDownloadTelemetry()
         elif scope == "updates":
             self._refreshUpdateManager(publish=False)
             item = self.mangaDetailInterface.currentItem
@@ -647,11 +658,24 @@ class MainWindow(FluentWindow):
         elif scope == "trash":
             action, gids = payload
             self.refreshRecycleBin()
-            self.localMangaInterface.reload()
+            self._reloadLocalLibraryFromSharedState()
             if action in {GalleryTrashWorker.TRASH, GalleryTrashWorker.DELETE}:
                 self._leaveDeletedGallery(gids)
         elif scope == "source":
+            self._suppressNextLibrarySnapshot = True
             self.reloadMangaSource(publish=False)
+
+    def _reloadLocalLibraryFromSharedState(self):
+        self._suppressNextLibrarySnapshot = True
+        self.localMangaInterface.reload()
+
+    def _publishLibrarySnapshot(self):
+        if self._suppressNextLibrarySnapshot:
+            self._suppressNextLibrarySnapshot = False
+            return
+        self._publishSharedState(
+            "library_snapshot", self._sharedLibrarySignature
+        )
 
     def openMangaHome(self):
         self._clearOnlineSearchReturn()
@@ -669,6 +693,11 @@ class MainWindow(FluentWindow):
                 setter(False)
 
     def _onOnlineSearchPageChanged(self, _index):
+        if (
+            self.stackedWidget.currentWidget() is self.downloadManagerInterface
+            and hasattr(self, "userLibraryRepository")
+        ):
+            self._refreshDownloadManager(publish=False)
         if getattr(self, "_onlineSearchReturnState", None) is None:
             return
         current = self.stackedWidget.currentWidget()
@@ -1156,9 +1185,7 @@ class MainWindow(FluentWindow):
             tuple(self._libraryItems),
             repr(tag_metadata),
         )
-        self._publishSharedState(
-            "library_snapshot", self._sharedLibrarySignature
-        )
+        self._publishLibrarySnapshot()
 
     def _loadLocalGalleryItem(self, gid, folder=None):
         repository = getattr(self, "userLibraryRepository", None)
@@ -3439,7 +3466,7 @@ class MainWindow(FluentWindow):
         self._setCurrentDownloadState(
             gid, "downloading", completed, total, message
         )
-        self._refreshDownloadManager()
+        self._scheduleDownloadActivityRefresh()
 
     def _updateOnlineDownloadProgress(self, worker, gid, completed, total):
         if self._onlineDownloadWorkers.get(int(gid)) is not worker:
@@ -3447,7 +3474,7 @@ class MainWindow(FluentWindow):
         self._setCurrentDownloadState(
             gid, "downloading", completed, total
         )
-        self._refreshDownloadManager()
+        self._scheduleDownloadActivityRefresh()
 
     def _updateOnlineDownloadSpeed(self, worker, gid, speed):
         gid = int(gid)
@@ -3457,29 +3484,20 @@ class MainWindow(FluentWindow):
         if speed <= 0:
             return
         self._onlineDownloadSpeeds[gid] = speed
-        record = self.userLibraryRepository.online_gallery_download(gid)
-        if record is not None:
-            self.mangaReaderInterface.setDownloadState(
-                gid,
-                "downloading",
-                record.completed_pages,
-                record.page_count,
-                self._onlineDownloadSpeeds[gid],
-            )
-        self._refreshDownloadManager()
+        self._scheduleDownloadActivityRefresh()
 
     def _registerDownloadedGallery(self, worker, gid, folder):
         gid = int(gid)
         if self._onlineDownloadWorkers.get(gid) is not worker:
             return
         self.onlineMangaInterface.setGalleryDownloaded(gid)
-        if not self._refreshLocalGalleryItem(gid, folder):
-            self.localMangaInterface.reload()
+        self._refreshLocalGalleryItem(gid, folder)
 
-    def _refreshPreparedLocalGallery(self, worker, gid, _folder):
+    def _refreshPreparedLocalGallery(self, worker, gid, folder):
         gid = int(gid)
         if self._onlineDownloadWorkers.get(gid) is not worker:
             return
+        self._refreshLocalGalleryItem(gid, folder)
         item = self.mangaDetailInterface.currentItem
         if item is None or int(item.gid) != gid:
             return
@@ -3826,6 +3844,64 @@ class MainWindow(FluentWindow):
         self._syncOnlineGalleryDownloadMarkers(records)
         if publish:
             self._publishSharedState("downloads")
+
+    def _downloadManagerIsVisible(self):
+        stacked = getattr(self, "stackedWidget", None)
+        interface = getattr(self, "downloadManagerInterface", None)
+        return (
+            stacked is None
+            or interface is None
+            or stacked.currentWidget() is interface
+        )
+
+    def _scheduleDownloadActivityRefresh(self, publish=True):
+        timer = getattr(self, "downloadActivityTimer", None)
+        if timer is None:
+            self._refreshDownloadActivity(publish=publish)
+            self._syncVisibleDownloadTelemetry()
+            return
+        self._downloadActivityPublishPending = bool(
+            getattr(self, "_downloadActivityPublishPending", False)
+            or publish
+        )
+        if not timer.isActive():
+            timer.start()
+
+    def _flushDownloadActivityRefresh(self):
+        publish = bool(self._downloadActivityPublishPending)
+        self._downloadActivityPublishPending = False
+        self._refreshDownloadActivity(publish=publish)
+        self._syncVisibleDownloadTelemetry()
+
+    def _refreshDownloadActivity(self, publish=True):
+        if self._downloadManagerIsVisible():
+            active_gids, speeds = self._activeDownloadState()
+            records = (
+                self.userLibraryRepository.incomplete_online_gallery_downloads()
+            )
+            self.downloadManagerInterface.setRecords(
+                records,
+                active_gids,
+                speeds,
+            )
+        if publish:
+            self._publishSharedState("download_activity")
+
+    def _syncVisibleDownloadTelemetry(self):
+        stacked = getattr(self, "stackedWidget", None)
+        if stacked is not None:
+            current = stacked.currentWidget()
+            if (
+                current is not self.mangaDetailInterface
+                and current is not self.mangaReaderInterface
+            ):
+                return
+        item = self.mangaDetailInterface.currentItem
+        detail = self.mangaDetailInterface.currentOnlineDetail
+        if item is not None:
+            self._syncCurrentDownload(item.gid)
+        elif detail is not None:
+            self._syncCurrentDownload(detail.gallery.gid)
 
     def _syncOnlineGalleryDownloadMarkers(self, incomplete_records=None):
         if incomplete_records is None:
@@ -4259,6 +4335,10 @@ class MainWindow(FluentWindow):
         if isinstance(watched, QWidget) and watched.window() is not self:
             return super().eventFilter(watched, event)
 
+        if event.type() in {QEvent.MouseButtonPress, QEvent.KeyPress}:
+            if not self._isActiveShortcutWindow():
+                return super().eventFilter(watched, event)
+
         if event.type() == QEvent.MouseButtonPress and event.button() == Qt.BackButton:
             if self.navigateBack():
                 return True
@@ -4279,6 +4359,10 @@ class MainWindow(FluentWindow):
                 return True
 
         return super().eventFilter(watched, event)
+
+    def _isActiveShortcutWindow(self):
+        active = QApplication.activeWindow()
+        return active is self or (active is None and self.isActiveWindow())
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -4310,6 +4394,7 @@ class MainWindow(FluentWindow):
         self.mangaDetailInterface.shutdown(2000)
         self.mangaReaderInterface.deactivate()
         self.progressSaveTimer.stop()
+        self.downloadActivityTimer.stop()
         self._flushReadingProgress()
         for pool in (
             self.progressThreadPool,

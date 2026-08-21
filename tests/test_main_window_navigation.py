@@ -10,8 +10,8 @@ from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QByteArray, QBuffer, QIODevice
-from PySide6.QtGui import QColor, QImage
+from PySide6.QtCore import QByteArray, QBuffer, QEvent, QIODevice, Qt
+from PySide6.QtGui import QColor, QImage, QKeyEvent, QKeySequence
 from PySide6.QtWidgets import QApplication, QWidget
 from PySide6.QtTest import QTest
 from qfluentwidgets import FluentWindow
@@ -842,6 +842,7 @@ class MainWindowNavigationTests(unittest.TestCase):
         reloads = []
         downloaded = []
         refreshed_items = []
+        refreshed_local = []
         synced = []
         item = SimpleNamespace(gid=gid)
         window._onlineDownloadWorkers = {gid: worker}
@@ -856,17 +857,23 @@ class MainWindowNavigationTests(unittest.TestCase):
             setManga=refreshed_items.append,
         )
         window._syncCurrentDownload = synced.append
+        window._refreshLocalGalleryItem = (
+            lambda target_gid, folder=None: refreshed_local.append(
+                (target_gid, folder)
+            ) or False
+        )
 
         window._registerDownloadedGallery(worker, gid, "folder")
         window._refreshPreparedLocalGallery(worker, gid, "folder")
 
         self.assertEqual([gid], downloaded)
-        self.assertEqual([True], reloads)
+        self.assertEqual([], reloads)
+        self.assertEqual([(gid, "folder"), (gid, "folder")], refreshed_local)
         self.assertEqual([item], refreshed_items)
         self.assertEqual([gid], synced)
 
         window._registerDownloadedGallery(object(), gid, "folder")
-        self.assertEqual([True], reloads)
+        self.assertEqual([], reloads)
 
     def test_download_completion_updates_one_gallery_without_revealing_or_reloading(self):
         gid = 4120990
@@ -1089,6 +1096,93 @@ class MainWindowNavigationTests(unittest.TestCase):
         self.assertEqual(2 * 1024 * 1024, window._onlineDownloadSpeeds[42])
         repository.online_gallery_download.assert_not_called()
         window._refreshDownloadManager.assert_not_called()
+
+    def test_download_speed_uses_coalesced_activity_refresh(self):
+        worker = object()
+        scheduled = MagicMock()
+        window = SimpleNamespace(
+            _onlineDownloadWorkers={42: worker},
+            _onlineDownloadSpeeds={},
+            _scheduleDownloadActivityRefresh=scheduled,
+        )
+
+        MainWindow._updateOnlineDownloadSpeed(window, worker, 42, 1024)
+
+        self.assertEqual(1024, window._onlineDownloadSpeeds[42])
+        scheduled.assert_called_once_with()
+
+    def test_hidden_download_manager_skips_telemetry_database_query(self):
+        repository = MagicMock()
+        published = []
+        window = SimpleNamespace(
+            _downloadManagerIsVisible=lambda: False,
+            userLibraryRepository=repository,
+            _publishSharedState=lambda *args: published.append(args),
+        )
+
+        MainWindow._refreshDownloadActivity(window)
+
+        repository.incomplete_online_gallery_downloads.assert_not_called()
+        self.assertEqual([("download_activity",)], published)
+
+    def test_resource_page_skips_hidden_detail_download_telemetry(self):
+        detail_interface = SimpleNamespace(
+            currentItem=SimpleNamespace(gid=42),
+            currentOnlineDetail=None,
+        )
+        reader_interface = object()
+        resource_page = object()
+        window = SimpleNamespace(
+            stackedWidget=SimpleNamespace(
+                currentWidget=lambda: resource_page
+            ),
+            mangaDetailInterface=detail_interface,
+            mangaReaderInterface=reader_interface,
+            _syncCurrentDownload=MagicMock(),
+        )
+
+        MainWindow._syncVisibleDownloadTelemetry(window)
+
+        window._syncCurrentDownload.assert_not_called()
+
+    def test_shared_library_reload_does_not_echo_snapshot(self):
+        reload_library = MagicMock()
+        publish = MagicMock()
+        window = SimpleNamespace(
+            _suppressNextLibrarySnapshot=False,
+            _sharedLibrarySignature=("current",),
+            localMangaInterface=SimpleNamespace(reload=reload_library),
+            _publishSharedState=publish,
+        )
+
+        MainWindow._reloadLocalLibraryFromSharedState(window)
+        MainWindow._publishLibrarySnapshot(window)
+
+        reload_library.assert_called_once_with()
+        publish.assert_not_called()
+        self.assertFalse(window._suppressNextLibrarySnapshot)
+
+        MainWindow._publishLibrarySnapshot(window)
+        publish.assert_called_once_with(
+            "library_snapshot", ("current",)
+        )
+
+    def test_inactive_window_does_not_consume_back_shortcut(self):
+        other = QWidget()
+        self.window._backKeySequence = QKeySequence("Backspace")
+        self.window.navigateBack = MagicMock(return_value=True)
+        event = QKeyEvent(
+            QEvent.KeyPress,
+            Qt.Key_Backspace,
+            Qt.NoModifier,
+        )
+
+        with patch.object(QApplication, "activeWindow", return_value=other):
+            consumed = self.window.eventFilter(self.window, event)
+
+        self.assertFalse(consumed)
+        self.window.navigateBack.assert_not_called()
+        other.deleteLater()
 
 
 if __name__ == "__main__":

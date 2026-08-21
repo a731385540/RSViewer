@@ -1879,14 +1879,26 @@ class MangaDetailInterface(QWidget):
     def _previewPageCount(self, item=None) -> int:
         if self._online_detail is not None:
             total = int(self._online_detail.page_count)
+            page_size = self._onlinePreviewPageSize(self._online_detail)
             return max(
                 1,
-                (total + self.ONLINE_PREVIEW_PAGE_SIZE - 1)
-                // self.ONLINE_PREVIEW_PAGE_SIZE,
+                (total + page_size - 1) // page_size,
             )
         current_item = item or self._item
         total = self._localPreviewTotal(current_item)
         return max(1, (total + self.PREVIEW_PAGE_SIZE - 1) // self.PREVIEW_PAGE_SIZE)
+
+    def _onlinePreviewPageSize(self, detail=None):
+        detail = detail or self._online_detail or self._local_online_detail
+        if detail is None:
+            return self.ONLINE_PREVIEW_PAGE_SIZE
+        return max(
+            1,
+            int(
+                getattr(detail.gallery, "preview_page_size", 0)
+                or self.ONLINE_PREVIEW_PAGE_SIZE
+            ),
+        )
 
     def _setPreviewPage(self, page: int):
         if self._online_detail is not None:
@@ -2453,7 +2465,10 @@ class MangaDetailInterface(QWidget):
         provider = self._local_online_provider
         cache = self._local_online_cache
         site = provider.settings.site
-        page_numbers = sorted({index // self.ONLINE_PREVIEW_PAGE_SIZE + 1 for index in missing_indexes})
+        page_size = self._onlinePreviewPageSize(detail)
+        page_numbers = sorted(
+            {index // page_size + 1 for index in missing_indexes}
+        )
         for page_number in page_numbers:
             page = cache.get_preview_page(site, detail.gallery, page_number)
             if page is not None:

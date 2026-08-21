@@ -125,6 +125,15 @@ class LocalLibraryControlsTests(unittest.TestCase):
     def test_original_pending_border_uses_dark_yellow(self):
         self.assertEqual("#B8860B", ORIGINAL_PENDING_BORDER_COLOR)
 
+    def test_card_cleanup_hides_widgets_without_making_top_level_windows(self):
+        card = self.interface._cards[0]
+        card.show()
+
+        self.interface._clearContentLayout()
+
+        self.assertFalse(card.isVisible())
+        self.assertIs(self.interface.scrollWidget, card.parentWidget())
+
     def test_card_states_distinguish_download_and_permanent_reading_status(self):
         incomplete = replace(
             self.items[0],

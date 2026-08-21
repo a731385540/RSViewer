@@ -385,7 +385,13 @@ class RefactoredEhOnlineProvider(EhOnlineProvider):
     def load_gallery_preview_page(self, gallery, page_number, should_cancel=None):
         self._validate_gallery_url(gallery)
         page_number = int(page_number)
-        page_count = max(1, (int(gallery.page_count) + 19) // 20)
+        page_size = max(
+            1, int(getattr(gallery, "preview_page_size", 0) or 20)
+        )
+        page_count = max(
+            1,
+            (int(gallery.page_count) + page_size - 1) // page_size,
+        )
         if not 1 <= page_number <= page_count:
             raise EhOnlineError("画廊预览页码超出范围")
         url = gallery.url if page_number == 1 else f"{gallery.url}?p={page_number - 1}"
@@ -838,6 +844,13 @@ class RefactoredEhOnlineProvider(EhOnlineProvider):
             ):
                 continue
             newer_gallery_urls.append(candidate)
+        previews = cls._parse_gallery_previews(gallery, soup)
+        preview_page_size = max(
+            (int(preview.page_index) + 1 for preview in previews),
+            default=max(
+                0, int(getattr(gallery, "preview_page_size", 0) or 0)
+            ),
+        )
         enriched_gallery = replace(
             gallery,
             title=title,
@@ -847,6 +860,7 @@ class RefactoredEhOnlineProvider(EhOnlineProvider):
             tags=resolved_tags,
             uploader=uploader,
             rating=resolved_rating,
+            preview_page_size=preview_page_size,
         )
 
         return OnlineGalleryDetail(
@@ -868,7 +882,7 @@ class RefactoredEhOnlineProvider(EhOnlineProvider):
             rating_count=rating_count,
             tags=resolved_tags,
             comments=comments,
-            previews=cls._parse_gallery_previews(enriched_gallery, soup),
+            previews=previews,
         )
 
     @classmethod

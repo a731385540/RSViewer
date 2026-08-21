@@ -18,6 +18,7 @@ class OnlineGallery:
     uploader: str = ""
     rating: Optional[float] = None
     source_mode: str = ""
+    preview_page_size: int = 0
 
 
 @dataclass(frozen=True)

@@ -564,6 +564,7 @@ class EhOnlineProviderContractTests(unittest.TestCase):
         self.assertTrue(detail.comments[1].is_uploader)
         self.assertEqual("https://ehgt.org/cover.webp", detail.cover_url)
         self.assertEqual(1, len(detail.previews))
+        self.assertEqual(1, detail.gallery.preview_page_size)
         self.assertEqual(0, detail.previews[0].page_index)
         self.assertEqual("pagetoken", detail.previews[0].page_token)
         self.assertEqual("https://a.hath.network/thumb.webp", detail.previews[0].thumbnail_url)
@@ -695,6 +696,50 @@ class EhOnlineProviderContractTests(unittest.TestCase):
         )
         with self.assertRaises(OriginalImageUnavailableError):
             provider.load_gallery_page_original(gallery, page.items[0])
+
+    def test_preview_pagination_uses_gallery_response_capacity(self):
+        provider = RefactoredEhOnlineProvider(
+            EhOnlineSettings.create(proxy_mode="direct")
+        )
+        gallery = OnlineGallery(
+            123,
+            "abc",
+            "https://e-hentai.org/g/123/abc/",
+            "Gallery",
+            page_count=151,
+            preview_page_size=40,
+        )
+        html = b"""
+        <div id="gdt"><a href="https://e-hentai.org/s/token/123-121">
+          <div title="Page 121: 121.jpg"></div>
+        </a></div>
+        """
+
+        class FakeResponse:
+            ok = True
+            status_code = 200
+            content = html
+
+        class FakeRequest:
+            def __init__(self):
+                self.urls = []
+
+            def get(self, url):
+                self.urls.append(url)
+                return FakeResponse()
+
+        provider._crawler = SimpleNamespace(req=FakeRequest())
+
+        page = provider.load_gallery_preview_page(gallery, 4)
+
+        self.assertEqual(4, page.page_count)
+        self.assertEqual(120, page.items[0].page_index)
+        self.assertEqual(
+            ["https://e-hentai.org/g/123/abc/?p=3"],
+            provider._crawler.req.urls,
+        )
+        with self.assertRaises(EhOnlineError):
+            provider.load_gallery_preview_page(gallery, 5)
 
 
 if __name__ == "__main__":

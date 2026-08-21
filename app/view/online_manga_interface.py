@@ -920,10 +920,13 @@ class OnlineMangaInterface(QWidget):
             card.setDownloaded(card.item.gid in downloaded_gids)
 
     def setGalleryStates(self, states):
-        self._gallery_states = {
+        normalized = {
             int(gid): tuple(values)
             for gid, values in dict(states).items()
         }
+        if normalized == self._gallery_states:
+            return
+        self._gallery_states = normalized
         self.setDownloadedGids(self._gallery_states)
         for card in self._cards:
             card.setGalleryStates(

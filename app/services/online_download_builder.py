@@ -22,6 +22,13 @@ CATEGORY_NAMES = {
 }
 
 
+def _metadata_preview_page_size(metadata):
+    try:
+        return max(0, int(metadata.get("preview_page_size") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def online_detail_metadata(detail, download_label=None):
     metadata = {
         "url": detail.gallery.url,
@@ -39,6 +46,9 @@ def online_detail_metadata(detail, download_label=None):
         "rating": detail.rating,
         "rating_count": detail.rating_count,
         "tags": list(detail.tags),
+        "preview_page_size": max(
+            0, int(detail.gallery.preview_page_size or 0)
+        ),
     }
     if download_label is not None:
         metadata["download_label"] = str(download_label or "")
@@ -93,6 +103,7 @@ def build_online_gallery_from_download_record(record):
         tags=tuple(str(tag) for tag in raw_tags if str(tag)),
         uploader=str(metadata.get("uploader") or ""),
         rating=rating,
+        preview_page_size=_metadata_preview_page_size(metadata),
     )
 
 
@@ -140,6 +151,7 @@ def build_online_gallery_from_local(
             float(metadata["rating"])
             if metadata.get("rating") is not None else item.rating
         ),
+        preview_page_size=_metadata_preview_page_size(metadata),
     )
 
 

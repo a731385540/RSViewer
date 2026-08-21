@@ -96,6 +96,30 @@ class ReadingProgressTests(unittest.TestCase):
             pages.append(path)
         return pages
 
+    def test_online_preview_page_count_uses_actual_response_capacity(self):
+        detail_widget = MangaDetailInterface(
+            EhViewerDataSource(self.root / "unused.db", self.root),
+            self.repository,
+        )
+        gallery = OnlineGallery(
+            123,
+            "token",
+            "https://e-hentai.org/g/123/token/",
+            "Gallery",
+            page_count=151,
+            preview_page_size=40,
+        )
+        detail_widget._online_detail = OnlineGalleryDetail(
+            gallery=gallery,
+            title="Gallery",
+            page_count=151,
+        )
+
+        self.assertEqual(4, detail_widget._previewPageCount())
+
+        detail_widget.close()
+        detail_widget.deleteLater()
+
     def test_schema_migrates_and_saves_progress(self):
         with closing(sqlite3.connect(str(self.repository.database_path))) as connection:
             connection.execute("PRAGMA user_version = 1")

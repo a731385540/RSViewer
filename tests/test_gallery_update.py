@@ -22,6 +22,7 @@ from app.domain.online_gallery import (
     OnlineGallery,
     OnlineGalleryDetail,
     OnlineGalleryPreview,
+    OnlineGalleryPreviewPage,
 )
 from app.repositories.ehviewer_download_repository import EhViewerDownloadRepository
 from app.repositories.gallery_update_state_repository import GalleryUpdateStateRepository
@@ -236,6 +237,68 @@ class GalleryUpdateTests(unittest.TestCase):
         self.assertEqual([(200,)], gids)
         self.assertEqual([(200,)], dirname_gid)
         self.assertGreater(updated_time, 123)
+
+    def test_page_token_collection_supports_forty_preview_items_per_page(self):
+        total = 151
+        tokens = tuple(f"{index + 1:010x}" for index in range(total))
+        gallery = replace(self.latest_gallery, page_count=total)
+
+        def preview(index):
+            token = tokens[index]
+            return OnlineGalleryPreview(
+                page_index=index,
+                page_url=(
+                    f"https://exhentai.org/s/{token}/"
+                    f"{gallery.gid}-{index + 1}"
+                ),
+                page_token=token,
+            )
+
+        detail = replace(
+            self.latest_detail,
+            gallery=gallery,
+            page_count=total,
+            previews=tuple(preview(index) for index in range(40)),
+        )
+
+        class FortyPreviewProvider(UpdateProvider):
+            def __init__(self):
+                super().__init__(detail, {})
+                self.preview_calls = []
+
+            def load_gallery_preview_page(self, current_gallery, page_number):
+                self.preview_calls.append(int(page_number))
+                start = (int(page_number) - 1) * 40
+                items = tuple(
+                    preview(index)
+                    for index in range(start, min(total, start + 40))
+                )
+                return OnlineGalleryPreviewPage(
+                    gallery=current_gallery,
+                    page_number=int(page_number),
+                    page_count=4,
+                    items=items,
+                )
+
+        provider = FortyPreviewProvider()
+        record = GalleryUpdateRecord(
+            source_gid=100,
+            source_token="abcdef1234",
+            site="exhentai",
+            title="Old",
+            folder=str(self.folder),
+            latest_url=gallery.url,
+        )
+        worker = GalleryUpdateWorker(
+            record,
+            provider,
+            OnlineGalleryMemoryCache(),
+            self.external_repository,
+            self.user_repository,
+        )
+
+        self.assertEqual(tokens, worker._collect_page_tokens(detail))
+        self.assertEqual([1, 2, 3, 4], provider.preview_calls)
 
     def test_delete_update_record_preserves_folder_checkpoint(self):
         record = GalleryUpdateRecord(
