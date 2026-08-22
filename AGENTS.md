@@ -44,6 +44,8 @@ RSViewer/
 ├─ README.md                         # 用户向项目简介与启动说明
 ├─ eh_tool_refactored.py             # 用户提供的 EH/EX HTML 列表页抓取与解析实现
 ├─ requirements.txt                 # 直接运行依赖
+├─ requirements-build.txt           # 一键构建使用的运行与 PyInstaller 依赖
+├─ build_exe.cmd                    # Windows 双击一键构建入口
 ├─ RSViewer.spec                    # PyInstaller 单文件构建配置与 QSS 数据收集
 ├─ scripts/import_ehviewer_database.py # 只读导入旧 eh.db 到自有 SQLite
 ├─ scripts/import_eh_tags.py         # EH 标签翻译 Markdown 到自有 SQLite 的幂等导入脚本
@@ -188,7 +190,7 @@ RSViewer 自有 SQLite 使用 `PRAGMA user_version` 执行可重复迁移。版�
 3. 在页面初始化、对象名设置完成后调用 `.apply(self)`。
 4. 实际验证两种主题；避免用内联 QSS 固定文字颜色或背景色。
 
-PyInstaller 构建必须使用仓库根目录的 `RSViewer.spec`。自定义样式保持文件形式并由 spec 将完整 `app/resource/qss` 目录复制到 bundle 内的同一相对位置，使 `StyleSheet.path()` 在源码运行与 `_MEIPASS` 解包环境中使用相同路径。新增 QSS 不需要逐文件登记，但不得把 spec 的 `datas` 恢复为空。`data` 及旧迁移来源 `app/data`、`app/config/config.json`、`app/cache` 都不得作为构建数据打入 exe；冻结环境的可写状态必须消费 `app_paths.py` 提供的 exe 同级 `data` 路径。新增任何可写资源时必须接入该路径层，禁止从业务模块的 `__file__` 或 `_MEIPASS` 派生。
+PyInstaller 构建必须使用仓库根目录的 `RSViewer.spec`；用户双击 `build_exe.cmd` 时由 `scripts/build_exe.ps1` 检查或创建 `.venv`、补齐 `requirements-build.txt` 后调用该 spec。自定义样式和应用图标保持文件形式，并由 spec 将完整 `app/resource/qss` 与 `app/resource/icons` 目录复制到 bundle 内的同一相对位置，使源码运行与 `_MEIPASS` 解包环境使用相同路径；Windows exe 图标使用同目录的 `rsviewer.ico`。新增 QSS 不需要逐文件登记，但不得把 spec 的 `datas` 恢复为空。`data` 及旧迁移来源 `app/data`、`app/config/config.json`、`app/cache` 都不得作为构建数据打入 exe；冻结环境的可写状态必须消费 `app_paths.py` 提供的 exe 同级 `data` 路径。新增任何可写资源时必须接入该路径层，禁止从业务模块的 `__file__` 或 `_MEIPASS` 派生。
 
 ### `app/view/main_window.py`
 

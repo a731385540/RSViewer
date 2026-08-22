@@ -5,12 +5,17 @@ from pathlib import Path
 
 project_root = Path(SPECPATH).resolve()
 qss_root = project_root / "app" / "resource" / "qss"
+icon_root = project_root / "app" / "resource" / "icons"
+icon_path = icon_root / "rsviewer.ico"
 
 a = Analysis(
     [str(project_root / "main.py")],
     pathex=[str(project_root)],
     binaries=[],
-    datas=[(str(qss_root), "app/resource/qss")],
+    datas=[
+        (str(qss_root), "app/resource/qss"),
+        (str(icon_root), "app/resource/icons"),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -40,4 +45,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=str(icon_path),
 )

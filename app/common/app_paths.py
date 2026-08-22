@@ -21,6 +21,7 @@ class ApplicationPaths:
     database_path: Path
     online_thumbnail_cache_dir: Path
     qss_root: Path
+    app_icon_path: Path
     legacy_config_paths: tuple
     legacy_database_paths: tuple
 
@@ -76,6 +77,7 @@ def resolve_application_paths(
         database_path=data_root / "rsviewer.db",
         online_thumbnail_cache_dir=data_root / "cache" / "online_thumbnails",
         qss_root=bundle_root / "app" / "resource" / "qss",
+        app_icon_path=bundle_root / "app" / "resource" / "icons" / "rsviewer.png",
         legacy_config_paths=tuple(legacy_config_paths),
         legacy_database_paths=tuple(legacy_database_paths),
     )
@@ -124,3 +126,4 @@ CONFIG_PATH = PATHS.config_path
 DATABASE_PATH = PATHS.database_path
 ONLINE_THUMBNAIL_CACHE_DIR = PATHS.online_thumbnail_cache_dir
 QSS_ROOT = PATHS.qss_root
+APP_ICON_PATH = PATHS.app_icon_path

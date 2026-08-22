@@ -33,14 +33,20 @@ python main.py
 
 ## Windows 打包
 
-安装 PyInstaller 后使用仓库提供的 spec 构建单文件桌面程序：
+直接双击仓库根目录的 `build_exe.cmd` 即可一键构建。脚本会复用 `.venv`；首次缺少环境时自动创建虚拟环境并安装 `requirements-build.txt` 中的运行与构建依赖，然后使用项目唯一的 `RSViewer.spec` 构建：
+
+```powershell
+.\build_exe.cmd
+```
+
+也可以在已经安装 PyInstaller 的环境中手动构建：
 
 ```powershell
 pip install pyinstaller
 pyinstaller --noconfirm --clean RSViewer.spec
 ```
 
-产物位于 `dist/RSViewer.exe`。`RSViewer.spec` 会把 `app/resource/qss` 的 light/dark 样式目录完整复制到 PyInstaller 运行目录；不要使用 `pyi-makespec main.py` 生成的默认空 `datas` 配置直接构建，否则详情、在线资源和设置页样式无法打开。
+产物位于 `dist/RSViewer.exe`。`RSViewer.spec` 会嵌入 RSViewer 图标，并把 `app/resource/qss` 的 light/dark 样式与 `app/resource/icons` 完整复制到 PyInstaller 运行目录；不要使用 `pyi-makespec main.py` 生成的默认空 `datas` 配置直接构建，否则详情、在线资源和设置页样式或窗口图标无法打开。
 
 单文件 exe 解包到 `_MEI...` 的内容只用于读取资源。可写状态统一保存在 exe 同级的 `data` 目录：`config.json` 是设置，`rsviewer.db` 是画廊索引及用户状态，`cache/online_thumbnails` 是可删除的在线封面缓存。源码运行使用项目根目录下相同的 `data` 结构；路径不受启动时当前工作目录影响。缺少配置或数据库时会自动生成默认文件；若目标文件尚不存在，程序会优先迁移旧版项目内 `app/config`、`app/data` 或 `%LOCALAPPDATA%\RSViewer` 中的现有数据，且不会覆盖已经存在的新文件。移动 exe 时应连同 `data` 目录一起移动。
 
@@ -110,6 +116,7 @@ E-Hentai 与 ExHentai 的列表没有稳定数字页码，因此在线资源不�
 - 常见视频格式的管理与播放
 - RSViewer 自有 SQLite 媒体索引，以及按需导入/导出 EhViewer v7 `eh.db`
 - 本地缩略图缓存
+- 可选 MySQL 同步后端：SQLite 继续作为离线可用的本地主库，仅同步适合跨设备共享的元数据；具体同步协议和冲突策略待定
 
 ## 第三方组件
 

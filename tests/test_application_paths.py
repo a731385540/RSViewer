@@ -26,6 +26,10 @@ class ApplicationPathsTests(unittest.TestCase):
             paths.qss_root,
         )
         self.assertEqual(
+            project_root.resolve() / "app" / "resource" / "icons" / "rsviewer.png",
+            paths.app_icon_path,
+        )
+        self.assertEqual(
             (project_root.resolve() / "app" / "config" / "config.json",),
             paths.legacy_config_paths,
         )
@@ -49,6 +53,10 @@ class ApplicationPathsTests(unittest.TestCase):
         self.assertEqual(
             bundle_root.resolve() / "app" / "resource" / "qss",
             paths.qss_root,
+        )
+        self.assertEqual(
+            bundle_root.resolve() / "app" / "resource" / "icons" / "rsviewer.png",
+            paths.app_icon_path,
         )
         self.assertEqual(data_root / "config.json", paths.config_path)
         self.assertEqual(data_root / "rsviewer.db", paths.database_path)

@@ -6,6 +6,10 @@
 
 ### Added
 
+- 新增根目录 `build_exe.cmd` 一键打包入口：首次运行可自动创建 `.venv` 并安装独立构建依赖，随后始终使用受维护的 `RSViewer.spec` 输出 `dist/RSViewer.exe`。
+- 新增 RSViewer 应用图标，统一用于源码窗口、启动 Splash 和 PyInstaller 可执行文件；图标资源随 QSS 一起从只读 bundle 加载，不写入运行时 `data`。
+- 将“SQLite 作为离线本地主库、MySQL 仅同步可共享元数据”的双库方案记录为待定项，具体同步协议与冲突策略暂不实现。
+
 - 在线资源新增 NHC（nhentai.com）与 NHN（nhentai.net）来源：使用独立 `requests.Session` 请求列表，NHC/NHN 首页与 NHN 搜索结果由 BeautifulSoup+lxml 本地解析 HTML；NHC 搜索复用当前站点前端的同域数据请求。两站支持关键词、Tag 搜索、数字分页、元数据详情、页面预览、在线阅读和基础图断点下载；站点没有独立原图规格，因此不显示原图下载入口。EH/EXH/NHC/NHN 使用单选来源切换，各自保留页面状态。
 - NHC 预览与阅读严格消费详情接口返回的 `thumbnail_url` / `source_url`，NHN 从详情页缩略节点进入 `/g/{id}/{page}/` 并解析 `#image-container`；图片地址均限制到对应 HTTPS CDN。NH 下载使用独立的稳定本地 ID 与 `gallery_sources` 远程编号映射，避免同号 EH GID 冲突，不生成 EH 专用 `.ehviewer` sidecar。
 - 设置页新增互相隔离的 NHC Cookie 与 NHN Cookie 密码输入项；在线搜索统一保存完整 `namespace:value` 并继续兼容已有缩写。EH/EXH 请求转为缩写；NHN 保留完整 namespace 及 `female:`/`male:`；NHC 按实际 `tag:`、`artist:`、`group:` 等分组解析站点筛选 ID。
@@ -264,6 +268,7 @@
 
 ### Validation
 
+- `scripts/build_exe.ps1` 实际单文件构建通过，生成约 101 MiB 的 `dist/RSViewer.exe`；Windows 可提取 32px 关联图标，PyInstaller 归档包含多尺寸 ICO、PNG/SVG 源图和 light/dark QSS。`python -m compileall`、路径专项测试、PowerShell 语法检查、`git diff --check` 及 274 项完整测试通过。
 - `.venv\Scripts\pyinstaller.exe --noconfirm --clean RSViewer.spec`：PyInstaller 6.22.2 单文件构建成功生成 `dist/RSViewer.exe`。隔离目录首次启动自动生成 `data/config.json` 与 schema v22 的 `data/rsviewer.db`，第二次启动保留已修改配置；关闭真实主窗口后 onefile 父子进程均退出，exe 可立即改名，数据库 `PRAGMA integrity_check` 为 `ok`。源码 `compileall`、`git diff --check` 与 238 项完整测试通过。
 - `.venv\Scripts\python.exe -m unittest discover -s tests -v`：215 项测试全部通过；新增服务器响应游标导航、本地筛选标题、画廊任务排队、共享页面线程、速度显示稳定性及归类增量创建测试，覆盖日期定位双向翻页、在线列表无数字页码、分类/播放列表/多级归类标题、归类单窗口表单、空节点免全量刷新、目标漫画增量分配、画廊并发设为 1 时其余任务排队、单画廊占用多条页面线程、并发原图回退 checkpoint、并发暂停收束及零速度不覆盖最近有效值。`compileall`、Qt 离屏界面测试与 `git diff --check` 通过。
 

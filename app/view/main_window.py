@@ -470,7 +470,7 @@ class MainWindow(FluentWindow):
     def initWindow(self):
         self.resize(960, 780)
         self.setMinimumWidth(760)
-        self.setWindowIcon(FIF.PHOTO.icon())
+        self.setWindowIcon(QApplication.instance().windowIcon())
         self.setWindowTitle("RSViewer")
         self.setAttribute(Qt.WA_DeleteOnClose, True)
 
