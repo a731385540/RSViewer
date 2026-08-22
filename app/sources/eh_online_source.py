@@ -13,6 +13,7 @@ from bs4 import BeautifulSoup
 from eh_tool_refactored import EhData
 
 from app.domain.online_gallery import (
+    gallery_preview_page_count,
     OnlineGallery,
     OnlineGalleryComment,
     OnlineGalleryDetail,
@@ -385,13 +386,7 @@ class RefactoredEhOnlineProvider(EhOnlineProvider):
     def load_gallery_preview_page(self, gallery, page_number, should_cancel=None):
         self._validate_gallery_url(gallery)
         page_number = int(page_number)
-        page_size = max(
-            1, int(getattr(gallery, "preview_page_size", 0) or 20)
-        )
-        page_count = max(
-            1,
-            (int(gallery.page_count) + page_size - 1) // page_size,
-        )
+        page_count = gallery_preview_page_count(gallery)
         if not 1 <= page_number <= page_count:
             raise EhOnlineError("画廊预览页码超出范围")
         url = gallery.url if page_number == 1 else f"{gallery.url}?p={page_number - 1}"

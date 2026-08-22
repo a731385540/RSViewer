@@ -1,4 +1,3 @@
-import math
 import inspect
 import os
 import time
@@ -29,7 +28,11 @@ from app.domain.online_download import (
     ORIGINAL_PAGE_MODE_ORIGINAL,
     normalize_original_page_modes,
 )
-from app.domain.online_gallery import OnlineGalleryPreviewPage
+from app.domain.online_gallery import (
+    OnlineGalleryPreviewPage,
+    gallery_preview_page_count,
+    gallery_preview_page_number,
+)
 from app.repositories.ehviewer_download_repository import (
     EH_STATE_FAILED,
     EH_STATE_FINISHED,
@@ -662,10 +665,14 @@ class OnlineGalleryDownloadWorker(QRunnable):
         }
         if set(existing) == set(range(page_count)):
             return existing
-        preview_pages = max(1, math.ceil(page_count / 20))
+        preview_pages = gallery_preview_page_count(
+            self.detail.gallery, page_count
+        )
         previews = {}
         for page_number in range(1, preview_pages + 1):
             self._check_cancelled()
+            if len(previews) >= page_count:
+                break
             page = self.gallery_cache.get_preview_page(
                 self.site, self.detail.gallery, page_number
             )
@@ -926,7 +933,9 @@ class LocalGalleryPageDownloadWorker(QRunnable):
                 None,
             )
             if preview is None:
-                page_number = self.page_index // 20 + 1
+                page_number = gallery_preview_page_number(
+                    self.detail.gallery, self.page_index
+                )
                 preview_page = self.gallery_cache.get_preview_page(
                     self.site, self.detail.gallery, page_number
                 )

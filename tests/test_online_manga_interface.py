@@ -2,7 +2,7 @@ import base64
 import os
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -307,6 +307,19 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
         self.assertFalse(interface._cards[0].downloadedBadge.isHidden())
         interface.setGalleryDownloaded(2, False)
         self.assertTrue(interface._cards[1].downloadedBadge.isHidden())
+        interface.setGalleryStates({1: ("none", "partial")})
+        self.assertTrue(interface._cards[0].downloadedBadge.isHidden())
+
+        first, second = interface._cards
+        first.setDownloaded = MagicMock()
+        first.setGalleryStates = MagicMock()
+        second.setDownloaded = MagicMock()
+        second.setGalleryStates = MagicMock()
+        interface.setGalleryState(1, "complete", "partial")
+        first.setDownloaded.assert_called_once_with(True)
+        first.setGalleryStates.assert_called_once_with("complete", "partial")
+        second.setDownloaded.assert_not_called()
+        second.setGalleryStates.assert_not_called()
         interface.deleteLater()
 
     def test_card_click_opens_internal_detail_with_current_provider(self):

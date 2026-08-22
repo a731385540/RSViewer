@@ -349,6 +349,7 @@ class ReadingProgressTests(unittest.TestCase):
                 lambda *_args: None,
                 lambda *_args: None,
                 lambda *_args: None,
+                lambda *_args: calls.append("first-sync"),
             )
             browser.bindActions(
                 second_owner,
@@ -356,9 +357,14 @@ class ReadingProgressTests(unittest.TestCase):
                 lambda *_args: None,
                 lambda *_args: None,
                 lambda *_args: None,
+                lambda *_args: calls.append("second-sync"),
             )
         browser.readRequested.emit(first, 0)
-        self.assertEqual(["second-read"], calls)
+        browser.detail.localMetadataSyncRequested.emit(second)
+        self.assertEqual(["second-read", "second-sync"], calls)
+        updated_second = replace(second, english_title="Updated result")
+        self.assertTrue(browser.upsertItem(updated_second))
+        self.assertEqual(updated_second, browser._items[30])
         self.assertFalse(
             any(issubclass(entry.category, RuntimeWarning) for entry in captured)
         )

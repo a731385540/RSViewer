@@ -4,6 +4,7 @@ from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QObject, QRunnable, S
 from PySide6.QtGui import QImage
 
 from app.domain.online_download import GallerySyncRecord
+from app.domain.online_gallery import gallery_preview_page_number
 from app.services.online_download_builder import online_detail_metadata
 
 
@@ -367,7 +368,9 @@ class OnlineReaderLoadWorker(QRunnable):
                         )
                         data = None
                     if data is None:
-                        preview_page_number = index // 20 + 1
+                        preview_page_number = gallery_preview_page_number(
+                            self.gallery, index
+                        )
                         preview_page = self.cache.get_preview_page(
                             self.site, self.gallery, preview_page_number
                         )

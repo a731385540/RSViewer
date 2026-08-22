@@ -2,6 +2,36 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Tuple
 
 
+DEFAULT_PREVIEW_PAGE_SIZE = 20
+
+
+def gallery_preview_page_size(gallery) -> int:
+    return max(
+        1,
+        int(
+            getattr(gallery, "preview_page_size", 0)
+            or DEFAULT_PREVIEW_PAGE_SIZE
+        ),
+    )
+
+
+def gallery_preview_page_count(gallery, page_count=None) -> int:
+    total = max(
+        0,
+        int(
+            getattr(gallery, "page_count", 0)
+            if page_count is None
+            else page_count
+        ),
+    )
+    page_size = gallery_preview_page_size(gallery)
+    return max(1, (total + page_size - 1) // page_size)
+
+
+def gallery_preview_page_number(gallery, page_index) -> int:
+    return max(0, int(page_index)) // gallery_preview_page_size(gallery) + 1
+
+
 @dataclass(frozen=True)
 class OnlineGallery:
     """Metadata exposed by an E-Hentai compatible gallery list."""

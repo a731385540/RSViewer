@@ -31,6 +31,7 @@ from app.domain.online_gallery import (
     OnlineGalleryDetail,
     OnlineGalleryLink,
     OnlineGalleryPreview,
+    OnlineGalleryPreviewPage,
 )
 from app.repositories.ehviewer_download_repository import EhViewerDownloadRepository
 from app.repositories.user_library_repository import UserLibraryRepository
@@ -521,6 +522,7 @@ class OnlineGalleryDownloadTests(unittest.TestCase):
             existing_folder=folder,
             retry_count=1,
         )
+
         worker.run()
 
         original = self.user_repository.gallery_original_state(4120989)
@@ -563,6 +565,62 @@ class OnlineGalleryDownloadTests(unittest.TestCase):
             3, len(tuple((folder / "history" / "del").glob("*.jpg")))
         )
         self.assertFalse((folder / "original").exists())
+
+    def test_preview_tokens_use_actual_forty_item_response_capacity(self):
+        total = 81
+        gallery = replace(
+            self.detail.gallery,
+            page_count=total,
+            preview_page_size=40,
+        )
+
+        def preview(index):
+            token = f"{index + 1:010x}"
+            return OnlineGalleryPreview(
+                page_index=index,
+                page_url=(
+                    f"https://exhentai.org/s/{token}/"
+                    f"{gallery.gid}-{index + 1}"
+                ),
+                page_token=token,
+            )
+
+        detail = replace(
+            self.detail,
+            gallery=gallery,
+            page_count=total,
+            previews=tuple(preview(index) for index in range(40)),
+        )
+
+        class FortyPreviewProvider(FakeDownloadProvider):
+            def __init__(self):
+                super().__init__({})
+                self.preview_calls = []
+
+            def load_gallery_preview_page(self, current_gallery, page_number):
+                page_number = int(page_number)
+                self.preview_calls.append(page_number)
+                if page_number > 3:
+                    raise AssertionError("requested a preview page past the end")
+                start = (page_number - 1) * 40
+                return OnlineGalleryPreviewPage(
+                    gallery=current_gallery,
+                    page_number=page_number,
+                    page_count=3,
+                    items=tuple(
+                        preview(index)
+                        for index in range(start, min(total, start + 40))
+                    ),
+                )
+
+        provider = FortyPreviewProvider()
+        worker = self._worker(provider)
+        worker.detail = detail
+
+        previews = worker._load_all_previews()
+
+        self.assertEqual(set(range(total)), set(previews))
+        self.assertEqual([2, 3], provider.preview_calls)
 
     def test_stalled_original_request_retries_without_zero_speed_flicker(self):
         class FlakyOriginalProvider(FakeDownloadProvider):

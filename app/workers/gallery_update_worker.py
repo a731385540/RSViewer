@@ -24,7 +24,11 @@ from app.domain.online_download import (
     ORIGINAL_STATE_ACTIVE,
     normalize_original_page_modes,
 )
-from app.domain.online_gallery import OnlineGallery, OnlineGalleryPreview
+from app.domain.online_gallery import (
+    OnlineGallery,
+    OnlineGalleryPreview,
+    gallery_preview_page_count,
+)
 from app.repositories.gallery_update_state_repository import (
     GalleryUpdateStateRepository,
 )
@@ -324,7 +328,7 @@ class GalleryUpdateWorker(QRunnable):
         # EH/EX may return 20 or 40 previews per response depending on the
         # account setting. Fetch response pages in order instead of assuming
         # that one response always maps to a fixed 20-index block.
-        page_count = max(1, math.ceil(total / 20))
+        page_count = gallery_preview_page_count(detail.gallery, total)
         for page_number in range(1, page_count + 1):
             if len(previews) >= total:
                 break

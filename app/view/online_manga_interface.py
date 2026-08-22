@@ -927,7 +927,11 @@ class OnlineMangaInterface(QWidget):
         if normalized == self._gallery_states:
             return
         self._gallery_states = normalized
-        self.setDownloadedGids(self._gallery_states)
+        self.setDownloadedGids(
+            gid
+            for gid, (download_state, _reading_state) in normalized.items()
+            if download_state != DOWNLOAD_NONE
+        )
         for card in self._cards:
             card.setGalleryStates(
                 *self._gallery_states.get(
@@ -936,17 +940,39 @@ class OnlineMangaInterface(QWidget):
                 )
             )
 
+    def setGalleryState(self, gid, download_state=None, reading_state=None):
+        """Update one gallery summary without rebuilding or walking the result page."""
+
+        gid = int(gid)
+        previous = self._gallery_states.get(
+            gid, (DOWNLOAD_NONE, READING_NONE)
+        )
+        current = (
+            previous[0] if download_state is None else download_state,
+            previous[1] if reading_state is None else reading_state,
+        )
+        if current == previous and gid in self._gallery_states:
+            return
+        if current == (DOWNLOAD_NONE, READING_NONE):
+            self._gallery_states.pop(gid, None)
+            self._downloaded_gids.discard(gid)
+        else:
+            self._gallery_states[gid] = current
+            if current[0] == DOWNLOAD_NONE:
+                self._downloaded_gids.discard(gid)
+            else:
+                self._downloaded_gids.add(gid)
+        card = self._cards_by_gid.get(gid)
+        if card is not None:
+            card.setDownloaded(gid in self._downloaded_gids)
+            card.setGalleryStates(*current)
+
     def setGalleryDownloaded(self, gid, downloaded=True):
         gid = int(gid)
-        states = dict(self._gallery_states)
         if downloaded:
-            _download, reading = states.get(
-                gid, (DOWNLOAD_NONE, READING_NONE)
-            )
-            states[gid] = (DOWNLOAD_INCOMPLETE, reading)
+            self.setGalleryState(gid, download_state=DOWNLOAD_INCOMPLETE)
         else:
-            states.pop(gid, None)
-        self.setGalleryStates(states)
+            self.setGalleryState(gid, download_state=DOWNLOAD_NONE)
 
     def _makeProvider(self, site=None):
         site = site or self._current_site

@@ -445,7 +445,7 @@ class MainWindowNavigationTests(unittest.TestCase):
             False
         )
 
-    def test_batch_metadata_sync_runs_two_at_once_and_reloads_once(self):
+    def test_batch_metadata_sync_runs_two_at_once_and_updates_each_gallery(self):
         window = self.window
         window._localMetadataSyncWorker = None
         window._localMetadataBatchQueue = deque()
@@ -457,7 +457,9 @@ class MainWindowNavigationTests(unittest.TestCase):
         window.userLibraryRepository = EmptySyncRepository()
         window.onlineDetailThreadPool = FakeThreadPool()
         reloads = []
+        refreshed = []
         window.localMangaInterface.reload = lambda: reloads.append(True)
+        window._refreshLocalGalleryItem = refreshed.append
         window._createLocalMetadataSyncWorker = (
             lambda item, _download=None, _sync=None: FakeSyncWorker(item.gid)
         )
@@ -483,8 +485,47 @@ class MainWindowNavigationTests(unittest.TestCase):
             self.assertEqual([], reloads)
             third.signals.loaded.emit(SimpleNamespace())
 
-        self.assertEqual([True], reloads)
+        self.assertEqual([], reloads)
+        self.assertEqual([10, 11, 12], refreshed)
         success.assert_called_once()
+
+    def test_metadata_sync_updates_the_detail_that_started_it(self):
+        window = self.window
+        item = SimpleNamespace(gid=42)
+        detail = SimpleNamespace(gallery=SimpleNamespace(gid=42))
+        worker = FakeSyncWorker(42)
+        target_detail = SimpleNamespace(
+            setLocalSyncState=MagicMock(),
+            applyLocalSyncedDetail=MagicMock(),
+        )
+        main_detail = SimpleNamespace(
+            setLocalSyncState=MagicMock(),
+            applyLocalSyncedDetail=MagicMock(),
+        )
+        window.mangaDetailInterface = main_detail
+        window._localMetadataSyncWorker = None
+        window._localMetadataSyncTarget = None
+        window._localMetadataBatchQueue = deque()
+        window._localMetadataBatchWorkers = {}
+        window._onlineDownloadWorkers = {}
+        window.userLibraryRepository = EmptySyncRepository()
+        window.onlineDetailThreadPool = FakeThreadPool()
+        window._refreshLocalGalleryItem = MagicMock()
+        window._createLocalMetadataSyncWorker = (
+            lambda _item, _download=None, _sync=None: worker
+        )
+
+        window.syncLocalGalleryMetadata(item, target_detail)
+
+        target_detail.setLocalSyncState.assert_called_once_with(
+            True, "正在从源站同步标签、评论与版本信息"
+        )
+        self.assertEqual([worker], window.onlineDetailThreadPool.started)
+        worker.signals.loaded.emit(detail)
+        target_detail.applyLocalSyncedDetail.assert_called_once_with(detail)
+        main_detail.applyLocalSyncedDetail.assert_not_called()
+        window._refreshLocalGalleryItem.assert_called_once_with(42)
+        self.assertIsNone(window._localMetadataSyncTarget)
 
     def test_resume_without_local_gallery_refetches_detail_before_download(self):
         window = self.window
@@ -686,8 +727,8 @@ class MainWindowNavigationTests(unittest.TestCase):
                 ).list_local_manga()
                 self.assertEqual([gallery.gid], [item.gid for item in listed])
                 self.assertEqual([gallery.gid, gallery.gid], markers)
-                self.assertEqual([True], reloads)
-                self.assertIn(("library_refresh",), published)
+                self.assertEqual([], reloads)
+                self.assertNotIn(("library_refresh",), published)
                 self.assertEqual(1, len(detail_pool.started))
             finally:
                 cfg.set(cfg.ehViewerMangaRoot, old_root)
@@ -769,7 +810,7 @@ class MainWindowNavigationTests(unittest.TestCase):
                 self.assertEqual(cover, (folder / ".thumb").read_bytes())
                 self.assertFalse((folder / ".ehviewer").exists())
                 self.assertEqual([gallery.gid], markers)
-                self.assertEqual([True], reloads)
+                self.assertEqual([], reloads)
                 self.assertEqual(1, len(pool.started))
                 self.assertIs(
                     window._onlineDownloadWorkers[gallery.gid],
@@ -1145,27 +1186,47 @@ class MainWindowNavigationTests(unittest.TestCase):
 
         window._syncCurrentDownload.assert_not_called()
 
-    def test_shared_library_reload_does_not_echo_snapshot(self):
+    def test_shared_download_event_does_not_reload_resource_page(self):
         reload_library = MagicMock()
-        publish = MagicMock()
+        refresh_downloads = MagicMock()
         window = SimpleNamespace(
-            _suppressNextLibrarySnapshot=False,
-            _sharedLibrarySignature=("current",),
+            _closing=False,
             localMangaInterface=SimpleNamespace(reload=reload_library),
-            _publishSharedState=publish,
+            _refreshDownloadManager=refresh_downloads,
+            mangaDetailInterface=SimpleNamespace(
+                currentOnlineDetail=None,
+                currentItem=None,
+            ),
         )
 
-        MainWindow._reloadLocalLibraryFromSharedState(window)
-        MainWindow._publishLibrarySnapshot(window)
-
-        reload_library.assert_called_once_with()
-        publish.assert_not_called()
-        self.assertFalse(window._suppressNextLibrarySnapshot)
-
-        MainWindow._publishLibrarySnapshot(window)
-        publish.assert_called_once_with(
-            "library_snapshot", ("current",)
+        MainWindow._onSharedStateChanged(
+            window, object(), "downloads", None
         )
+
+        reload_library.assert_not_called()
+        refresh_downloads.assert_called_once_with(publish=False)
+
+    def test_hidden_download_manager_refresh_does_not_touch_resource_cards(self):
+        repository = MagicMock()
+        download_manager = MagicMock()
+        online_resource = MagicMock()
+        published = []
+        resource_page = object()
+        window = SimpleNamespace(
+            stackedWidget=SimpleNamespace(currentWidget=lambda: resource_page),
+            downloadManagerInterface=download_manager,
+            onlineMangaInterface=online_resource,
+            userLibraryRepository=repository,
+            _downloadManagerIsVisible=lambda: False,
+            _publishSharedState=lambda *args: published.append(args),
+        )
+
+        MainWindow._refreshDownloadManager(window)
+
+        repository.incomplete_online_gallery_downloads.assert_not_called()
+        download_manager.setRecords.assert_not_called()
+        online_resource.setGalleryStates.assert_not_called()
+        self.assertEqual([("downloads",)], published)
 
     def test_inactive_window_does_not_consume_back_shortcut(self):
         other = QWidget()

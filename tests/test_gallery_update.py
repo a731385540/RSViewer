@@ -241,7 +241,11 @@ class GalleryUpdateTests(unittest.TestCase):
     def test_page_token_collection_supports_forty_preview_items_per_page(self):
         total = 151
         tokens = tuple(f"{index + 1:010x}" for index in range(total))
-        gallery = replace(self.latest_gallery, page_count=total)
+        gallery = replace(
+            self.latest_gallery,
+            page_count=total,
+            preview_page_size=40,
+        )
 
         def preview(index):
             token = tokens[index]

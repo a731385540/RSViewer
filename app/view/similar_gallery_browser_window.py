@@ -73,6 +73,7 @@ class SimilarGalleryBrowserWindow(FluentWindow):
     folderOpenRequested = Signal(object)
     readingRecordClearRequested = Signal(int)
     selectedTitleSearchRequested = Signal(int, str)
+    localMetadataSyncRequested = Signal(object)
 
     def __init__(self, source, repository, tag_search_index=None, parent=None):
         super().__init__(parent)
@@ -120,6 +121,9 @@ class SimilarGalleryBrowserWindow(FluentWindow):
         self.detail.selectedTitleSearchRequested.connect(
             self.selectedTitleSearchRequested
         )
+        self.detail.localMetadataSyncRequested.connect(
+            self.localMetadataSyncRequested
+        )
         self.stack.addWidget(self.resultPage)
         self.stack.addWidget(self.detail)
         self.stack.setCurrentWidget(self.resultPage)
@@ -132,6 +136,7 @@ class SimilarGalleryBrowserWindow(FluentWindow):
         folder_action,
         clear_action,
         search_action,
+        sync_action,
     ):
         """Route singleton-window actions without blind signal disconnection."""
         if self._boundOwner is owner:
@@ -147,6 +152,7 @@ class SimilarGalleryBrowserWindow(FluentWindow):
             (self.folderOpenRequested, folder_action),
             (self.readingRecordClearRequested, clear_action),
             (self.selectedTitleSearchRequested, search_action),
+            (self.localMetadataSyncRequested, sync_action),
         )
         for signal, slot in self._actionConnections:
             signal.connect(slot)
@@ -171,6 +177,21 @@ class SimilarGalleryBrowserWindow(FluentWindow):
             )
         )
         self.showResults()
+
+    def upsertItem(self, item):
+        gid = int(item.gid)
+        if gid not in self._items:
+            return False
+        self._items[gid] = item
+        for index in range(self.resultList.count()):
+            row = self.resultList.item(index)
+            if int(row.data(Qt.UserRole)) != gid:
+                continue
+            self.resultList.setItemWidget(
+                row, SimilarGalleryResultRow(item, self.resultList)
+            )
+            break
+        return True
 
     def showResults(self):
         self.stack.setCurrentWidget(self.resultPage)
