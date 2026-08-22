@@ -24,7 +24,7 @@ from app.repositories.ehviewer_schema import ensure_ehviewer_schema
 class UserLibraryRepository:
     """RSViewer's complete application and local-gallery database."""
 
-    SCHEMA_VERSION = 23
+    SCHEMA_VERSION = 24
     CUSTOM_SORT_CATEGORY = "category"
     CUSTOM_SORT_TAXONOMY = "taxonomy"
 
@@ -564,6 +564,64 @@ class UserLibraryRepository:
                     """
                 )
                 connection.execute("PRAGMA user_version = 23")
+            if version < 24:
+                ensure_ehviewer_schema(connection)
+                connection.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS gallery_sources (
+                        local_gid INTEGER PRIMARY KEY,
+                        source TEXT NOT NULL,
+                        remote_id TEXT NOT NULL,
+                        CHECK(source IN ('ehentai', 'exhentai', 'nhc', 'nhn')),
+                        UNIQUE(source, remote_id)
+                    );
+                    """
+                )
+                source_tables = {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )
+                }
+                sync_sources = (
+                    dict(connection.execute("SELECT gid, site FROM gallery_sync_records"))
+                    if "gallery_sync_records" in source_tables
+                    else {}
+                )
+                download_sources = (
+                    dict(connection.execute("SELECT gid, site FROM online_gallery_downloads"))
+                    if "online_gallery_downloads" in source_tables
+                    else {}
+                )
+                for gid, in connection.execute("SELECT GID FROM DOWNLOADS"):
+                    source = str(
+                        sync_sources.get(gid)
+                        or download_sources.get(gid)
+                        or ""
+                    )
+                    self._write_gallery_source(
+                        connection,
+                        gid,
+                        source if source in {"ehentai", "exhentai"} else "exhentai",
+                        gid,
+                    )
+                connection.executescript(
+                    """
+                    CREATE TRIGGER IF NOT EXISTS gallery_sources_download_insert
+                    AFTER INSERT ON DOWNLOADS
+                    WHEN NOT EXISTS (
+                        SELECT 1 FROM gallery_sources
+                        WHERE local_gid = NEW.GID
+                    )
+                    BEGIN
+                        INSERT OR IGNORE INTO gallery_sources(
+                            local_gid, source, remote_id
+                        ) VALUES (NEW.GID, 'exhentai', CAST(NEW.GID AS TEXT));
+                    END;
+
+                    PRAGMA user_version = 24;
+                    """
+                )
 
     @classmethod
     def _custom_sort_scope(cls, scope_type, scope_key):
@@ -1499,6 +1557,9 @@ class UserLibraryRepository:
             separators=(",", ":"),
         )
         with self._connect() as connection:
+            self._write_gallery_source(
+                connection, record.gid, record.site, record.gid
+            )
             self._write_gallery_sync(
                 connection,
                 record.gid,
@@ -1555,6 +1616,12 @@ class UserLibraryRepository:
             separators=(",", ":"),
         )
         with self._connect() as connection:
+            remote_id = str(
+                dict(record.metadata or {}).get("source_id") or record.gid
+            )
+            self._write_gallery_source(
+                connection, record.gid, record.site, remote_id
+            )
             connection.execute(
                 """
                 INSERT INTO online_gallery_downloads(
@@ -1626,6 +1693,81 @@ class UserLibraryRepository:
                 int(record.updated_at or now),
                 comments,
             )
+
+    def local_gid_for_source(self, source, remote_id):
+        self.initialize()
+        source = str(source or "").strip().casefold()
+        remote_id = str(remote_id or "").strip()
+        if not source or not remote_id:
+            return None
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT local_gid FROM gallery_sources
+                WHERE source = ? AND remote_id = ?
+                """,
+                (source, remote_id),
+            ).fetchone()
+        return int(row[0]) if row is not None else None
+
+    def ensure_gallery_local_gid(self, source, remote_id):
+        """Return a stable local key without colliding across online sources."""
+
+        self.initialize()
+        source = str(source or "").strip().casefold()
+        remote_text = str(remote_id or "").strip()
+        if source not in {"ehentai", "exhentai", "nhc", "nhn"}:
+            raise ValueError("未知的画廊来源")
+        try:
+            remote_number = int(remote_text)
+        except (TypeError, ValueError):
+            raise ValueError("画廊来源编号无效") from None
+        if remote_number <= 0:
+            raise ValueError("画廊来源编号无效")
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT local_gid FROM gallery_sources
+                WHERE source = ? AND remote_id = ?
+                """,
+                (source, remote_text),
+            ).fetchone()
+            if row is not None:
+                return int(row[0])
+            candidate = self.gallery_local_gid_candidate(source, remote_number)
+            collision = connection.execute(
+                "SELECT source, remote_id FROM gallery_sources WHERE local_gid = ?",
+                (candidate,),
+            ).fetchone()
+            if collision is not None:
+                raise ValueError("画廊本地编号发生冲突")
+            connection.execute(
+                """
+                INSERT INTO gallery_sources(local_gid, source, remote_id)
+                VALUES (?, ?, ?)
+                """,
+                (candidate, source, remote_text),
+            )
+        return candidate
+
+    @staticmethod
+    def gallery_local_gid_candidate(source, remote_id):
+        source = str(source or "").strip().casefold()
+        try:
+            remote_number = int(str(remote_id or "").strip())
+        except (TypeError, ValueError):
+            raise ValueError("画廊来源编号无效") from None
+        if remote_number <= 0:
+            raise ValueError("画廊来源编号无效")
+        if source in {"ehentai", "exhentai"}:
+            return remote_number
+        if source not in {"nhc", "nhn"}:
+            raise ValueError("未知的画廊来源")
+        namespace_base = 1_000_000_000 if source == "nhc" else 1_500_000_000
+        candidate = -(namespace_base + remote_number)
+        if candidate < -2_147_483_648:
+            raise ValueError("画廊来源编号超出本地可用范围")
+        return candidate
 
     def save_gallery_trash(self, record: GalleryTrashRecord):
         self.initialize()
@@ -1741,6 +1883,7 @@ class UserLibraryRepository:
                 ("online_gallery_downloads", "gid"),
                 ("gallery_sync_records", "gid"),
                 ("manga_custom_sort_entries", "gid"),
+                ("gallery_sources", "local_gid"),
             ):
                 connection.execute(
                     f"DELETE FROM {table} WHERE {column} = ?", (gid,)
@@ -2097,6 +2240,17 @@ class UserLibraryRepository:
             connection.execute(
                 "DELETE FROM gallery_sync_records WHERE gid = ?", (source_gid,)
             )
+            source_row = connection.execute(
+                "SELECT source FROM gallery_sources WHERE local_gid = ?",
+                (source_gid,),
+            ).fetchone()
+            if source_row is not None:
+                self._write_gallery_source(
+                    connection, target_gid, source_row[0], target_gid
+                )
+            connection.execute(
+                "DELETE FROM gallery_sources WHERE local_gid = ?", (source_gid,)
+            )
             latest = connection.execute(
                 "SELECT source_gid, selected_text, result_gids_json, searched_at "
                 "FROM latest_similar_search WHERE singleton_id = 1"
@@ -2383,6 +2537,16 @@ class UserLibraryRepository:
                 "DELETE FROM online_gallery_downloads WHERE gid = ?",
                 (int(gid),),
             )
+            connection.execute(
+                """
+                DELETE FROM gallery_sources
+                WHERE local_gid = ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM DOWNLOADS WHERE GID = ?
+                  )
+                """,
+                (int(gid), int(gid)),
+            )
 
     def online_gallery_comments(self, gid: int) -> Tuple[OnlineGalleryComment, ...]:
         self.initialize()
@@ -2418,6 +2582,23 @@ class UserLibraryRepository:
                 ),
             )
             for row in rows
+        )
+
+    @staticmethod
+    def _write_gallery_source(connection, local_gid, source, remote_id):
+        source = str(source or "").strip().casefold()
+        if source not in {"ehentai", "exhentai", "nhc", "nhn"}:
+            source = "exhentai"
+        remote_id = str(remote_id or local_gid).strip() or str(int(local_gid))
+        connection.execute(
+            """
+            INSERT INTO gallery_sources(local_gid, source, remote_id)
+            VALUES (?, ?, ?)
+            ON CONFLICT(local_gid) DO UPDATE SET
+                source = excluded.source,
+                remote_id = excluded.remote_id
+            """,
+            (int(local_gid), source, remote_id),
         )
 
     @staticmethod

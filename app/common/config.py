@@ -68,11 +68,16 @@ class Config(QConfig):
     tagSidebarShortcut = ConfigItem("Shortcuts", "ToggleMangaTags", "Ctrl+L")
     backShortcut = ConfigItem("Shortcuts", "NavigateBack", "Z")
 
-    # online E-Hentai / ExHentai source
+    # online gallery source
     onlineEhSite = OptionsConfigItem(
-        "OnlineEH", "Site", "ehentai", OptionsValidator(["ehentai", "exhentai"])
+        "OnlineEH",
+        "Site",
+        "ehentai",
+        OptionsValidator(["ehentai", "exhentai", "nhc", "nhn"]),
     )
     onlineEhCookie = ConfigItem("OnlineEH", "Cookie", "")
+    onlineNhcCookie = ConfigItem("OnlineNH", "NHCCookie", "")
+    onlineNhnCookie = ConfigItem("OnlineNH", "NHNCookie", "")
     onlineEhProxyMode = OptionsConfigItem(
         "OnlineEH",
         "ProxyMode",

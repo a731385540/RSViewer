@@ -327,6 +327,78 @@ class LocalLibraryControlsTests(unittest.TestCase):
         dialog.reject()
         dialog.deleteLater()
 
+    def test_custom_sort_dialog_supports_boundary_and_whole_list_actions(self):
+        items = (
+            replace(self.items[0], english_title="Chapter 10"),
+            replace(self.items[1], english_title="chapter 2"),
+            replace(self.items[2], english_title="Alpha"),
+        )
+        dialog = CustomMangaSortDialog(
+            "未分类", items, self.source, self.interface
+        )
+        dialog.listWidget.item(1).setSelected(True)
+        dialog.listWidget.item(2).setSelected(True)
+
+        dialog.moveFirstButton.click()
+        self.assertEqual((2, 3, 1), dialog.orderedGids())
+        self.assertEqual({2, 3}, dialog.listWidget.selectedGids())
+        self.assertFalse(dialog.moveFirstButton.isEnabled())
+        dialog.moveLastButton.click()
+        self.assertEqual((1, 2, 3), dialog.orderedGids())
+        self.assertFalse(dialog.moveLastButton.isEnabled())
+
+        with patch(
+            "app.view.custom_manga_sort_dialog.random.shuffle",
+            side_effect=lambda values: values.__setitem__(
+                slice(None), values[1:] + values[:1]
+            ),
+        ):
+            dialog.shuffleButton.click()
+        self.assertEqual((2, 3, 1), dialog.orderedGids())
+
+        dialog.nameSortButton.click()
+        self.assertEqual((3, 2, 1), dialog.orderedGids())
+        dialog.reverseButton.click()
+        self.assertEqual((1, 2, 3), dialog.orderedGids())
+        self.assertEqual("随机打乱", dialog.shuffleButton.toolTip())
+        self.assertEqual("按名称排序", dialog.nameSortButton.toolTip())
+        self.assertEqual("倒序排列", dialog.reverseButton.toolTip())
+        dialog.reject()
+        dialog.deleteLater()
+
+    def test_custom_sort_search_locates_without_filtering_or_reordering(self):
+        items = (
+            replace(self.items[0], english_title="Alpha Chapter 10"),
+            replace(self.items[1], english_title="Beta"),
+            replace(self.items[2], english_title="alpha chapter 2"),
+        )
+        dialog = CustomMangaSortDialog(
+            "未分类", items, self.source, self.interface
+        )
+
+        dialog.searchEdit.setText("ALPHA")
+        self.assertEqual(3, dialog.listWidget.count())
+        self.assertEqual((1, 2, 3), dialog.orderedGids())
+        self.assertEqual(1, dialog.listWidget.currentItem().data(Qt.UserRole))
+        self.assertEqual("1 / 2", dialog.searchPositionLabel.text())
+
+        QTest.keyClick(dialog.searchEdit, Qt.Key_PageDown)
+        self.assertEqual(3, dialog.listWidget.currentItem().data(Qt.UserRole))
+        self.assertEqual("2 / 2", dialog.searchPositionLabel.text())
+        QTest.keyClick(dialog.searchEdit, Qt.Key_PageDown)
+        self.assertEqual(1, dialog.listWidget.currentItem().data(Qt.UserRole))
+        QTest.keyClick(dialog.searchEdit, Qt.Key_PageUp)
+        self.assertEqual(3, dialog.listWidget.currentItem().data(Qt.UserRole))
+
+        dialog.searchEdit.setText("missing")
+        self.assertEqual(3, dialog.listWidget.count())
+        self.assertEqual((1, 2, 3), dialog.orderedGids())
+        self.assertEqual("0 / 0", dialog.searchPositionLabel.text())
+        self.assertFalse(dialog.searchPreviousButton.isEnabled())
+        self.assertFalse(dialog.searchNextButton.isEnabled())
+        dialog.reject()
+        dialog.deleteLater()
+
     def test_download_refresh_reveals_new_gallery_and_ignores_old_filters(self):
         downloaded = replace(
             make_item(self.root, 99, 40),

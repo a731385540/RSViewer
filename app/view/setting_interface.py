@@ -524,8 +524,8 @@ class SettingInterface(ScrollArea):
             cfg.onlineEhSite,
             FIF.GLOBE,
             self.tr("默认站点"),
-            self.tr("在线资源页可随时在 E-Hentai 与 ExHentai 之间切换"),
-            texts=["E-Hentai", "ExHentai"],
+            self.tr("在线资源页可随时在 EH、EXH、NHC 与 NHN 之间切换"),
+            texts=["EH", "EXH", "NHC", "NHN"],
             parent=self.onlineGroup,
         )
         self.onlineCookieCard = TextConfigSettingCard(
@@ -536,6 +536,24 @@ class SettingInterface(ScrollArea):
             self.onlineGroup,
             password=True,
             placeholder="ipb_member_id=...; ipb_pass_hash=...; igneous=...",
+        )
+        self.onlineNhcCookieCard = TextConfigSettingCard(
+            cfg.onlineNhcCookie,
+            FIF.FINGERPRINT,
+            self.tr("NHC Cookie"),
+            self.tr("仅用于 NHC 请求；内容只保存在本机配置"),
+            self.onlineGroup,
+            password=True,
+            placeholder="name=value; ...",
+        )
+        self.onlineNhnCookieCard = TextConfigSettingCard(
+            cfg.onlineNhnCookie,
+            FIF.FINGERPRINT,
+            self.tr("NHN Cookie"),
+            self.tr("仅用于 NHN 请求；内容只保存在本机配置"),
+            self.onlineGroup,
+            password=True,
+            placeholder="name=value; ...",
         )
         self.onlineProxyModeCard = OptionsSettingCard(
             cfg.onlineEhProxyMode,
@@ -772,6 +790,8 @@ class SettingInterface(ScrollArea):
         self.dataSourceGroup.addSettingCard(self.ehViewerMangaRootCard)
         self.onlineGroup.addSettingCard(self.onlineSiteCard)
         self.onlineGroup.addSettingCard(self.onlineCookieCard)
+        self.onlineGroup.addSettingCard(self.onlineNhcCookieCard)
+        self.onlineGroup.addSettingCard(self.onlineNhnCookieCard)
         self.onlineGroup.addSettingCard(self.onlineProxyModeCard)
         self.onlineGroup.addSettingCard(self.onlineManualProxyCard)
         self.onlineGroup.addSettingCard(self.onlineTimeoutCard)

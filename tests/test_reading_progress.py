@@ -177,6 +177,10 @@ class ReadingProgressTests(unittest.TestCase):
                     """
                 )
             }
+            source_table = connection.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'gallery_sources'"
+            ).fetchone()
         self.assertEqual(UserLibraryRepository.SCHEMA_VERSION, version)
         self.assertIn("download_mode", download_columns)
         self.assertEqual(("gallery_original_states",), original_table)
@@ -192,6 +196,7 @@ class ReadingProgressTests(unittest.TestCase):
             {"manga_custom_sort_rules", "manga_custom_sort_entries"},
             custom_sort_tables,
         )
+        self.assertEqual(("gallery_sources",), source_table)
 
     def test_category_and_taxonomy_custom_orders_survive_membership_changes(self):
         category = UserLibraryRepository.CUSTOM_SORT_CATEGORY
@@ -799,6 +804,48 @@ class ReadingProgressTests(unittest.TestCase):
         detail.cancelLoads()
         detail.close()
         detail.deleteLater()
+        QApplication.processEvents()
+
+    def test_nh_detail_tag_copy_uses_full_source_namespaces(self):
+        detail_widget = MangaDetailInterface(
+            EhViewerDataSource(self.root / "unused.db", self.root),
+            self.repository,
+            tag_search_index=make_tag_search_index(),
+        )
+        gallery = OnlineGallery(
+            674728,
+            "",
+            "https://nhentai.net/g/674728/",
+            "NHN title",
+            tags=("artist:Sample Artist", "tag:stockings", "language:chinese"),
+            source_site="nhn",
+            source_id="674728",
+        )
+        detail_widget.setOnlineLoading(gallery)
+        detail_widget.setOnlineDetail(
+            OnlineGalleryDetail(
+                gallery=gallery,
+                title=gallery.title,
+                tags=gallery.tags,
+            )
+        )
+        QApplication.processEvents()
+
+        chips = detail_widget.findChildren(QLabel, "mangaTagChip")
+        self.assertEqual(
+            {
+                'artist:"Sample Artist"',
+                'tag:"stockings"',
+                'language:"chinese"',
+            },
+            {chip.queryToken() for chip in chips},
+        )
+        self.assertFalse(detail_widget.operationCard.isHidden())
+        self.assertFalse(detail_widget.previewCard.isHidden())
+        self.assertTrue(detail_widget.originalDownloadControls.isHidden())
+        self.assertTrue(detail_widget.commentsCard.isHidden())
+        detail_widget.close()
+        detail_widget.deleteLater()
         QApplication.processEvents()
 
     def test_shared_detail_page_switches_between_online_comments_and_local_preview(self):

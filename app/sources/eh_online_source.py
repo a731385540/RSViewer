@@ -23,12 +23,17 @@ from app.domain.online_gallery import (
     OnlineGalleryPreviewPage,
     OnlineGalleryQuery,
 )
+from app.services.online_query_syntax import adapt_online_query
 
 
 SITE_BASE_URLS = {
     "ehentai": "https://e-hentai.org/",
     "exhentai": "https://exhentai.org/",
+    "nhc": "https://nhentai.com/",
+    "nhn": "https://nhentai.net/",
 }
+
+EH_SITE_KEYS = {"ehentai", "exhentai"}
 
 GALLERY_HOST_SITES = {
     "e-hentai.org": "ehentai",
@@ -74,7 +79,7 @@ def parse_eh_gallery_url(value: str) -> EhGalleryAddress:
 
 
 def build_eh_gallery_url(site: str, gid: int, token: str) -> str:
-    if site not in SITE_BASE_URLS or int(gid) <= 0 or not re.fullmatch(
+    if site not in EH_SITE_KEYS or int(gid) <= 0 or not re.fullmatch(
         r"[0-9a-fA-F]+", str(token or "")
     ):
         raise EhOnlineError("无法生成有效的 EH/EX 画廊地址")
@@ -135,7 +140,11 @@ class EhOnlineSettings:
         return cls(
             site=site,
             base_url=SITE_BASE_URLS[site],
-            cookie=cls.normalize_cookie(cookie),
+            cookie=(
+                cls.normalize_cookie(cookie)
+                if site in EH_SITE_KEYS
+                else cls.normalize_raw_cookie(cookie)
+            ),
             proxy_mode=proxy_mode,
             manual_proxy=normalized_proxy,
             timeout_seconds=max(3, int(timeout_seconds)),
@@ -143,6 +152,13 @@ class EhOnlineSettings:
 
     @staticmethod
     def normalize_cookie(value: str) -> str:
+        value = EhOnlineSettings.normalize_raw_cookie(value)
+        if value and "=" not in value:
+            value = f"igneous={value}"
+        return value
+
+    @staticmethod
+    def normalize_raw_cookie(value: str) -> str:
         value = (value or "").strip()
         if value.lower().startswith("cookie:"):
             value = value[7:].strip()
@@ -151,8 +167,6 @@ class EhOnlineSettings:
             for part in value.replace("\r", "\n").split("\n")
             if part.strip()
         )
-        if value and "=" not in value:
-            value = f"igneous={value}"
         return value
 
     def proxy_mapping(self) -> Dict[str, str]:
@@ -328,26 +342,31 @@ class RefactoredEhOnlineProvider(EhOnlineProvider):
 
     def fetch_page(self, query: OnlineGalleryQuery) -> OnlineGalleryPage:
         self._ensure_session_configuration()
+        keyword = adapt_online_query(query.keyword, self.settings.site)
         if query.cursor:
             self._validate_list_url(query.cursor)
             result = self._crawler.getUrl(query.cursor)
         elif query.seek_date:
-            if query.keyword:
-                context = self._crawler.getMain(search=query.keyword)
+            if keyword:
+                context = self._crawler.getMain(search=keyword)
                 if not isinstance(context, dict):
                     raise EhOnlineError("画廊爬虫返回了未知数据")
                 if context.get("error"):
                     raise EhOnlineError(str(context["error"]))
             result = self._crawler.getMain(time=query.seek_date)
         else:
-            result = self._crawler.getMain(search=query.keyword)
+            result = self._crawler.getMain(search=keyword)
         if not isinstance(result, dict):
             raise EhOnlineError("画廊爬虫返回了未知数据")
         if result.get("error"):
             raise EhOnlineError(str(result["error"]))
 
         items = tuple(
-            gallery
+            replace(
+                gallery,
+                source_site=self.settings.site,
+                source_id=str(gallery.gid),
+            )
             for gallery in (
                 self._to_gallery(raw) for raw in result.get("data", ())
             )
@@ -1023,6 +1042,10 @@ class RefactoredEhOnlineProvider(EhOnlineProvider):
 
 
 def create_eh_online_provider(settings: EhOnlineSettings) -> EhOnlineProvider:
-    """Compose the bundled adapter around ``eh_tool_refactored.py``."""
+    """Compose the provider selected by the validated runtime settings."""
 
+    if settings.site in {"nhc", "nhn"}:
+        from app.sources.nh_online_source import NhentaiOnlineProvider
+
+        return NhentaiOnlineProvider(settings)
     return RefactoredEhOnlineProvider(settings)

@@ -83,6 +83,7 @@ from app.view.gallery_state_indicator import (
     READING_NONE,
     READING_PARTIAL,
 )
+from app.view.gallery_source_badge import GallerySourceBadge
 from app.workers.similar_manga_worker import SimilarMangaWorker
 
 
@@ -396,11 +397,13 @@ class MangaGridCard(CardWidget):
         self.layout.addWidget(self.metaLabel)
         self.selectionCheckBox.raise_()
         self.originalFallbackBadge = OriginalFallbackBadge(self)
+        self.sourceBadge = GallerySourceBadge(item.source_site, self)
         self.stateIndicator = GalleryStateIndicator(self)
         self._updateDownloadStateBadge()
 
     def setItem(self, item: MangaItem):
         self.item = item
+        self.sourceBadge.setSource(item.source_site)
         self.titleLabel.setText(item.display_title)
         self.englishTitleLabel.setText(item.secondary_title)
         self.metaLabel.setText(manga_metadata_text(item, self.tr))
@@ -418,7 +421,9 @@ class MangaGridCard(CardWidget):
     def _updateDownloadStateBadge(self):
         update_original_fallback_badge(self)
         self.stateIndicator.setStates(*local_gallery_states(self.item))
-        self.stateIndicator.move(self.width() - 26, 10)
+        self.sourceBadge.move(self.width() - self.sourceBadge.width() - 10, 10)
+        self.sourceBadge.raise_()
+        self.stateIndicator.move(self.width() - 26, 34)
         self.stateIndicator.raise_()
 
     def resizeEvent(self, event):
@@ -539,11 +544,13 @@ class MangaListCard(CardWidget):
         self.layout.addLayout(text_layout, 1)
         self.selectionCheckBox.raise_()
         self.originalFallbackBadge = OriginalFallbackBadge(self)
+        self.sourceBadge = GallerySourceBadge(item.source_site, self)
         self.stateIndicator = GalleryStateIndicator(self)
         self._updateDownloadStateBadge()
 
     def setItem(self, item: MangaItem):
         self.item = item
+        self.sourceBadge.setSource(item.source_site)
         self.titleLabel.setText(item.display_title)
         self.englishTitleLabel.setText(item.secondary_title)
         self.metaLabel.setText(manga_metadata_text(item, self.tr))
@@ -562,7 +569,9 @@ class MangaListCard(CardWidget):
     def _updateDownloadStateBadge(self):
         update_original_fallback_badge(self)
         self.stateIndicator.setStates(*local_gallery_states(self.item))
-        self.stateIndicator.move(self.width() - 26, 10)
+        self.sourceBadge.move(self.width() - self.sourceBadge.width() - 10, 10)
+        self.sourceBadge.raise_()
+        self.stateIndicator.move(self.width() - 26, 34)
         self.stateIndicator.raise_()
 
     def resizeEvent(self, event):

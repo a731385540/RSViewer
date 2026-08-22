@@ -347,7 +347,10 @@ class OnlineGalleryDownloadWorker(QRunnable):
             page_tokens = {
                 index: preview.page_token for index, preview in previews.items()
             }
-            if self.download_mode != DOWNLOAD_MODE_ORIGINAL_LOCAL:
+            if (
+                self.download_mode != DOWNLOAD_MODE_ORIGINAL_LOCAL
+                and self.site in {"ehentai", "exhentai"}
+            ):
                 self.ehviewer_repository.write_spider_info(
                     folder, self.detail, page_tokens
                 )

@@ -60,6 +60,7 @@ from app.domain.online_gallery import (
 )
 from app.repositories.user_library_repository import UserLibraryRepository
 from app.services.eh_tag_search import exact_tag_query_token
+from app.services.online_query_syntax import online_tag_query_token
 from app.sources.ehviewer_source import EhViewerDataSource
 from app.view.local_manga_interface import CoverLabel
 from app.workers.eh_online_worker import (
@@ -69,11 +70,14 @@ from app.workers.eh_online_worker import (
 
 
 TAG_GROUPS = (
+    ("category", "分类", "neutral"),
     ("artist", "作者", "creator"),
-    ("group", "社团", "creator"),
+    ("author", "原作者", "creator"),
+    ("group", "社团 / 制作组", "creator"),
     ("cosplayer", "Cosplayer", "creator"),
     ("parody", "原作", "work"),
     ("character", "角色", "work"),
+    ("relationship", "关系", "work"),
     ("language", "语言", "language"),
     ("female", "女性", "female"),
     ("male", "男性", "male"),
@@ -81,6 +85,8 @@ TAG_GROUPS = (
     ("reclass", "重新分类", "neutral"),
     ("misc", "杂项", "neutral"),
     ("other", "其他", "neutral"),
+    ("tag", "标签", "neutral"),
+    ("attribute", "属性", "neutral"),
 )
 TAG_GROUP_INFO = {
     namespace: (title, tone) for namespace, title, tone in TAG_GROUPS
@@ -164,6 +170,7 @@ class TagChip(QLabel):
         parent=None,
         raw_text=None,
         tag_search_index=None,
+        source_site="",
     ):
         super().__init__(text, parent)
         raw_tag = str(text if raw_text is None else raw_text)
@@ -172,7 +179,9 @@ class TagChip(QLabel):
         self.setProperty("tagNamespace", namespace)
         self.setProperty("rawTag", raw_tag)
         self.setToolTip(f"{namespace}:{raw_tag}")
-        self._queryToken = (
+        self._queryToken = online_tag_query_token(
+            namespace, raw_tag, source_site
+        ) or (
             tag_search_index.exact_query_token(namespace, raw_tag)
             if tag_search_index is not None
             else exact_tag_query_token(namespace, raw_tag)
@@ -217,6 +226,7 @@ class TagGroupWidget(QWidget):
         values,
         parent=None,
         tag_search_index=None,
+        source_site="",
     ):
         super().__init__(parent)
         self.setObjectName("mangaTagGroup")
@@ -241,6 +251,7 @@ class TagGroupWidget(QWidget):
                     chip_container,
                     raw_text=value,
                     tag_search_index=tag_search_index,
+                    source_site=source_site,
                 )
             )
         layout.addWidget(chip_container)
@@ -999,7 +1010,8 @@ class MangaDetailInterface(QWidget):
             item.page_count,
             item.original_state,
         )
-        if item.metadata_synced:
+        is_nh = item.source_site in {"nhc", "nhn"}
+        if item.metadata_synced and not is_nh:
             self.commentsCard.show()
             self._setComments(self.userRepository.online_gallery_comments(item.gid))
         else:
@@ -1008,25 +1020,28 @@ class MangaDetailInterface(QWidget):
         self.downloadProgressLabel.hide()
         self.downloadProgressBar.hide()
         self.downloadControls.show()
-        self.originalDownloadControls.show()
+        self.originalDownloadControls.setVisible(not is_nh)
         self.originalDownloadProgressBar.hide()
         self.originalDownloadProgressLabel.hide()
         self.originalDownloadButton.setEnabled(bool(item.gallery_token))
         self.originalDownloadButton.setText(self.tr("下载原图"))
         self.originalReplaceButton.hide()
         self.deleteCompressedButton.hide()
-        self.syncButton.show()
+        self.syncButton.setVisible(not is_nh)
         self.openFolderButton.show()
         self.categoryButton.show()
         self.clearProgressButton.setVisible(
             item.progress_page_index is not None or item.reading_completed
         )
-        self.syncButton.setEnabled(bool(item.gallery_token))
+        self.syncButton.setEnabled(bool(item.gallery_token) and not is_nh)
         self.syncButton.setText(self.tr("同步信息"))
         self.syncButton.setToolTip(
             "" if item.gallery_token else self.tr("正在从 .ehviewer 读取画廊标识")
         )
-        self.downloadButton.setEnabled(bool(item.page_paths and item.page_tokens))
+        self.downloadButton.setEnabled(
+            bool(item.page_paths)
+            and (bool(item.page_tokens) or is_nh)
+        )
         self.downloadButton.setText(
             self.tr("正在检查下载状态…")
             if not item.page_paths else self._localDownloadButtonText(item)
@@ -1144,6 +1159,9 @@ class MangaDetailInterface(QWidget):
         self.commentsCountLabel.clear()
         self.commentsStatusLabel.setText(self.tr("正在加载画廊详情与评论…"))
         self.commentsStatusLabel.show()
+        if item.source_site in {"nhc", "nhn"}:
+            self.originalDownloadControls.hide()
+            self.commentsCard.hide()
         self.scrollArea.verticalScrollBar().setValue(0)
 
     def setLocalOnlineContext(self, detail, provider, cache):
@@ -1179,14 +1197,19 @@ class MangaDetailInterface(QWidget):
         self._setKeyTags(detail.tags)
         self._replaceCover(cover_data)
         self._setComments(detail.comments)
+        is_nh = detail.gallery.source_site in {"nhc", "nhn"}
         self.operationCard.show()
         self.previewCard.show()
         self.downloadControls.show()
-        self.originalDownloadControls.show()
+        self.originalDownloadControls.setVisible(not is_nh)
+        self.commentsCard.setVisible(not is_nh)
+        if is_nh:
+            self.updateButton.hide()
         self.downloadButton.setEnabled(detail.page_count > 0)
         self.downloadButton.setText(self.tr("下载画廊"))
-        self.originalDownloadButton.setEnabled(detail.page_count > 0)
-        self.originalDownloadButton.setText(self.tr("下载原图"))
+        if not is_nh:
+            self.originalDownloadButton.setEnabled(detail.page_count > 0)
+            self.originalDownloadButton.setText(self.tr("下载原图"))
         self.readButton.setEnabled(detail.page_count > 0)
         self.readButton.setText(
             self.tr("开始在线阅读")
@@ -1246,7 +1269,10 @@ class MangaDetailInterface(QWidget):
         if state == "completed":
             if self._item is not None:
                 self.downloadButton.setText(self.tr("检查并补齐"))
-                self.downloadButton.setEnabled(bool(self._item.page_tokens))
+                self.downloadButton.setEnabled(
+                    bool(self._item.page_tokens)
+                    or self._item.source_site in {"nhc", "nhn"}
+                )
             else:
                 self.downloadButton.setText(self.tr("已下载"))
                 self.downloadButton.setEnabled(False)
@@ -1270,7 +1296,10 @@ class MangaDetailInterface(QWidget):
         else:
             if self._item is not None:
                 self.downloadButton.setText(self._localDownloadButtonText(self._item))
-                self.downloadButton.setEnabled(bool(self._item.page_tokens))
+                self.downloadButton.setEnabled(
+                    bool(self._item.page_tokens)
+                    or self._item.source_site in {"nhc", "nhn"}
+                )
             else:
                 self.downloadButton.setText(self.tr("下载画廊"))
                 self.downloadButton.setEnabled(page_count > 0)
@@ -1284,6 +1313,16 @@ class MangaDetailInterface(QWidget):
         operation_active=False,
     ):
         if self._online_gallery is None and self._item is None:
+            return
+        source_site = (
+            self._online_gallery.source_site
+            if self._online_gallery is not None
+            else self._item.source_site
+        )
+        if source_site in {"nhc", "nhn"}:
+            self.originalDownloadControls.hide()
+            self.originalReplaceButton.hide()
+            self.deleteCompressedButton.hide()
             return
         self.originalDownloadControls.show()
         self._original_operation_active = bool(operation_active)
@@ -1545,7 +1584,9 @@ class MangaDetailInterface(QWidget):
             return
         if self._online_detail is not None and self._online_detail.page_count:
             self.onlineDownloadRequested.emit(self._online_detail)
-        elif self._item is not None and self._item.page_tokens:
+        elif self._item is not None and (
+            self._item.page_tokens or self._item.source_site in {"nhc", "nhn"}
+        ):
             self.localDownloadRequested.emit(self._item)
 
     def _requestOriginalDownload(self):
@@ -1626,7 +1667,10 @@ class MangaDetailInterface(QWidget):
                 )
                 self.downloadButton.setEnabled(False)
             else:
-                self.downloadButton.setEnabled(bool(self._item.page_tokens))
+                self.downloadButton.setEnabled(
+                    bool(self._item.page_tokens)
+                    or self._item.source_site in {"nhc", "nhn"}
+                )
             self.originalDownloadButton.setEnabled(
                 bool(self._item.page_tokens)
                 and self._item.original_state != ORIGINAL_STATE_ACTIVE
@@ -1938,7 +1982,9 @@ class MangaDetailInterface(QWidget):
             self.previewTitle.setText(self.tr("未找到可读取的图片页面"))
             self._setLocalMetadata(item)
             self.downloadControls.show()
-            self.downloadButton.setEnabled(bool(item.page_tokens))
+            self.downloadButton.setEnabled(
+                bool(item.page_tokens) or item.source_site in {"nhc", "nhn"}
+            )
             self.downloadButton.setText(self._localDownloadButtonText(item))
             self.syncButton.setEnabled(bool(item.gallery_token))
             self.syncButton.setToolTip(
@@ -2247,6 +2293,7 @@ class MangaDetailInterface(QWidget):
             if namespace in ("language", "artist")
         }
         labels = []
+        source_site = self._tagSourceSite()
         for namespace, title, tone in (
             ("language", self.tr("语言"), "language"),
             ("artist", self.tr("作者"), "creator"),
@@ -2262,6 +2309,7 @@ class MangaDetailInterface(QWidget):
                     self.keyTagsWidget,
                     raw_text=value,
                     tag_search_index=self.tagSearchIndex,
+                    source_site=source_site,
                 )
                 chip.setObjectName("mangaKeyTagChip")
                 labels.append(chip)
@@ -2277,6 +2325,7 @@ class MangaDetailInterface(QWidget):
                 widget.setParent(None)
                 widget.deleteLater()
         self._tagGroupWidgets = []
+        source_site = self._tagSourceSite()
         groups = group_manga_tags(tags)
         if not groups:
             empty_label = CaptionLabel(self.tr("暂无标签"), self.tagGroupsWidget)
@@ -2291,10 +2340,18 @@ class MangaDetailInterface(QWidget):
                 values,
                 self.tagGroupsWidget,
                 tag_search_index=self.tagSearchIndex,
+                source_site=source_site,
             )
             group.setProperty("tagNamespace", namespace)
             self._tagGroupWidgets.append(group)
             self.tagGroupsLayout.addWidget(group, index // 2, index % 2)
+
+    def _tagSourceSite(self):
+        if self._online_gallery is not None:
+            return str(self._online_gallery.source_site or "")
+        if self._item is not None:
+            return str(self._item.source_site or "")
+        return ""
 
     def _clearPreview(self):
         self._clearPreviewTiles()

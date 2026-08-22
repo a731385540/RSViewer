@@ -951,6 +951,53 @@ class OnlineGalleryDownloadTests(unittest.TestCase):
             events,
         )
 
+    def test_nh_worker_downloads_base_pages_without_ehviewer_sidecar(self):
+        local_gid = self.user_repository.ensure_gallery_local_gid(
+            "nhn", "674728"
+        )
+        gallery = replace(
+            self.detail.gallery,
+            gid=local_gid,
+            token="",
+            url="https://nhentai.net/g/674728/",
+            source_site="nhn",
+            source_id="674728",
+            preview_page_size=40,
+        )
+        previews = tuple(
+            OnlineGalleryPreview(
+                page_index=index,
+                page_url=f"https://nhentai.net/g/674728/{index + 1}/",
+                page_token=str(index + 1),
+            )
+            for index in range(3)
+        )
+        detail = replace(self.detail, gallery=gallery, previews=previews)
+        provider = FakeDownloadProvider(self.pages)
+        provider.settings = SimpleNamespace(site="nhn")
+        sidecars = []
+        worker = OnlineGalleryDownloadWorker(
+            provider=provider,
+            detail=detail,
+            cover_data=image_bytes("gray"),
+            gallery_cache=self.cache,
+            ehviewer_repository=self.external_repository,
+            user_repository=self.user_repository,
+            site="nhn",
+            retry_count=1,
+        )
+        worker.signals.sidecarReady.connect(lambda *_args: sidecars.append(True))
+
+        worker.run()
+
+        record = self.user_repository.online_gallery_download(local_gid)
+        folder = self.download_root / record.dirname
+        self.assertEqual(ONLINE_DOWNLOAD_COMPLETED, record.state)
+        self.assertEqual("674728", record.metadata["source_id"])
+        self.assertEqual([0, 1, 2], provider.page_calls)
+        self.assertFalse((folder / ".ehviewer").exists())
+        self.assertEqual([], sidecars)
+
     def test_early_pause_and_failure_persist_terminal_task_state(self):
         queued = OnlineGalleryDownloadRecord(
             gid=4120989,

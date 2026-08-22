@@ -6,6 +6,13 @@
 
 ### Added
 
+- 在线资源新增 NHC（nhentai.com）与 NHN（nhentai.net）来源：使用独立 `requests.Session` 请求列表，NHC/NHN 首页与 NHN 搜索结果由 BeautifulSoup+lxml 本地解析 HTML；NHC 搜索复用当前站点前端的同域数据请求。两站支持关键词、Tag 搜索、数字分页、元数据详情、页面预览、在线阅读和基础图断点下载；站点没有独立原图规格，因此不显示原图下载入口。EH/EXH/NHC/NHN 使用单选来源切换，各自保留页面状态。
+- NHC 预览与阅读严格消费详情接口返回的 `thumbnail_url` / `source_url`，NHN 从详情页缩略节点进入 `/g/{id}/{page}/` 并解析 `#image-container`；图片地址均限制到对应 HTTPS CDN。NH 下载使用独立的稳定本地 ID 与 `gallery_sources` 远程编号映射，避免同号 EH GID 冲突，不生成 EH 专用 `.ehviewer` sidecar。
+- 设置页新增互相隔离的 NHC Cookie 与 NHN Cookie 密码输入项；在线搜索统一保存完整 `namespace:value` 并继续兼容已有缩写。EH/EXH 请求转为缩写；NHN 保留完整 namespace 及 `female:`/`male:`；NHC 按实际 `tag:`、`artist:`、`group:` 等分组解析站点筛选 ID。
+- NHC/NHN 详情按真实来源自动填充分组 Tag，并让右键“复制 Tag”生成对应站点语法；EH/EXH 继续复制 `a:"name$"`，NHN/NHC 使用 `artist:"name"`、`tag:"stockings"` 等完整 namespace。NHC 额外展示 authors、relationships 等独立分组。
+- RSViewer schema 升级到 v24，新增独立 `gallery_sources(local_gid, source, remote_id)` 来源注册表；历史本地画廊优先按同步/下载记录推断 EH 或 EXH，无法判定时默认为 EXH。在线与本地卡片右上角新增来源标签，EH/EXH 为暗红色、NHN 为红色、NHC 为黄色。
+- 自定义排序编辑器新增标题定位搜索：输入时直接滚动并选中首个匹配项，不过滤或重排列表；上/下图标按钮及搜索框内的 `Page Up` / `Page Down` 可在全部匹配项间循环跳转，并显示当前位置与匹配总数。
+- 自定义排序编辑器新增紧凑图标工具栏：支持将多选项保持相对顺序移到首位或末位、随机打乱完整列表、按名称自然升序以及整表倒序；原有单步上移、下移也统一为带中文提示的图标按钮，所有变更仍需保存后才持久化。
 - 相似画廊浏览窗口中的本地详情现可直接“同步信息”：同步状态、错误与完成结果都显示在实际发起操作的独立详情页，成功后同时增量更新相似结果行和本地资源卡片，不触发整库重载。
 - 本地与在线画廊详情的关键标签及完整标签新增右键“复制 Tag”：始终从原始 namespace/tag 生成带 `$` 的 EH 精确查询 token，例如中文显示“语言：汉语”复制为 `l:"chinese$"`；本地搜索同步识别该精确语法，在线搜索保持原样提交。
 - 分类、未分类和树状归类节点新增单套持久化“自定”排序：无规则时下拉框显示 `+`，新建对话框按时间倒序列出完整成员，支持整行拖动及多选整体上移/下移；保存后显示“自定”，仅选中时展示编辑按钮。父归类对合并后代的去重全集保存独立顺序，新成员按时间倒序追加到末尾，卡片和跨书阅读共用同一顺序；“显示全部”、收藏和历史不提供该功能。

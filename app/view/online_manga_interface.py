@@ -50,11 +50,14 @@ from app.view.gallery_state_indicator import (
     GalleryStateIndicator,
     READING_NONE,
 )
+from app.view.gallery_source_badge import GallerySourceBadge
 from app.workers.eh_online_worker import OnlineCoverWorker, OnlineSearchWorker
 
 
 PageCacheKey = Tuple[str, str, str, str]
 MAX_MEMORY_PAGES_PER_SITE = 64
+EH_SITES = {"ehentai", "exhentai"}
+SEARCH_SITES = {"ehentai", "exhentai", "nhc", "nhn"}
 ONLINE_CARD_WIDTH = 229
 ONLINE_CARD_MIN_HEIGHT = 367
 ONLINE_CARD_COVER_HEIGHT = 241
@@ -71,7 +74,7 @@ class OnlinePageRequest:
 
 @dataclass
 class OnlineSiteState:
-    """In-memory browsing container isolated to one EH/EX site."""
+    """In-memory browsing container isolated to one online site."""
 
     search_text: str = ""
     keyword: str = ""
@@ -248,6 +251,8 @@ class _OnlineGalleryCardBase(CardWidget):
         self.stateIndicator = GalleryStateIndicator(self)
         self.stateIndicator.setStates(DOWNLOAD_NONE, READING_NONE)
         self.stateIndicator.raise_()
+        self.sourceBadge = GallerySourceBadge(item.source_site, self)
+        self.sourceBadge.raise_()
 
     def setDownloaded(self, downloaded):
         self.isDownloaded = bool(downloaded)
@@ -271,7 +276,9 @@ class _OnlineGalleryCardBase(CardWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.stateIndicator.move(self.width() - 26, 10)
+        self.sourceBadge.move(self.width() - self.sourceBadge.width() - 10, 10)
+        self.sourceBadge.raise_()
+        self.stateIndicator.move(self.width() - 26, 34)
         self.stateIndicator.raise_()
 
     def setCoverData(self, data: bytes):
@@ -281,17 +288,18 @@ class _OnlineGalleryCardBase(CardWidget):
 
     def contextMenuEvent(self, event):
         menu = RoundMenu(self.tr("在线画廊"), self)
-        download_action = QAction(
-            FIF.DOWNLOAD.icon(),
-            self.tr("下载"),
-            menu,
-        )
-        download_action.setEnabled(self.downloadCallback is not None)
+        has_action = False
         if self.downloadCallback is not None:
+            download_action = QAction(
+                FIF.DOWNLOAD.icon(),
+                self.tr("下载"),
+                menu,
+            )
             download_action.triggered.connect(
                 lambda _checked=False: self.downloadCallback(self.item)
             )
-        menu.addAction(download_action)
+            menu.addAction(download_action)
+            has_action = True
         if self.isDownloaded and self.openFolderCallback is not None:
             open_folder_action = QAction(
                 FIF.FOLDER.icon(),
@@ -302,6 +310,10 @@ class _OnlineGalleryCardBase(CardWidget):
                 lambda _checked=False: self.openFolderCallback(self.item)
             )
             menu.addAction(open_folder_action)
+            has_action = True
+        if not has_action:
+            event.accept()
+            return
         menu.exec(event.globalPos())
         event.accept()
 
@@ -551,7 +563,7 @@ class OnlineGalleryExtendedCard(_OnlineGalleryCardBase):
 
 
 class OnlineMangaInterface(QWidget):
-    """Online EH/EX browser whose gallery cards open the shared detail page."""
+    """Provider-neutral online gallery browser."""
 
     detailReturnRequested = Signal()
     galleryActivated = Signal(object, object, bytes)
@@ -579,6 +591,8 @@ class OnlineMangaInterface(QWidget):
         self._site_states = {
             "ehentai": OnlineSiteState(),
             "exhentai": OnlineSiteState(),
+            "nhc": OnlineSiteState(),
+            "nhn": OnlineSiteState(),
         }
         self._search_worker = None
         self._cover_workers = set()
@@ -613,8 +627,10 @@ class OnlineMangaInterface(QWidget):
         self.detailReturnButton.clicked.connect(self.detailReturnRequested)
         self.detailReturnButton.hide()
         self.siteSwitch = SegmentedWidget(self)
-        self.siteSwitch.addItem("ehentai", "E-Hentai", lambda: self.setSite("ehentai"))
-        self.siteSwitch.addItem("exhentai", "ExHentai", lambda: self.setSite("exhentai"))
+        self.siteSwitch.addItem("ehentai", "EH", lambda: self.setSite("ehentai"))
+        self.siteSwitch.addItem("exhentai", "EXH", lambda: self.setSite("exhentai"))
+        self.siteSwitch.addItem("nhc", "NHC", lambda: self.setSite("nhc"))
+        self.siteSwitch.addItem("nhn", "NHN", lambda: self.setSite("nhn"))
         self.siteSwitch.setCurrentItem(self._current_site)
         self.viewModeButton = ToolButton(self)
         self.viewModeButton.setObjectName("onlineViewModeButton")
@@ -732,11 +748,16 @@ class OnlineMangaInterface(QWidget):
         self.nextButton.setIcon(FIF.RIGHT_ARROW)
         self.previousButton.clicked.connect(self.previousPage)
         self.nextButton.clicked.connect(self.nextPage)
+        self.pageNumberLabel = CaptionLabel("", self)
+        self.pageNumberLabel.setAlignment(Qt.AlignCenter)
+        self.pageNumberLabel.setMinimumWidth(64)
+        self.pageNumberLabel.hide()
         self.previousButton.setEnabled(False)
         self.nextButton.setEnabled(False)
         footer = QHBoxLayout()
         footer.addStretch(1)
         footer.addWidget(self.previousButton)
+        footer.addWidget(self.pageNumberLabel)
         footer.addWidget(self.nextButton)
         footer.addStretch(1)
 
@@ -763,6 +784,7 @@ class OnlineMangaInterface(QWidget):
             self._refreshGalleryMarkers
         )
         StyleSheet.ONLINE_MANGA_INTERFACE.apply(self)
+        self._updateSourceCapabilities()
 
     @property
     def currentState(self):
@@ -792,6 +814,7 @@ class OnlineMangaInterface(QWidget):
         self._saveActiveState()
         self.cancelLoad()
         self._current_site = site
+        self._updateSourceCapabilities()
         if self._activated and self.isVisible():
             self._activateCurrentSite()
 
@@ -880,6 +903,7 @@ class OnlineMangaInterface(QWidget):
         self._rendered_site = site
         self.siteSwitch.setCurrentItem(site)
         self.searchEdit.setText(state.search_text or state.keyword)
+        self._updateSourceCapabilities()
         active_date = QDate.fromString(state.seek_date, "yyyy-MM-dd")
         self.timeSearchPicker.setDate(
             active_date if active_date.isValid() else QDate.currentDate()
@@ -976,9 +1000,15 @@ class OnlineMangaInterface(QWidget):
 
     def _makeProvider(self, site=None):
         site = site or self._current_site
+        cookie_item = {
+            "ehentai": cfg.onlineEhCookie,
+            "exhentai": cfg.onlineEhCookie,
+            "nhc": cfg.onlineNhcCookie,
+            "nhn": cfg.onlineNhnCookie,
+        }.get(site)
         settings = EhOnlineSettings.create(
             site=site,
-            cookie=cfg.get(cfg.onlineEhCookie),
+            cookie=cfg.get(cookie_item) if cookie_item is not None else "",
             proxy_mode=cfg.get(cfg.onlineEhProxyMode),
             manual_proxy=cfg.get(cfg.onlineEhManualProxy),
             timeout_seconds=cfg.get(cfg.onlineEhRequestTimeout),
@@ -986,6 +1016,8 @@ class OnlineMangaInterface(QWidget):
         return self._provider_factory(settings)
 
     def toggleGalleryUrlPanel(self):
+        if self._current_site not in EH_SITES:
+            return
         visible = self.galleryUrlPanel.isHidden()
         self.galleryUrlPanel.setVisible(visible)
         if visible:
@@ -993,6 +1025,8 @@ class OnlineMangaInterface(QWidget):
             self.galleryUrlEdit.selectAll()
 
     def toggleTimeSearchPanel(self):
+        if self._current_site not in EH_SITES:
+            return
         visible = self.timeSearchPanel.isHidden()
         self.timeSearchPanel.setVisible(visible)
         if visible:
@@ -1004,6 +1038,8 @@ class OnlineMangaInterface(QWidget):
 
     def galleryTarget(self, gid, token):
         site = self._current_site
+        if site not in EH_SITES:
+            raise EhOnlineError("当前来源暂不支持画廊详情")
         provider = self._site_providers.get(site)
         if provider is None:
             provider = self._makeProvider(site)
@@ -1013,10 +1049,15 @@ class OnlineMangaInterface(QWidget):
             token=str(token),
             url=build_eh_gallery_url(site, gid, token),
             title=self.tr("GID {}").format(int(gid)),
+            source_site=site,
+            source_id=str(int(gid)),
         )
         return gallery, provider
 
     def openGalleryUrl(self):
+        if self._current_site not in EH_SITES:
+            self._showUnsupportedAction()
+            return
         try:
             address = parse_eh_gallery_url(self.galleryUrlEdit.text())
             gallery, provider = self.galleryTarget(address.gid, address.token)
@@ -1037,6 +1078,9 @@ class OnlineMangaInterface(QWidget):
 
     def search(self, *_args):
         site = self._current_site
+        if site not in SEARCH_SITES:
+            self._showUnsupportedAction(self.tr("当前来源暂不支持搜索"))
+            return
         state = self.currentState
         self._activated = True
         self._rendered_site = site
@@ -1046,6 +1090,8 @@ class OnlineMangaInterface(QWidget):
         self._requestPage(site, request)
 
     def searchForText(self, text):
+        if self._current_site not in SEARCH_SITES:
+            return False
         keyword = " ".join(str(text or "").split())
         if not keyword:
             return False
@@ -1058,6 +1104,9 @@ class OnlineMangaInterface(QWidget):
         self.detailReturnButton.setVisible(bool(available))
 
     def seekDate(self, *_args):
+        if self._current_site not in EH_SITES:
+            self._showUnsupportedAction(self.tr("当前来源暂不支持日期定位"))
+            return
         date = self.timeSearchPicker.date
         if not date.isValid():
             self._showError(self.tr("请选择有效日期"))
@@ -1093,8 +1142,11 @@ class OnlineMangaInterface(QWidget):
         self._rendered_site = site
         state.search_text = self.searchEdit.text()
         request = OnlinePageRequest(
-            keyword=state.keyword if state.current_page is not None else state.search_text.strip(),
-            seek_date=state.seek_date if state.current_page is not None else "",
+            keyword=(
+                state.keyword if state.current_page is not None else state.search_text.strip()
+            ),
+            seek_date=(state.seek_date if state.current_page is not None else "")
+            if site in EH_SITES else "",
             cursor=state.current_cursor if state.current_page is not None else "",
             scroll_position=self.scrollArea.verticalScrollBar().value(),
         )
@@ -1178,16 +1230,27 @@ class OnlineMangaInterface(QWidget):
         self._setLoading(False)
         self.nextButton.setEnabled(bool(page.next_cursor))
         self.previousButton.setEnabled(bool(page.previous_cursor))
+        numeric_paging = site not in EH_SITES
+        self.pageNumberLabel.setVisible(numeric_paging)
+        self.pageNumberLabel.setText(
+            self.tr("第 {} 页").format(state.current_cursor or "1")
+            if numeric_paging
+            else ""
+        )
         date_text = (
             self.tr(" · 定位 {} ").format(state.seek_date)
             if state.seek_date
             else ""
         )
-        self.resultLabel.setText(
-            self.tr("{}{}· 本页 {} 个画廊；点击卡片查看详情。").format(
+        if site in EH_SITES:
+            summary = self.tr("{}{}· 本页 {} 个画廊；点击卡片查看详情。").format(
                 self._siteName(site), date_text, len(page.items)
             )
-        )
+        else:
+            summary = self.tr("{} · 本页 {} 个画廊；点击卡片查看详情。").format(
+                self._siteName(site), len(page.items)
+            )
+        self.resultLabel.setText(summary)
         self._retainCurrentPageCovers(site, page.items)
         self._setItems(page.items)
         self._restoreScrollPosition(site, state.scroll_position)
@@ -1219,9 +1282,15 @@ class OnlineMangaInterface(QWidget):
         self.nextButton.setEnabled(bool(page and page.next_cursor))
 
     def _setLoading(self, loading):
-        self.searchButton.setEnabled(not loading)
-        self.timeSearchButton.setEnabled(not loading)
-        self.latestButton.setEnabled(not loading)
+        eh_actions = self._current_site in EH_SITES
+        search_actions = self._current_site in SEARCH_SITES
+        self.searchEdit.setEnabled(search_actions and not loading)
+        self.searchButton.setEnabled(search_actions and not loading)
+        self.timeSearchToggleButton.setEnabled(eh_actions and not loading)
+        self.galleryUrlToggleButton.setEnabled(eh_actions and not loading)
+        self.timeSearchButton.setEnabled(eh_actions and not loading)
+        self.galleryUrlOpenButton.setEnabled(eh_actions and not loading)
+        self.latestButton.setEnabled(eh_actions and not loading)
         self.refreshButton.setEnabled(not loading)
         if loading:
             self.previousButton.setEnabled(False)
@@ -1252,12 +1321,12 @@ class OnlineMangaInterface(QWidget):
         self._cards_by_gid = {card.item.gid: card for card in self._cards}
         for card in self._cards:
             card.setMarked(self._galleryMatchesMarker(card.item))
-            card.setGalleryStates(
-                *self._gallery_states.get(
+            card.setGalleryStates(*(
+                self._gallery_states.get(
                     int(card.item.gid),
                     (DOWNLOAD_NONE, READING_NONE),
                 )
-            )
+            ))
             data = self._cover_data.get(
                 self._coverMemoryKey(self._current_site, card.item)
             )
@@ -1492,7 +1561,34 @@ class OnlineMangaInterface(QWidget):
 
     @staticmethod
     def _siteName(site):
-        return "ExHentai" if site == "exhentai" else "E-Hentai"
+        return {
+            "ehentai": "EH",
+            "exhentai": "EXH",
+            "nhc": "NHC",
+            "nhn": "NHN",
+        }.get(site, str(site).upper())
+
+    def _updateSourceCapabilities(self):
+        eh_actions = self._current_site in EH_SITES
+        self.searchEdit.setPlaceholderText(
+            self.tr('搜索标题或标签，例如 artist:"name" language:chinese')
+        )
+        self.pageNumberLabel.setVisible(not eh_actions)
+        if not eh_actions:
+            self.timeSearchPanel.hide()
+            self.galleryUrlPanel.hide()
+        self._setLoading(self._search_worker is not None)
+
+    def _showUnsupportedAction(self, message=None):
+        InfoBar.info(
+            title=self.tr("暂未支持"),
+            content=message or self.tr("当前来源暂只支持列表、搜索与翻页"),
+            orient=Qt.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP_RIGHT,
+            duration=3000,
+            parent=self,
+        )
 
     @staticmethod
     def _siteDisplayMode(view_mode):

@@ -102,7 +102,7 @@ class EhTagImportAndSearchTests(unittest.TestCase):
 
         chinese_result = index.search("全彩")[0]
         self.assertEqual("other：full color\n全彩", chinese_result.display_text)
-        self.assertEqual('o:"full color"', chinese_result.query_token)
+        self.assertEqual('other:"full color"', chinese_result.query_token)
         self.assertIn(
             "other：full color\n全彩",
             [suggestion.display_text for suggestion in index.search("full")],
@@ -137,13 +137,13 @@ class EhTagImportAndSearchTests(unittest.TestCase):
         search_edit.refreshTagSuggestions()
         self.assertEqual(["other：full color\n全彩"], search_edit.suggestionTexts())
         self.assertTrue(search_edit.activateTagSuggestion("other：full color\n全彩"))
-        self.assertEqual('o:"full color"', search_edit.text())
+        self.assertEqual('other:"full color"', search_edit.text())
 
         search_edit.setText(search_edit.text() + " 汉语")
         search_edit.setCursorPosition(len(search_edit.text()))
         search_edit.refreshTagSuggestions()
         self.assertTrue(search_edit.activateTagSuggestion("language：chinese\n汉语"))
-        self.assertEqual('o:"full color" l:chinese', search_edit.text())
+        self.assertEqual('other:"full color" language:chinese', search_edit.text())
 
     def test_search_history_is_persisted_limited_and_recent_first(self):
         service = SearchHistoryService(self.repository, 20)

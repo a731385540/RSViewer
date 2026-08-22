@@ -111,7 +111,10 @@ def export_ehviewer_database(source_repository, destination_path):
                     continue
                 columns = table_columns(destination, table)
                 quoted = ", ".join(f'"{column}"' for column in columns)
-                rows = source.execute(f'SELECT {quoted} FROM "{table}"').fetchall()
+                where = " WHERE GID >= 0" if "GID" in columns else ""
+                rows = source.execute(
+                    f'SELECT {quoted} FROM "{table}"{where}'
+                ).fetchall()
                 placeholders = ", ".join("?" for _ in columns)
                 destination.executemany(
                     f'INSERT INTO "{table}"({quoted}) VALUES ({placeholders})',
@@ -168,6 +171,7 @@ def _export_user_relations(source, destination):
                d.POSTED, d.UPLOADER, d.RATING, d.SIMPLE_LANGUAGE, f.created_at
         FROM manga_favorites AS f
         JOIN DOWNLOADS AS d ON d.GID = f.gid
+        WHERE d.GID >= 0
         ORDER BY f.created_at
         """
     ).fetchall()
@@ -190,6 +194,7 @@ def _export_user_relations(source, destination):
                0, h.viewed_at
         FROM manga_browsing_history AS h
         JOIN DOWNLOADS AS d ON d.GID = h.gid
+        WHERE d.GID >= 0
         ORDER BY h.viewed_at
         """
     ).fetchall()

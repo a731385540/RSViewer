@@ -119,6 +119,28 @@ class EhViewerDatabaseTransferTests(unittest.TestCase):
             )
 
         exported = self.root / "exported" / "eh.db"
+        with closing(sqlite3.connect(self.repository.database_path)) as connection:
+            connection.execute(
+                """
+                INSERT INTO DOWNLOADS(
+                    GID, TOKEN, TITLE, TITLE_JPN, CATEGORY, RATING,
+                    STATE, LEGACY, TIME, LABEL
+                ) VALUES (-1000000123, '', 'NH title', '', 1, 0, 3, 0, 1, '')
+                """
+            )
+            connection.execute(
+                "INSERT INTO DOWNLOAD_DIRNAME VALUES (-1000000123, 'NHC-123-title')"
+            )
+            connection.execute(
+                "INSERT INTO Gallery_Tags(GID) VALUES (-1000000123)"
+            )
+            connection.execute(
+                "INSERT INTO manga_favorites VALUES (-1000000123, 1)"
+            )
+            connection.execute(
+                "INSERT INTO manga_browsing_history VALUES (-1000000123, 1)"
+            )
+            connection.commit()
         export_result = export_ehviewer_database(self.repository, exported)
 
         self.assertEqual(1, export_result.gallery_count)
@@ -143,6 +165,12 @@ class EhViewerDatabaseTransferTests(unittest.TestCase):
             self.assertEqual(1, connection.execute(
                 "SELECT COUNT(*) FROM LOCAL_FAVORITES"
             ).fetchone()[0])
+            self.assertEqual(
+                0,
+                connection.execute(
+                    "SELECT COUNT(*) FROM DOWNLOADS WHERE GID < 0"
+                ).fetchone()[0],
+            )
             self.assertEqual(789, connection.execute(
                 "SELECT TIME FROM HISTORY WHERE GID = 42"
             ).fetchone()[0])

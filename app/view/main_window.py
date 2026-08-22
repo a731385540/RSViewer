@@ -120,6 +120,11 @@ MAX_ONLINE_PAGE_DOWNLOAD_THREADS = 6
 MAX_GALLERY_UPDATE_CONCURRENCY = 1
 
 
+def configured_eh_site():
+    site = str(cfg.get(cfg.onlineEhSite) or "").casefold()
+    return site if site in {"ehentai", "exhentai"} else "exhentai"
+
+
 class MainWindow(FluentWindow):
     def __init__(self, window_coordinator=None):
         super().__init__()
@@ -371,7 +376,7 @@ class MainWindow(FluentWindow):
             self.prepareOnlineGalleryDownload
         )
         self.onlineMangaInterface.localFolderOpenRequested.connect(
-            self.openGalleryFolder
+            self._openOnlineGalleryFolder
         )
         self.downloadManagerInterface = DownloadManagerInterface(self)
         self.downloadManagerInterface.startRequested.connect(
@@ -852,7 +857,7 @@ class MainWindow(FluentWindow):
             self.userLibraryRepository.database_path,
             cfg.get(cfg.ehViewerMangaRoot),
             self.userLibraryRepository,
-            cfg.get(cfg.onlineEhSite),
+            configured_eh_site(),
         )
         worker.signals.loaded.connect(
             lambda records: self._finishOrganizerScan(worker, records)
@@ -1466,6 +1471,17 @@ class MainWindow(FluentWindow):
                 self.tr("系统资源管理器无法打开目录：{}").format(folder)
             )
 
+    def _openOnlineGalleryFolder(self, remote_gid):
+        site = str(
+            getattr(self.onlineMangaInterface, "_current_site", "") or ""
+        )
+        local_gid = self.userLibraryRepository.local_gid_for_source(
+            site, str(int(remote_gid))
+        )
+        self.openGalleryFolder(
+            local_gid if local_gid is not None else int(remote_gid)
+        )
+
     def _localGalleryItem(self, gid):
         return next(
             (
@@ -1634,7 +1650,8 @@ class MainWindow(FluentWindow):
         self.mangaReaderInterface.setFocus()
 
     def startOnlineGalleryDownload(self, detail):
-        gid = int(detail.gallery.gid)
+        gid = self._onlineGalleryLocalGid(detail.gallery, create=False)
+        gid = int(gid if gid is not None else detail.gallery.gid)
         if self._isGalleryTrashed(gid):
             return
         original = self.userLibraryRepository.gallery_original_state(gid)
@@ -1668,7 +1685,12 @@ class MainWindow(FluentWindow):
                     provider.settings.site, detail.gallery
                 ),
             )
+            self._syncOnlineDownloadState(detail)
         except Exception as error:
+            local_gid = self._onlineGalleryLocalGid(
+                detail.gallery, create=False
+            )
+            gid = int(local_gid if local_gid is not None else gid)
             self._markManagedDownloadFailed(gid, str(error))
             self.mangaDetailInterface.setOnlineDownloadState(
                 ONLINE_DOWNLOAD_FAILED,
@@ -1678,6 +1700,8 @@ class MainWindow(FluentWindow):
             )
 
     def startOnlineOriginalGalleryDownload(self, detail):
+        if detail.gallery.source_site in {"nhc", "nhn"}:
+            return
         gid = int(detail.gallery.gid)
         if self._isGalleryTrashed(gid):
             return
@@ -1729,7 +1753,9 @@ class MainWindow(FluentWindow):
             self.mangaDetailInterface.setOriginalDownloadState(message=str(error))
 
     def prepareOnlineGalleryDownload(self, item, provider, cover_data=b""):
-        gid = int(item.gid)
+        remote_gid = int(item.gid)
+        gid = self._onlineGalleryLocalGid(item, create=False)
+        gid = int(gid if gid is not None else remote_gid)
         coordinator = getattr(self, "windowCoordinator", None)
         if coordinator is not None and coordinator.hasTrashOperation(gid):
             InfoBar.info(
@@ -1756,7 +1782,7 @@ class MainWindow(FluentWindow):
         site = str(provider.settings.site)
         if cover_data:
             self.onlineGalleryCache.put_cover_data(site, item, cover_data)
-        self.onlineMangaInterface.setGalleryDownloaded(gid)
+        self.onlineMangaInterface.setGalleryDownloaded(remote_gid)
         InfoBar.info(
             title=self.tr("正在加入下载"),
             content=self.tr("正在后台登记画廊与本地目录…"),
@@ -1785,17 +1811,17 @@ class MainWindow(FluentWindow):
             )
         )
         worker.signals.failed.connect(
-            lambda _gid, message: self._failOnlineDownloadPreparation(
-                worker,
-                gid,
-                message,
+            lambda _gid, message: self._failInitialOnlineDownloadPreparation(
+                worker, item, message
             )
         )
         self._localDownloadPrepareWorkers[gid] = worker
         self.onlineDownloadRegistrationThreadPool.start(worker)
 
     def _registerOnlineGalleryDownload(self, item, site, cover_data=b""):
-        gid = int(item.gid)
+        remote_gid = int(item.gid)
+        detail = self._localizedOnlineDetail(build_online_detail_from_gallery(item))
+        gid = int(detail.gallery.gid)
         trash_lookup = getattr(self.userLibraryRepository, "gallery_trash", None)
         if trash_lookup is not None and trash_lookup(gid) is not None:
             return {"blocked": "trash"}
@@ -1815,6 +1841,9 @@ class MainWindow(FluentWindow):
         metadata.update(
             {
                 "url": item.url,
+                "source_id": str(
+                    getattr(item, "source_id", "") or remote_gid
+                ),
                 "category": item.category,
                 "cover_url": item.thumbnail_url,
                 "posted": item.posted,
@@ -1847,7 +1876,7 @@ class MainWindow(FluentWindow):
         )
         record, folder, newly_registered = self._prepareOnlineDownloadTarget(
             record,
-            build_online_detail_from_gallery(item),
+            detail,
             cover_data,
             target_label,
             existing_comments,
@@ -1859,15 +1888,19 @@ class MainWindow(FluentWindow):
             "newly_registered": newly_registered,
             "local_item": local_item,
             "target_label": target_label,
+            "local_gid": gid,
+            "remote_gid": remote_gid,
         }
 
     def _finishOnlineDownloadRegistration(
         self, worker, item, provider, cover_data, site, result
     ):
-        gid = int(item.gid)
-        if self._localDownloadPrepareWorkers.get(gid) is not worker:
+        remote_gid = int(item.gid)
+        local_gid = self._onlineGalleryLocalGid(item, create=False)
+        lookup_gid = int(local_gid if local_gid is not None else remote_gid)
+        if self._localDownloadPrepareWorkers.get(lookup_gid) is not worker:
             return
-        self._localDownloadPrepareWorkers.pop(gid, None)
+        self._localDownloadPrepareWorkers.pop(lookup_gid, None)
         blocked = result.get("blocked")
         if blocked is not None:
             self._syncOnlineGalleryDownloadMarkers()
@@ -1892,6 +1925,7 @@ class MainWindow(FluentWindow):
             )
             return
         record = result["record"]
+        gid = int(result["local_gid"])
         folder = result["folder"]
         newly_registered = result["newly_registered"]
         local_item = result["local_item"]
@@ -1901,6 +1935,7 @@ class MainWindow(FluentWindow):
             newly_registered,
             folder,
             local_item,
+            remote_gid,
         )
         self._setCurrentDownloadState(
             gid,
@@ -1952,10 +1987,13 @@ class MainWindow(FluentWindow):
     def _finishOnlineDownloadPreparation(
         self, worker, detail, cover_data, site, target_label
     ):
-        gid = int(detail.gallery.gid)
-        if self._localDownloadPrepareWorkers.get(gid) is not worker:
+        local_gid = self._onlineGalleryLocalGid(detail.gallery, create=False)
+        lookup_gid = int(
+            local_gid if local_gid is not None else detail.gallery.gid
+        )
+        if self._localDownloadPrepareWorkers.get(lookup_gid) is not worker:
             return
-        self._localDownloadPrepareWorkers.pop(gid, None)
+        self._localDownloadPrepareWorkers.pop(lookup_gid, None)
         self.onlineGalleryCache.put_detail(site, detail, cover_data)
         self._startPreparedOnlineGalleryDownload(
             detail,
@@ -1967,7 +2005,8 @@ class MainWindow(FluentWindow):
     def _startPreparedOnlineGalleryDownload(
         self, detail, site, cover_data, target_label
     ):
-        gid = int(detail.gallery.gid)
+        local_gid = self._onlineGalleryLocalGid(detail.gallery, create=False)
+        gid = int(local_gid if local_gid is not None else detail.gallery.gid)
         try:
             download_provider = self._createOnlineDownloadProvider(site)
             self._queueOnlineGalleryDownload(
@@ -1988,6 +2027,20 @@ class MainWindow(FluentWindow):
             return
         self._localDownloadPrepareWorkers.pop(gid, None)
         self._markManagedDownloadFailed(gid, message)
+        self._showOnlineDownloadPreparationError(message)
+
+    def _failInitialOnlineDownloadPreparation(self, worker, item, message):
+        remote_gid = int(item.gid)
+        local_gid = self._onlineGalleryLocalGid(item, create=False)
+        lookup_gid = int(local_gid if local_gid is not None else remote_gid)
+        if self._localDownloadPrepareWorkers.get(lookup_gid) is not worker:
+            return
+        self._localDownloadPrepareWorkers.pop(lookup_gid, None)
+        self._markManagedDownloadFailed(
+            local_gid if local_gid is not None else remote_gid,
+            message,
+        )
+        self.onlineMangaInterface.setGalleryDownloaded(remote_gid, False)
         self._showOnlineDownloadPreparationError(message)
 
     def _showOnlineDownloadPreparationError(self, message):
@@ -2028,14 +2081,14 @@ class MainWindow(FluentWindow):
                 item,
                 record,
                 comments,
-                cfg.get(cfg.onlineEhSite),
+                configured_eh_site(),
                 sync_record,
             )
             provider = self._createOnlineDownloadProvider(
                 item.source_site
                 or (sync_record.site if sync_record else "")
                 or (record.site if record else "")
-                or cfg.get(cfg.onlineEhSite)
+                or configured_eh_site()
             )
         except Exception as error:
             self.mangaDetailInterface.setOnlineDownloadState(
@@ -2068,14 +2121,14 @@ class MainWindow(FluentWindow):
                 item,
                 record,
                 comments,
-                cfg.get(cfg.onlineEhSite),
+                configured_eh_site(),
                 sync_record,
             )
             provider = self._createOnlineDownloadProvider(
                 item.source_site
                 or (sync_record.site if sync_record else "")
                 or (record.site if record else "")
-                or cfg.get(cfg.onlineEhSite)
+                or configured_eh_site()
             )
             original = self.userLibraryRepository.gallery_original_state(gid)
             self._queueOnlineGalleryDownload(
@@ -2204,14 +2257,14 @@ class MainWindow(FluentWindow):
             item,
             record,
             self.userLibraryRepository.online_gallery_comments(gid),
-            cfg.get(cfg.onlineEhSite),
+            configured_eh_site(),
             sync_record,
         )
         site = (
             item.source_site
             or (sync_record.site if sync_record else "")
             or (record.site if record else "")
-            or cfg.get(cfg.onlineEhSite)
+            or configured_eh_site()
         )
         provider = self._createOnlineDownloadProvider(site)
         return detail, provider
@@ -2469,7 +2522,7 @@ class MainWindow(FluentWindow):
     def _createLocalMetadataSyncWorker(
         self, item, download_record=None, sync_record=None
     ):
-        default_site = cfg.get(cfg.onlineEhSite)
+        default_site = configured_eh_site()
         site = str(
             item.source_site
             or (sync_record.site if sync_record else "")
@@ -2664,7 +2717,7 @@ class MainWindow(FluentWindow):
         record = GalleryUpdateRecord(
             source_gid=gid,
             source_token=str(item.gallery_token),
-            site=str(item.source_site or cfg.get(cfg.onlineEhSite)),
+            site=str(item.source_site or configured_eh_site()),
             title=str(item.display_title),
             folder=str(item.folder),
             latest_url=str(item.newer_gallery_urls[-1]),
@@ -2981,14 +3034,59 @@ class MainWindow(FluentWindow):
         self._localMetadataBatchFailures = []
 
     def _createOnlineDownloadProvider(self, site):
+        cookie_item = {
+            "ehentai": cfg.onlineEhCookie,
+            "exhentai": cfg.onlineEhCookie,
+            "nhc": cfg.onlineNhcCookie,
+            "nhn": cfg.onlineNhnCookie,
+        }.get(site, cfg.onlineEhCookie)
         settings = EhOnlineSettings.create(
             site=site,
-            cookie=cfg.get(cfg.onlineEhCookie),
+            cookie=cfg.get(cookie_item),
             proxy_mode=cfg.get(cfg.onlineEhProxyMode),
             manual_proxy=cfg.get(cfg.onlineEhManualProxy),
             timeout_seconds=cfg.get(cfg.onlineEhRequestTimeout),
         )
         return create_eh_online_provider(settings)
+
+    def _onlineGalleryLocalGid(self, gallery, create=False):
+        site = str(getattr(gallery, "source_site", "") or "").casefold()
+        remote_id = str(
+            getattr(gallery, "source_id", "") or getattr(gallery, "gid", "")
+        )
+        if site not in {"ehentai", "exhentai", "nhc", "nhn"}:
+            return int(gallery.gid)
+        if create:
+            return self.userLibraryRepository.ensure_gallery_local_gid(
+                site, remote_id
+            )
+        existing = self.userLibraryRepository.local_gid_for_source(
+            site, remote_id
+        )
+        if existing is not None or site in {"ehentai", "exhentai"}:
+            return existing
+        return UserLibraryRepository.gallery_local_gid_candidate(
+            site, remote_id
+        )
+
+    def _localizedOnlineDetail(self, detail):
+        site = str(
+            getattr(detail.gallery, "source_site", "") or ""
+        ).casefold()
+        if site not in {"nhc", "nhn"}:
+            return detail
+        local_gid = self._onlineGalleryLocalGid(detail.gallery, create=True)
+        if int(detail.gallery.gid) == int(local_gid):
+            return detail
+        gallery = replace(
+            detail.gallery,
+            gid=int(local_gid),
+            source_id=str(
+                getattr(detail.gallery, "source_id", "")
+                or detail.gallery.gid
+            ),
+        )
+        return replace(detail, gallery=gallery)
 
     def _prepareOnlineDownloadTarget(
         self,
@@ -3025,10 +3123,13 @@ class MainWindow(FluentWindow):
         return prepared, folder, not previous_dirname
 
     def _announceOnlineDownloadRegistration(
-        self, gid, newly_registered=False, folder=None, local_item=None
+        self, gid, newly_registered=False, folder=None, local_item=None,
+        online_gid=None,
     ):
         gid = int(gid)
-        self.onlineMangaInterface.setGalleryDownloaded(gid)
+        self.onlineMangaInterface.setGalleryDownloaded(
+            int(online_gid if online_gid is not None else gid)
+        )
         refreshed = (
             self._applyLocalGalleryItem(local_item)
             if local_item is not None
@@ -3425,12 +3526,22 @@ class MainWindow(FluentWindow):
         self._refreshDownloadManager()
 
     def cancelOnlineGalleryDownload(self, gid):
+        requested_gid = int(gid)
+        detail = self.mangaDetailInterface.currentOnlineDetail
+        if detail is not None and int(detail.gallery.gid) == requested_gid:
+            local_gid = self._onlineGalleryLocalGid(detail.gallery, create=False)
+            if local_gid is not None:
+                gid = int(local_gid)
         gid = int(gid)
         owner = self._downloadOwner(gid)
         if owner is not None and owner is not self:
             owner.cancelOnlineGalleryDownload(gid)
             return
         prepare_worker = self._localDownloadPrepareWorkers.pop(gid, None)
+        if prepare_worker is None and requested_gid != gid:
+            prepare_worker = self._localDownloadPrepareWorkers.pop(
+                requested_gid, None
+            )
         if prepare_worker is not None:
             self._cancelManagedDownloadPreparation(prepare_worker)
             record = self.userLibraryRepository.online_gallery_download(gid)
@@ -3609,7 +3720,8 @@ class MainWindow(FluentWindow):
         self._refreshLocalGalleryItem(gid)
 
     def _syncOnlineDownloadState(self, detail):
-        gid = int(detail.gallery.gid)
+        local_gid = self._onlineGalleryLocalGid(detail.gallery, create=False)
+        gid = int(local_gid if local_gid is not None else detail.gallery.gid)
         if self._isGalleryTrashed(gid):
             return
         record = self.userLibraryRepository.online_gallery_download(gid)
@@ -3637,12 +3749,19 @@ class MainWindow(FluentWindow):
             self.mangaDetailInterface.setOnlineDownloadState(
                 "idle", 0, detail.page_count
             )
-        self._syncOriginalDownloadState(gid)
+        if detail.gallery.source_site in {"ehentai", "exhentai"}:
+            self._syncOriginalDownloadState(gid)
 
     def _syncCurrentDownload(self, gid, fallback_message=""):
         item = self.mangaDetailInterface.currentItem
         detail = self.mangaDetailInterface.currentOnlineDetail
-        online_matches = detail is not None and int(detail.gallery.gid) == int(gid)
+        detail_local_gid = (
+            self._onlineGalleryLocalGid(detail.gallery, create=False)
+            if detail is not None else None
+        )
+        online_matches = detail is not None and int(
+            detail_local_gid if detail_local_gid is not None else detail.gallery.gid
+        ) == int(gid)
         local_matches = item is not None and int(item.gid) == int(gid)
         if not online_matches and not local_matches:
             return
@@ -3684,7 +3803,13 @@ class MainWindow(FluentWindow):
         detail = self.mangaDetailInterface.currentOnlineDetail
         matches = (
             (item is not None and int(item.gid) == int(gid))
-            or (detail is not None and int(detail.gallery.gid) == int(gid))
+            or (
+                detail is not None
+                and int(
+                    self._onlineGalleryLocalGid(detail.gallery, create=False)
+                    or detail.gallery.gid
+                ) == int(gid)
+            )
         )
         record = self.userLibraryRepository.online_gallery_download(gid)
         if record is not None and record.download_mode != DOWNLOAD_MODE_STANDARD:
@@ -3908,19 +4033,42 @@ class MainWindow(FluentWindow):
         if item is not None:
             self._syncCurrentDownload(item.gid)
         elif detail is not None:
-            self._syncCurrentDownload(detail.gallery.gid)
+            local_gid = self._onlineGalleryLocalGid(
+                detail.gallery, create=False
+            )
+            self._syncCurrentDownload(
+                local_gid if local_gid is not None else detail.gallery.gid
+            )
 
     def _syncOnlineGalleryDownloadMarkers(self, incomplete_records=None):
         if incomplete_records is None:
             incomplete_records = (
                 self.userLibraryRepository.incomplete_online_gallery_downloads()
             )
-        states = {
-            int(item.gid): local_gallery_states(item)
-            for item in getattr(self, "_libraryItems", ())
-        }
+        current_site = str(
+            getattr(self.onlineMangaInterface, "_current_site", "") or ""
+        )
+        states = {}
+        for item in getattr(self, "_libraryItems", ()):
+            item_site = str(getattr(item, "source_site", "") or "")
+            if current_site and item_site and item_site != current_site:
+                continue
+            try:
+                remote_gid = int(
+                    getattr(item, "source_id", "") or item.gid
+                )
+            except (TypeError, ValueError):
+                continue
+            states[remote_gid] = local_gallery_states(item)
         for record in incomplete_records:
-            gid = int(record.gid)
+            if current_site and str(record.site or "") != current_site:
+                continue
+            try:
+                gid = int(
+                    dict(record.metadata or {}).get("source_id") or record.gid
+                )
+            except (TypeError, ValueError):
+                continue
             _download, reading = states.get(
                 gid, (DOWNLOAD_INCOMPLETE, "none")
             )
@@ -3928,8 +4076,21 @@ class MainWindow(FluentWindow):
         active_state = getattr(self, "_activeDownloadState", None)
         if active_state is not None:
             active_gids, _speeds = active_state()
-            for gid in active_gids:
-                gid = int(gid)
+            for local_gid in active_gids:
+                record = self.userLibraryRepository.online_gallery_download(
+                    local_gid
+                )
+                if record is None or (
+                    current_site and str(record.site or "") != current_site
+                ):
+                    continue
+                try:
+                    gid = int(
+                        dict(record.metadata or {}).get("source_id")
+                        or record.gid
+                    )
+                except (TypeError, ValueError):
+                    continue
                 _download, reading = states.get(
                     gid, (DOWNLOAD_INCOMPLETE, "none")
                 )

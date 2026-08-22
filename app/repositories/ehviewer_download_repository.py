@@ -674,7 +674,15 @@ class EhViewerDownloadRepository:
             ).fetchone()
         if row and str(row[0] or "").strip():
             return self._sanitize_dirname(str(row[0]))
-        prefix = f"{gid}-"
+        site = str(getattr(detail.gallery, "source_site", "") or "").casefold()
+        remote_id = str(
+            getattr(detail.gallery, "source_id", "") or gid
+        ).strip()
+        prefix = (
+            f"{site.upper()}-{remote_id}-"
+            if site in {"nhc", "nhn"}
+            else f"{gid}-"
+        )
         existing = [
             child.name
             for child in self.manga_root.iterdir()
@@ -683,7 +691,7 @@ class EhViewerDownloadRepository:
         if existing:
             return max(existing, key=len)
         title = detail.secondary_title or detail.title or str(gid)
-        return self._sanitize_dirname(f"{gid}-{title}")
+        return self._sanitize_dirname(f"{prefix}{title}")
 
     def _sanitize_dirname(self, value):
         value = _INVALID_FILENAME_RE.sub("_", str(value)).strip().rstrip(". ")

@@ -55,8 +55,8 @@ class EhTagSuggestion:
     def query_token(self) -> str:
         escaped_tag = self.raw_tag.replace("\\", "\\\\").replace('"', '\\"')
         if any(character.isspace() for character in escaped_tag):
-            return f'{self.abbreviation}:"{escaped_tag}"'
-        return f"{self.abbreviation}:{escaped_tag}"
+            return f'{self.namespace}:"{escaped_tag}"'
+        return f"{self.namespace}:{escaped_tag}"
 
 
 @dataclass(frozen=True)

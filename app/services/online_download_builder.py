@@ -49,6 +49,7 @@ def online_detail_metadata(detail, download_label=None):
         "preview_page_size": max(
             0, int(detail.gallery.preview_page_size or 0)
         ),
+        "source_id": str(detail.gallery.source_id or detail.gallery.gid),
     }
     if download_label is not None:
         metadata["download_label"] = str(download_label or "")
@@ -77,7 +78,7 @@ def build_online_gallery_from_download_record(record):
     if site not in SITE_BASE_URLS:
         raise ValueError("下载记录中的画廊站点无效")
     token = str(record.token or "").strip()
-    if not token:
+    if site in {"ehentai", "exhentai"} and not token:
         raise ValueError("下载记录缺少 gallery token，无法从源站恢复")
 
     metadata = dict(record.metadata or {})
@@ -91,10 +92,16 @@ def build_online_gallery_from_download_record(record):
         rating = None
 
     gid = int(record.gid)
+    source_id = str(metadata.get("source_id") or gid)
+    url = str(metadata.get("url") or "").strip()
+    if site in {"ehentai", "exhentai"}:
+        url = f"{SITE_BASE_URLS[site]}g/{source_id}/{token}/"
+    elif not url:
+        raise ValueError("下载记录缺少来源画廊地址，无法恢复")
     return OnlineGallery(
         gid=gid,
         token=token,
-        url=f"{SITE_BASE_URLS[site]}g/{gid}/{token}/",
+        url=url,
         title=str(record.title or ""),
         category=str(metadata.get("category") or ""),
         thumbnail_url=str(metadata.get("cover_url") or ""),
@@ -104,6 +111,8 @@ def build_online_gallery_from_download_record(record):
         uploader=str(metadata.get("uploader") or ""),
         rating=rating,
         preview_page_size=_metadata_preview_page_size(metadata),
+        source_site=site,
+        source_id=source_id,
     )
 
 
@@ -131,15 +140,22 @@ def build_online_gallery_from_local(
         or (sync_record.token if sync_record else "")
         or (download_record.token if download_record else "")
     )
-    if not token:
+    if site in {"ehentai", "exhentai"} and not token:
         raise ValueError("本地画廊缺少 gallery token，无法从源站同步")
     category = str(
         metadata.get("category") or CATEGORY_NAMES.get(int(item.category), "Misc")
     )
+    source_id = str(item.source_id or metadata.get("source_id") or item.gid)
+    if site in {"ehentai", "exhentai"}:
+        url = f"{SITE_BASE_URLS[site]}g/{source_id}/{token}/"
+    else:
+        url = str(metadata.get("url") or "").strip()
+        if not url:
+            raise ValueError("本地画廊缺少来源地址，无法从源站补齐")
     return OnlineGallery(
         gid=int(item.gid),
         token=token,
-        url=f"{SITE_BASE_URLS[site]}g/{int(item.gid)}/{token}/",
+        url=url,
         title=item.english_title or item.display_title,
         category=category,
         thumbnail_url=str(metadata.get("cover_url") or ""),
@@ -152,6 +168,8 @@ def build_online_gallery_from_local(
             if metadata.get("rating") is not None else item.rating
         ),
         preview_page_size=_metadata_preview_page_size(metadata),
+        source_site=site,
+        source_id=source_id,
     )
 
 
@@ -182,7 +200,10 @@ def build_online_detail_from_local(
     base_url = SITE_BASE_URLS[site]
     token = gallery.token
     page_tokens = tuple(item.page_tokens)
-    if len(page_tokens) != int(item.page_count) or not all(page_tokens):
+    if (
+        site in {"ehentai", "exhentai"}
+        and (len(page_tokens) != int(item.page_count) or not all(page_tokens))
+    ):
         raise ValueError("本地 .ehviewer 缺少完整页面 ID，无法从源站补齐")
     category = str(
         metadata.get("category") or CATEGORY_NAMES.get(int(item.category), "Misc")
@@ -192,13 +213,17 @@ def build_online_detail_from_local(
         category=category,
         page_count=int(item.page_count),
     )
-    previews = tuple(
-        OnlineGalleryPreview(
-            page_index=index,
-            page_url=f"{base_url}s/{page_token}/{int(item.gid)}-{index + 1}",
-            page_token=page_token,
+    previews = (
+        tuple(
+            OnlineGalleryPreview(
+                page_index=index,
+                page_url=f"{base_url}s/{page_token}/{gallery.source_id}-{index + 1}",
+                page_token=page_token,
+            )
+            for index, page_token in enumerate(page_tokens)
         )
-        for index, page_token in enumerate(page_tokens)
+        if site in {"ehentai", "exhentai"}
+        else ()
     )
     return OnlineGalleryDetail(
         gallery=gallery,

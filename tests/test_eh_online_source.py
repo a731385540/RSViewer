@@ -371,7 +371,7 @@ class EhOnlineProviderContractTests(unittest.TestCase):
         provider._crawler = crawler
         page = provider.search(OnlineGalleryQuery(keyword="artist:someone"))
 
-        self.assertEqual("artist:someone", crawler.search)
+        self.assertEqual("a:someone", crawler.search)
         self.assertEqual(1, len(page.items))
         self.assertEqual("Example", page.items[0].title)
         self.assertEqual(("artist:someone",), page.items[0].tags)
@@ -391,7 +391,7 @@ class EhOnlineProviderContractTests(unittest.TestCase):
             )
         )
         self.assertEqual(
-            [("artist:someone", None), (None, "2026-08-01")],
+            [("a:someone", None), (None, "2026-08-01")],
             crawler.main_calls[-2:],
         )
         provider.set_display_mode("extended")

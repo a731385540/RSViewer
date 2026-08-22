@@ -34,7 +34,7 @@ def gallery_preview_page_number(gallery, page_index) -> int:
 
 @dataclass(frozen=True)
 class OnlineGallery:
-    """Metadata exposed by an E-Hentai compatible gallery list."""
+    """Provider-neutral metadata exposed by an online gallery list."""
 
     gid: int
     token: str
@@ -49,6 +49,12 @@ class OnlineGallery:
     rating: Optional[float] = None
     source_mode: str = ""
     preview_page_size: int = 0
+    source_site: str = ""
+    source_id: str = ""
+
+    @property
+    def source_identity(self):
+        return self.source_site, self.source_id or str(self.gid)
 
 
 @dataclass(frozen=True)

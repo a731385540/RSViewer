@@ -78,7 +78,8 @@ class EhViewerDataSource:
         items = []
         with closing(self._connect_read_only()) as connection:
             connection.row_factory = sqlite3.Row
-            for row in connection.execute(self._LOCAL_MANGA_QUERY):
+            query = self._local_manga_query(connection)
+            for row in connection.execute(query):
                 folder = self._resolve_folder(row, folders_by_gid, folders_by_name)
                 if folder is None:
                     continue
@@ -95,8 +96,9 @@ class EhViewerDataSource:
         gid = int(gid)
         with closing(self._connect_read_only()) as connection:
             connection.row_factory = sqlite3.Row
+            query = self._local_manga_query(connection)
             row = connection.execute(
-                f"SELECT * FROM ({self._LOCAL_MANGA_QUERY}) WHERE GID = ?",
+                f"SELECT * FROM ({query}) WHERE GID = ?",
                 (gid,),
             ).fetchone()
         if row is None:
@@ -141,6 +143,8 @@ class EhViewerDataSource:
             page_count=0,
             added_time=int(row["TIME"] or 0),
             download_complete=download_complete,
+            source_site=(row["SOURCE"] or "exhentai").strip(),
+            source_id=(row["REMOTE_ID"] or str(row["GID"])).strip(),
         )
 
     def load_pages(self, item: MangaItem) -> MangaItem:
@@ -149,8 +153,18 @@ class EhViewerDataSource:
         spider_info = self.read_spider_info(item)
         if spider_info is None:
             downloaded_count = len(pages)
-            total_count = len(pages)
-            complete = None
+            total_count = self._registered_page_count(item.gid) or len(pages)
+            downloaded_indexes = {
+                int(path.stem) - 1
+                for path in pages
+                if path.stem.isdigit()
+                and 1 <= int(path.stem) <= total_count
+            }
+            complete = (
+                downloaded_indexes == set(range(total_count))
+                if total_count and item.source_site in {"nhc", "nhn"}
+                else None
+            )
             gallery_token = item.gallery_token
             page_tokens = item.page_tokens
         else:
@@ -176,6 +190,20 @@ class EhViewerDataSource:
             gallery_token=gallery_token,
             page_tokens=page_tokens,
         )
+
+    def _registered_page_count(self, gid):
+        try:
+            with closing(self._connect_read_only()) as connection:
+                row = connection.execute(
+                    """
+                    SELECT page_count FROM online_gallery_downloads
+                    WHERE gid = ? LIMIT 1
+                    """,
+                    (int(gid),),
+                ).fetchone()
+        except sqlite3.DatabaseError:
+            return 0
+        return max(0, int(row[0] or 0)) if row is not None else 0
 
     @staticmethod
     def list_page_files(folder):
@@ -462,6 +490,8 @@ class EhViewerDataSource:
             downloads.CATEGORY,
             downloads.LABEL,
             downloads.TIME,
+            COALESCE(source.source, 'exhentai') AS SOURCE,
+            COALESCE(source.remote_id, CAST(downloads.GID AS TEXT)) AS REMOTE_ID,
             dirname.DIRNAME,
             tags.ARTIST,
             tags.COSPLAYER,
@@ -478,5 +508,29 @@ class EhViewerDataSource:
         FROM DOWNLOADS AS downloads
         LEFT JOIN DOWNLOAD_DIRNAME AS dirname ON dirname.GID = downloads.GID
         LEFT JOIN Gallery_Tags AS tags ON tags.GID = downloads.GID
+        LEFT JOIN gallery_sources AS source ON source.local_gid = downloads.GID
         ORDER BY downloads.TIME DESC
     """
+
+    @classmethod
+    def _local_manga_query(cls, connection):
+        source_table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'gallery_sources'"
+        ).fetchone()
+        if source_table is not None:
+            return cls._LOCAL_MANGA_QUERY
+        return (
+            cls._LOCAL_MANGA_QUERY.replace(
+                "COALESCE(source.source, 'exhentai') AS SOURCE,",
+                "'exhentai' AS SOURCE,",
+            )
+            .replace(
+                "COALESCE(source.remote_id, CAST(downloads.GID AS TEXT)) AS REMOTE_ID,",
+                "CAST(downloads.GID AS TEXT) AS REMOTE_ID,",
+            )
+            .replace(
+                "        LEFT JOIN gallery_sources AS source ON source.local_gid = downloads.GID\n",
+                "",
+            )
+        )

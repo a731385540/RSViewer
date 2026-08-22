@@ -129,6 +129,8 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
         self.app.processEvents()
         self.old_site = cfg.get(cfg.onlineEhSite)
         self.old_cookie = cfg.get(cfg.onlineEhCookie)
+        self.old_nhc_cookie = cfg.get(cfg.onlineNhcCookie)
+        self.old_nhn_cookie = cfg.get(cfg.onlineNhnCookie)
         self.old_proxy_mode = cfg.get(cfg.onlineEhProxyMode)
         self.old_manual_proxy = cfg.get(cfg.onlineEhManualProxy)
         self.old_timeout = cfg.get(cfg.onlineEhRequestTimeout)
@@ -140,6 +142,8 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
         self.old_cache_hours = cfg.get(cfg.onlineEhThumbnailCacheHours)
         cfg.set(cfg.onlineEhSite, "ehentai")
         cfg.set(cfg.onlineEhCookie, "token")
+        cfg.set(cfg.onlineNhcCookie, "nhc_session=one")
+        cfg.set(cfg.onlineNhnCookie, "nhn_session=two")
         cfg.set(cfg.onlineEhProxyMode, "direct")
         cfg.set(cfg.onlineEhManualProxy, "")
         cfg.set(cfg.onlineEhRequestTimeout, 30)
@@ -156,6 +160,8 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
     def tearDown(self):
         cfg.set(cfg.onlineEhSite, self.old_site)
         cfg.set(cfg.onlineEhCookie, self.old_cookie)
+        cfg.set(cfg.onlineNhcCookie, self.old_nhc_cookie)
+        cfg.set(cfg.onlineNhnCookie, self.old_nhn_cookie)
         cfg.set(cfg.onlineEhProxyMode, self.old_proxy_mode)
         cfg.set(cfg.onlineEhManualProxy, self.old_manual_proxy)
         cfg.set(cfg.onlineEhRequestTimeout, self.old_timeout)
@@ -320,6 +326,108 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
         first.setGalleryStates.assert_called_once_with("complete", "partial")
         second.setDownloaded.assert_not_called()
         second.setGalleryStates.assert_not_called()
+        interface.deleteLater()
+
+    def test_four_sources_are_single_select_and_nh_search_is_enabled(self):
+        interface = OnlineMangaInterface(
+            provider_factory=_FakeOnlineProvider,
+            auto_load_on_show=False,
+        )
+        self.assertEqual(
+            ["EH", "EXH", "NHC", "NHN"],
+            [
+                interface.siteSwitch.items[key].text()
+                for key in ("ehentai", "exhentai", "nhc", "nhn")
+            ],
+        )
+
+        interface.setSite("nhc")
+
+        self.assertEqual("nhc", interface._current_site)
+        self.assertEqual("nhc", interface.siteSwitch.currentRouteKey())
+        self.assertTrue(interface.searchEdit.isEnabled())
+        self.assertTrue(interface.searchButton.isEnabled())
+        self.assertFalse(interface.timeSearchToggleButton.isEnabled())
+        self.assertFalse(interface.galleryUrlToggleButton.isEnabled())
+        self.assertTrue(interface.refreshButton.isEnabled())
+        self.assertEqual("nhc_session=one", interface._makeProvider().settings.cookie)
+        interface.setSite("nhn")
+        self.assertEqual("nhn_session=two", interface._makeProvider().settings.cookie)
+        interface.deleteLater()
+
+    def test_nh_card_opens_metadata_detail_with_current_provider(self):
+        interface = OnlineMangaInterface(
+            provider_factory=_FakeOnlineProvider,
+            auto_load_on_show=False,
+        )
+        interface.setSite("nhc")
+        gallery = OnlineGallery(
+            10,
+            "",
+            "https://nhentai.com/en/comic/sample",
+            "NHC sample",
+            source_site="nhc",
+            source_id="10",
+        )
+        activated = []
+        interface.galleryActivated.connect(
+            lambda item, provider, cover: activated.append((item, provider, cover))
+        )
+
+        interface._openGallery(gallery)
+
+        self.assertEqual(1, len(activated))
+        self.assertIs(gallery, activated[0][0])
+        self.assertEqual("nhc", activated[0][1].settings.site)
+        interface.deleteLater()
+
+    def test_nh_card_download_uses_the_current_source_provider(self):
+        interface = OnlineMangaInterface(
+            provider_factory=_FakeOnlineProvider,
+            auto_load_on_show=False,
+        )
+        interface.setSite("nhn")
+        gallery = OnlineGallery(
+            20,
+            "",
+            "https://nhentai.net/g/20/",
+            "NHN sample",
+            source_site="nhn",
+            source_id="20",
+        )
+        requested = []
+        interface.galleryDownloadRequested.connect(
+            lambda item, provider, cover: requested.append(
+                (item, provider, cover)
+            )
+        )
+
+        interface._downloadGallery(gallery)
+
+        self.assertEqual(1, len(requested))
+        self.assertIs(gallery, requested[0][0])
+        self.assertEqual("nhn", requested[0][1].settings.site)
+        interface.deleteLater()
+
+    def test_online_cards_show_the_declared_source_badge(self):
+        interface = OnlineMangaInterface(
+            provider_factory=_FakeOnlineProvider,
+            auto_load_on_show=False,
+        )
+        interface._setItems(
+            (
+                OnlineGallery(
+                    10,
+                    "",
+                    "https://nhentai.com/en/comic/sample",
+                    "NHC sample",
+                    source_site="nhc",
+                    source_id="10",
+                ),
+            )
+        )
+
+        self.assertEqual("nhc", interface._cards[0].sourceBadge.source)
         interface.deleteLater()
 
     def test_card_click_opens_internal_detail_with_current_provider(self):

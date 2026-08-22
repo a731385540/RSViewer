@@ -73,6 +73,7 @@ class MangaItem:
     gallery_token: str = ""
     page_tokens: Tuple[str, ...] = ()
     source_site: str = ""
+    source_id: str = ""
     posted: str = ""
     uploader: str = ""
     rating: Optional[float] = None

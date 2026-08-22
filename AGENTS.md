@@ -1,6 +1,6 @@
 # RSViewer 项目维护指南
 
-本文档面向未来接手本仓库的 AI 助手和开发者。开始任何工作前，请先完整阅读本文、`README.md` 和 `CHANGELOG.md`，然后执行 `git status --short`。本文描述的是 2026-08-20 的工作区现状；若代码与本文冲突，以代码为准，并在本次修改中同步修正文档。
+本文档面向未来接手本仓库的 AI 助手和开发者。开始任何工作前，请先完整阅读本文、`README.md` 和 `CHANGELOG.md`，然后执行 `git status --short`。本文描述的是 2026-08-22 的工作区现状；若代码与本文冲突，以代码为准，并在本次修改中同步修正文档。
 
 ## 1. 项目背景与边界
 
@@ -73,11 +73,13 @@ RSViewer/
    ├─ services/library_organizer.py  # 未登记本地目录扫描、同步与回收站边界
    ├─ services/gallery_trash.py      # 画廊软删除、原位还原与永久清理事务
    ├─ services/online_download_builder.py # 从本地 sidecar 重建源站补齐请求
+   ├─ services/online_query_syntax.py # EH/EXH/NHC/NHN 查询与复制 Tag 语法适配
    ├─ services/manga_title_similarity.py # 章节/卷号与元数据噪声剥离、标题相似度匹配
    ├─ services/online_thumbnail_cache.py # 在线封面分站点磁盘缓存与惰性过期
    ├─ services/online_gallery_memory_cache.py # 最近 20 个在线画廊 LRU 内存缓存
    ├─ sources/ehviewer_source.py     # EhViewer 只读查询、分类写入与惰性页面加载
    ├─ sources/eh_online_source.py    # EH/EX provider 接口、运行配置与用户爬虫适配器
+   ├─ sources/nh_online_source.py    # NHC/NHN 列表、详情、预览、阅读与基础下载 provider
    ├─ workers/eh_online_worker.py    # 在线搜索、封面、详情、预览和阅读 Worker
    ├─ workers/ehviewer_database_worker.py # 设置页兼容数据库导出 Worker
    ├─ workers/online_gallery_download_worker.py # 在线画廊断点下载 Worker
@@ -102,6 +104,7 @@ RSViewer/
       ├─ recycle_bin_interface.py    # 可复选的画廊回收站卡片页
       ├─ manga_detail_interface.py   # 本地/在线共享详情、页面预览与评论区
       ├─ gallery_state_indicator.py  # 下载/阅读双状态点
+      ├─ gallery_source_badge.py     # 在线/本地卡片来源标签
       ├─ similar_gallery_browser_window.py # 单例相似画廊浏览窗口
       ├─ manga_reader_interface.py   # 单页阅读、缩放、预读和全屏控制
       ├─ online_manga_interface.py   # 在线画廊搜索、翻页、封面和主题化结果页
@@ -131,8 +134,9 @@ RSViewer/
 - `mangaSearchHoverEnabled`：本地资源搜索按钮悬停自动展开开关；搜索词为空且鼠标离开搜索区域后自动收起。
 - `searchHistoryLimit`：本地与在线资源共享搜索历史的保存上限，只允许 5/10/15/20，绝不超过 20；降低后即时裁剪自有数据库。
 - `searchShortcut` / `tagSidebarShortcut` / `backShortcut`：展开本地资源搜索栏、切换标签栏和返回上一级的全局快捷键，均使用按键捕获设置。
-- `onlineEhSite`：在线资源默认站点，支持 `ehentai` 与 `exhentai`。
+- `onlineEhSite`：在线资源默认站点，支持 `ehentai`、`exhentai`、`nhc` 与 `nhn`，界面显示为 EH、EXH、NHC、NHN。
 - `onlineEhCookie`：用户自行提供的完整 EH Cookie；裸 token 按 `igneous` 兼容。该值仅存于被忽略的本机配置 JSON，不得输出到日志或提交。
+- `onlineNhcCookie` / `onlineNhnCookie`：NHC 与 NHN 各自的完整 Cookie，按来源原样注入独立 Session，不得套用 EH 裸 token 的 `igneous` 兼容，也不得输出到日志或提交。
 - `onlineEhProxyMode` / `onlineEhManualProxy`：在线 provider 使用系统代理、直连或手动 HTTP(S) 代理；手动地址仅在 `manual` 模式消费。
 - `onlineEhRequestTimeout`：传给在线 provider 的单次请求超时，支持 10/20/30/60 秒。
 - `onlineEhViewMode`：在线结果的默认视图，支持 `card`、`list` 与 `extended`；`card`/`list` 共用站点 Compact 数据，只有切入或切出 `extended` 时才分别通过原列表页 `inline_set=dm_l` / `inline_set=dm_e` 同步远端账户模式并重取字段。
@@ -171,6 +175,8 @@ RSViewer 自有 SQLite 使用 `PRAGMA user_version` 执行可重复迁移。版�
 
 版本 23 新增 `manga_custom_sort_rules` 与 `manga_custom_sort_entries`，每个分类或归类节点最多保存一套 GID 顺序；未分类使用分类作用域 `__none__`。删除分类/归类节点、永久删除画廊和 GID 版本晋升必须同步清理或迁移顺序。分类或归类成员真正离开对应集合时移除其顺序项；新加入或重新加入的成员不立刻改写规则，而是在已保存成员之后按 `added_time DESC, gid DESC` 展示。
 
+版本 24 新增独立 `gallery_sources(local_gid, source, remote_id)`，来源只允许 `ehentai`、`exhentai`、`nhc`、`nhn`。兼容 `DOWNLOADS` 不承载该字段；历史记录优先读取同步记录、其次下载记录，无法判定时默认为 EXH。新增兼容下载行由触发器先登记 EXH，取得明确来源的同步或下载事务随后原位纠正。软删除保留来源，永久删除清理来源，GID 晋升同步迁移。
+
 ### `app/common/style_sheet.py`
 
 把 RSViewer 自定义样式注册到 QFluentWidgets 的样式管理器。设置页、阅读设置弹窗、漫画详情标签、在线资源页和相似画廊窗口分别注册 `StyleSheet.SETTING_INTERFACE`、`StyleSheet.READER_SETTING_DIALOG`、`StyleSheet.MANGA_DETAIL_INTERFACE`、`StyleSheet.ONLINE_MANGA_INTERFACE`、`StyleSheet.SIMILAR_GALLERY_BROWSER_WINDOW`，`setTheme()` 会自动重新加载对应的 light/dark QSS。阅读设置弹窗和相似画廊浏览器都是独立窗口，不能依赖主窗口背景透传，必须分别定义浅色与深色实体背景；相似浏览器必须使用 Fluent 顶层窗口和标题栏，内部详情继续复用共享 `MangaDetailInterface`。在线资源滚动区、viewport、内容容器、结果卡片和封面占位也必须保持主题透明背景与对应明暗配色。
@@ -198,7 +204,7 @@ PyInstaller 构建必须使用仓库根目录的 `RSViewer.spec`。自定义样�
 
 分类和树状归类的持久化事实是 SQLite 关系表；旧播放列表表及 Repository 方法仅为已有数据库兼容保留，不再进入 UI、搜索或阅读序列。本地资源加载后必须构建单一 `MangaClassificationIndex`，以“类型 -> 标签 -> GID 集合”保存分类和归类直接成员关系。“显示全部”通过同一索引的 `all_gids()` 获取全集，分类直接取对应集合，父归类在查询时合并全部后代节点集合。单本增量刷新或分类操作成功后必须同步 `upsert`/重建索引，界面筛选不得再分别扫描每个 `MangaItem` 的分类字段来维护另一套判断。
 
-分类、未分类和每个归类节点各自最多保存一套自定义顺序；“显示全部”、收藏、历史等集合页不支持。没有规则时排序下拉框显示 `+`，新建对话框默认按 `added_time DESC, gid DESC` 罗列完整成员；保存后 `+` 替换为“自定”，且仅选中“自定”时显示编辑按钮。对话框支持整行拖动、多选后整体上移/下移。父归类对合并全部后代的去重成员保存独立顺序；新增成员按时间倒序追加到已保存顺序末尾。卡片显示与分类/归类阅读序列必须调用同一排序实现，自定义顺序不消费搜索词或分页。详情标题只对用户实际选中的至少两个有效字符执行大小写不敏感字面量搜索，同时匹配本地英语标题和原标题并排除源 GID。结果按钮只在当前详情等于最近查询源 GID 时显示；进程内只能存在一个非模态相似画廊窗口，新查询必须替换窗口列表、详情页和返回栈。相似窗口中的本地详情必须转发“同步信息”操作，Worker 的进行中状态、失败提示和完成结果必须更新实际发起操作的详情组件，成功后增量更新相似结果行与本地资源项，禁止硬编码到主窗口详情或触发整库重载。详情标题还可把同一段选中文字去除嵌套双引号后作为 EH/EX 带引号精确短语，直接在在线资源当前站点搜索。该跳转须独立保存来源详情、既有详情返回栈和分类/归类阅读序列；结果详情先返回结果列表，再由在线页返回来源详情。主动切换到无关路由时清除临时返回状态。
+分类、未分类和每个归类节点各自最多保存一套自定义顺序；“显示全部”、收藏、历史等集合页不支持。没有规则时排序下拉框显示 `+`，新建对话框默认按 `added_time DESC, gid DESC` 罗列完整成员；保存后 `+` 替换为“自定”，且仅选中“自定”时显示编辑按钮。对话框支持整行拖动、多选后保持相对顺序整体上移/下移或移到首尾；列表级操作支持随机打乱、按显示标题不区分大小写且识别数字的自然升序和整表倒序。排序操作使用带中文 tooltip 的紧凑图标按钮，只修改对话框临时顺序，确认保存后才持久化。对话框的标题搜索只能定位，禁止过滤、删除或重排列表；输入时选中首个大小写不敏感的包含匹配，上/下图标按钮及搜索框内的 `Page Up` / `Page Down` 在匹配项间循环定位，并显示当前位置和总匹配数。父归类对合并全部后代的去重成员保存独立顺序；新增成员按时间倒序追加到已保存顺序末尾。卡片显示与分类/归类阅读序列必须调用同一排序实现，自定义顺序不消费搜索词或分页。详情标题只对用户实际选中的至少两个有效字符执行大小写不敏感字面量搜索，同时匹配本地英语标题和原标题并排除源 GID。结果按钮只在当前详情等于最近查询源 GID 时显示；进程内只能存在一个非模态相似画廊窗口，新查询必须替换窗口列表、详情页和返回栈。相似窗口中的本地详情必须转发“同步信息”操作，Worker 的进行中状态、失败提示和完成结果必须更新实际发起操作的详情组件，成功后增量更新相似结果行与本地资源项，禁止硬编码到主窗口详情或触发整库重载。详情标题还可把同一段选中文字去除嵌套双引号后作为带引号精确短语，直接在在线资源当前站点搜索。该跳转须独立保存来源详情、既有详情返回栈和分类/归类阅读序列；结果详情先返回结果列表，再由在线页返回来源详情。主动切换到无关路由时清除临时返回状态。
 
 主窗口必须先初始化唯一的 `UserLibraryRepository`，再把其 `database_path` 传给本地数据源、下载、更新、整理、原图与回收站 Repository；禁止从配置或旧 JSON 键重新接入外部 `eh.db`。随后加载已导入的 EH 标签，构造一个全局共享的 `EhTagSearchIndex`，并创建单一 `SearchHistoryService` 供本地、收藏、本地历史和在线页面共享；不得让各页面重复读取四万多条标签或维护互相独立的搜索历史。标签仓库更新由 `scripts/import_eh_tags.py` 显式执行，主程序启动只加载 SQLite 快照，不扫描 Markdown。
 
@@ -210,17 +216,19 @@ PyInstaller 构建必须使用仓库根目录的 `RSViewer.spec`。自定义样�
 
 ### `app/sources/eh_online_source.py` 与 `app/view/online_manga_interface.py`
 
+在线来源是 EH、EXH、NHC、NHN 四选一，并分别维护 `OnlineSiteState`。NHC/NHN 由 `nh_online_source.py` 使用独立 `requests.Session`，分别注入自身 Cookie；首页和 NHN 搜索直接请求服务端 HTML并由 BeautifulSoup+lxml 本地解析，NHC 有关键词时复用站点前端实际调用的同域数据请求并严格校验 JSON 结构。两站支持搜索、严格正整数页码、元数据详情、预览、在线阅读与基础图断点下载，仍禁止日期定位和画廊 URL 跳转；因为没有独立原图规格，不提供原图下载。NHC 结构化搜索必须把 `tag:`、`artist:`、`group:` 等名称通过对应集合端点解析为 ID 后再提交画廊筛选，不能把 namespace token 当普通标题；NHN 使用其 HTML 搜索的完整 namespace。EH/EXH 继续使用响应 URL 游标而不显示数字页码。在线与本地卡片右上方共享来源标签：EH/EXH 暗红、NHN 红、NHC 黄；NHC/NHN 必须用稳定本地 ID 与 `gallery_sources` 远程编号映射，不能因与 EH 相同的数值 ID 误显示或覆盖本地下载状态。
+
 完整下载、单页补图、在线阅读、版本更新和 provider 页码校验必须统一消费 `OnlineGallery.preview_page_size`，不得各自固定按 20 张换算；只有旧记录未保存容量时才回退为 20。收齐全部全局 page token 后必须停止继续请求尾部预览页。
 
 在线详情必须沿用当前列表页 provider 的同一 `requests.Session`，直接 GET 对应 `/g/{gid}/{token}/` HTML，并在后台解析完整元数据、标签、当前账户实际返回的 20/40 张缩略预览及 `.c1` 评论。详情页 `#gnd` 中同站 `/g/{gid}/{token}/` 链接表示当前画廊存在更新版本，是判断“旧父画廊”的唯一依据；`Parent` 字段只表示当前画廊的上游版本，不得单独据此反向判旧。评论正文的 `<a href>` 只有解析为精确 EH/EX HTTPS `/g/{gid}/{token}/` 地址时才转换为 `OnlineGalleryLink`，相对链接先基于当前画廊 URL 解析，外站、搜索页、单图页、缺 token、带 query/fragment 的目标都不能成为应用内按钮。后续预览分页直接请求画廊 `?p=N` HTML；EH/EX 的多个预览可能共享同一张横向精灵图，必须保留每个节点的 CSS `width`、`height` 和 `background-position`，下载共享图片后按各自区域裁剪，不能把整张精灵图直接交给预览控件。每个预览还必须保留 `/s/{page-token}/{gid}-{page}` 中的 page token，下载任务据此生成 EhViewer `VERSION2` sidecar。在线阅读和基础下载先请求该 `/s` 单图 HTML，再读取其中 `#img` 的站点展示图；原图下载从同一单图 HTML 提取 `fullimg` 链接。原图链接只允许当前 EH/EX 站点，并必须严格匹配当前 GID 与一基页码；合法单图页不存在链接时必须抛出专用 `OriginalImageUnavailableError`，供原图任务持久降级，网络、超时、无效页面或异域链接仍是普通失败，绝不能误判为可降级。所有链路均不调用 API。请求前严格校验当前站点、GID、token、page token、单图页页码及 EH/EX/ehgt/H@H 图片主机；当前评论区只读，不实现发表评论或投票。
 
-`EhOnlineProvider` 是在线爬虫的稳定边界。UI 将 `OnlineGalleryQuery(keyword, seek_date, cursor, filters)` 交给 provider；基类先调用 `fetch_page()`，再调用可覆盖的 `filter_items()`，最后返回统一的 `OnlineGalleryPage`。EH/EX 列表没有稳定的数字页码，领域查询和在线列表 UI 均不得伪造“第 N 页”；“上一页”“下一页”按钮必须分别且只根据本次 `OnlineGalleryPage.previous_cursor` / `next_cursor` 是否存在来启用，点击后直接请求对应响应游标。尤其日期 Seek 结果不是第一页，若响应同时提供新旧两个方向就必须同时允许翻页。`seek_date` 为空或严格使用 `YYYY-MM-DD`，由 `eh_tool_refactored.py` 的原生 Seek 定位；同时存在关键词时必须先加载关键词列表建立含 `f_search` 的导航上下文，再执行 Seek。`create_eh_online_provider()` 当前返回 `RefactoredEhOnlineProvider`，它只适配用户提供的根目录 `eh_tool_refactored.py`：沿用 `requests.Session`、EH/EX HTML 列表页、`f_search`、页面生成的 next/prev URL 以及 BeautifulSoup+lxml 的多显示模式解析，不得擅自替换成其他 API 或站点接口。脚本输出的 gid/token、URL、标题、分类、封面、上传时间、页数、上传者、评分、源显示模式和分命名空间标签转换为领域模型；评分必须从文本或 EH 半星精灵图的 `background-position` 转换为 `0–5` 数值，绝不能把 CSS 样式传给 UI。缩略图仍通过同一会话下载。
+`EhOnlineProvider` 是在线爬虫的稳定边界。UI 将 `OnlineGalleryQuery(keyword, seek_date, cursor, filters)` 交给 provider；基类先调用 `fetch_page()`，再调用可覆盖的 `filter_items()`，最后返回统一的 `OnlineGalleryPage`。EH/EX 列表没有稳定的数字页码，领域查询和在线列表 UI 均不得伪造“第 N 页”；“上一页”“下一页”按钮必须分别且只根据本次 `OnlineGalleryPage.previous_cursor` / `next_cursor` 是否存在来启用，点击后直接请求对应响应游标。尤其日期 Seek 结果不是第一页，若响应同时提供新旧两个方向就必须同时允许翻页。`seek_date` 为空或严格使用 `YYYY-MM-DD`，由 `eh_tool_refactored.py` 的原生 Seek 定位；同时存在关键词时必须先加载关键词列表建立含 `f_search` 的导航上下文，再执行 Seek。`create_eh_online_provider()` 按站点创建 provider：EH/EXH 返回只适配根目录 `eh_tool_refactored.py` 的 `RefactoredEhOnlineProvider`，NHC/NHN 返回 `NhentaiOnlineProvider`。EH 适配器沿用 `requests.Session`、HTML 列表页、`f_search`、页面生成的 next/prev URL 以及 BeautifulSoup+lxml 的多显示模式解析，不得擅自替换成其他 API 或站点接口。脚本输出的 gid/token、URL、标题、分类、封面、上传时间、页数、上传者、评分、源显示模式和分命名空间标签转换为领域模型；评分必须从文本或 EH 半星精灵图的 `background-position` 转换为 `0–5` 数值，绝不能把 CSS 样式传给 UI。缩略图仍通过同一会话下载。
 
 登录 Cookie 通常不包含决定每页 25/50/100 条结果的 `hath_perks` 能力 Cookie；`RefactoredEhOnlineProvider` 必须在后台首次搜索或切换远端显示模式前用同一会话读取一次当前站点 `uconfig.php`，再请求列表，使服务器遵循账户的 Search Result Count。该初始化不得在 provider 构造函数或 GUI 线程执行，失败时应降级继续普通列表请求，不能阻断在线浏览；已有能力 Cookie 或同一 provider 后续请求不得重复初始化。禁止在客户端截取 25 条或拼接两次游标响应伪造 50 条，否则会破坏 prev/next 边界。
 
-`EhOnlineSettings` 统一提供站点基址、规范化 Cookie、代理模式/映射和请求超时。Cookie 可粘贴完整 `ipb_member_id=...; ipb_pass_hash=...; igneous=...` 字符串，单独裸 token 按 `igneous` 兼容，并从 settings 的 `repr` 中排除。系统代理由标准库发现；Windows 把单一无 scheme 代理端点展开为同地址的 `http://` 与 `https://` 时，必须规范化为同一个 HTTP CONNECT 代理供 `requests` 使用。直连关闭 session 环境代理，手动模式验证并补全 HTTP(S) URL。源码中不得硬编码 Cookie 或本机代理；`eh_tool_refactored.py` 的全局默认凭据和代理必须保持为空，运行值仅由设置注入。列表翻页 URL 只允许当前 EH/EX 主机，缩略图只允许 EH/EX 与 `ehgt.org` HTTPS 主机。
+`EhOnlineSettings` 统一提供站点基址、规范化 Cookie、代理模式/映射和请求超时。EH Cookie 可粘贴完整 `ipb_member_id=...; ipb_pass_hash=...; igneous=...` 字符串，单独裸 token 按 `igneous` 兼容；NHC/NHN Cookie 仅清理可选的 `Cookie:` 前缀和换行后原样使用。所有 Cookie 都从 settings 的 `repr` 中排除。系统代理由标准库发现；Windows 把单一无 scheme 代理端点展开为同地址的 `http://` 与 `https://` 时，必须规范化为同一个 HTTP CONNECT 代理供 `requests` 使用。直连关闭 session 环境代理，手动模式验证并补全 HTTP(S) URL。源码中不得硬编码 Cookie 或本机代理；`eh_tool_refactored.py` 的全局默认凭据和代理必须保持为空，运行值仅由设置注入。列表翻页 URL 只允许当前来源主机，缩略图必须按 provider 限制到其可信 HTTPS 图片主机。
 
-`OnlineMangaInterface` 为 `ehentai` 与 `exhentai` 分别维护独立的 `OnlineSiteState` 内存容器，保存搜索词、日期定位、当前响应游标、滚动位置及最近 64 个页面结果。切换站点先恢复其容器，容器为空才请求该站首页；工具栏“刷新”始终绕过页面内存缓存重取当前游标结果。搜索栏旁的日历按钮展开日期定位面板，链接图标按钮展开独立画廊网址输入框；网址必须通过统一的严格 EH/EX 画廊地址解析，取得 GID/token 后忽略输入地址所属站点，按当前 `_current_site` 重新生成目标 URL，并复用当前站点 provider 打开详情。结果支持 `card`、`list` 与 `extended` 三种视图，顶部图标按钮按该顺序循环且图标表示点击后的目标布局。默认 Card 使用 229px 固定宽度、367px 最小高度与 241px 封面高度，响应式列数必须复用同一尺寸常量；`list` 是与本地标题列表同为 116px 高的无封面行，只展示标题、分类、上传者和页数；Card/List 只重建当前内存结果，不得请求封面或切换远端模式。切入或切出 Extended 才由 `OnlineSearchWorker` 调用 `set_display_mode()`，沿用 `eh_tool_refactored.py` 会话请求 `inline_set=dm_l/dm_e` 并重取当前关键词、日期或游标结果。当前结果已成功加载的封面必须跨卡片重建复用，不得重新读取磁盘或下载。三类卡片右键菜单都提供“下载”，只允许鼠标左键触发详情；每张卡片通过 GID 判断本地是否已有画廊，命中时在左上角显示绿色下载图标。设置页画廊标记规则命中标题或列表元数据中已有 Tag 时，三类卡片均绘制深红边框；规则修改后所有窗口的当前卡片必须原地刷新，不得重新请求列表或封面。默认 Card 显示大封面、类型/评分、悬停滚动长标题、发布时间/上传者/页数；Extended 使用横向信息行和可换行标签，Minimal/Minimal+ 标签为空时显示缺省说明。类别色块统一使用 EH ct1–cta 渐变。列表请求使用独立搜索线程池，封面按单项任务提交到由 `onlineEhThumbnailConcurrency` 控制的专用线程池；`OnlineThumbnailCache` 按站点保存过期磁盘缓存。
+`OnlineMangaInterface` 为四个来源分别维护独立的 `OnlineSiteState` 内存容器，保存搜索词、当前游标、滚动位置及最近 64 个页面结果，EH/EXH 额外保存日期定位。切换站点先恢复其容器，容器为空才请求该站首页；工具栏“刷新”始终绕过页面内存缓存重取当前结果。搜索栏旁的日历按钮和画廊网址输入只对 EH/EXH 启用；网址必须通过统一的严格 EH/EX 画廊地址解析，取得 GID/token 后忽略输入地址所属站点，按当前 `_current_site` 重新生成目标 URL，并复用当前站点 provider 打开详情。结果支持 `card`、`list` 与 `extended` 三种视图，顶部图标按钮按该顺序循环且图标表示点击后的目标布局。默认 Card 使用 229px 固定宽度、367px 最小高度与 241px 封面高度，响应式列数必须复用同一尺寸常量；`list` 是与本地标题列表同为 116px 高的无封面行，只展示标题、分类、上传者和页数；Card/List 只重建当前内存结果，不得请求封面或切换远端模式。切入或切出 Extended 才由 `OnlineSearchWorker` 调用 `set_display_mode()`，EH/EXH 沿用 `eh_tool_refactored.py` 会话请求 `inline_set=dm_l/dm_e` 并重取当前关键词、日期或游标结果。当前结果已成功加载的封面必须跨卡片重建复用，不得重新读取磁盘或下载。EH/EXH 三类卡片右键菜单都提供“下载”，只允许鼠标左键触发详情；每张卡片通过 GID 判断本地是否已有画廊，命中时在左上角显示绿色下载图标。设置页画廊标记规则命中标题或列表元数据中已有 Tag 时，三类卡片均绘制深红边框；规则修改后所有窗口的当前卡片必须原地刷新，不得重新请求列表或封面。默认 Card 显示大封面、类型/评分、悬停滚动长标题、发布时间/上传者/页数；Extended 使用横向信息行和可换行标签，Minimal/Minimal+ 标签为空时显示缺省说明。类别色块统一使用 EH ct1–cta 渐变。列表请求使用独立搜索线程池，封面按单项任务提交到由 `onlineEhThumbnailConcurrency` 控制的专用线程池；`OnlineThumbnailCache` 按站点保存过期磁盘缓存。
 
 在线列表点击下载后必须立即在内存中占用该 GID 并标绿；SQLite 任务写入、兼容表更新、目录创建、封面落盘和本地条目读取必须进入 `MultiWindowCoordinator` 持有的共享单线程预登记池，禁止在 GUI 线程执行。预登记成功后再获取完整详情并进入统一下载 Worker，详情请求和下载线程排队期间均须保留可恢复任务记录。
 
@@ -262,7 +270,7 @@ PyInstaller 构建必须使用仓库根目录的 `RSViewer.spec`。自定义样�
 
 搜索栏支持按钮、全局快捷键和可配置的鼠标悬停展开。悬停模式不得主动抢占键盘焦点；鼠标离开搜索按钮与搜索输入区域后延迟检查，只有搜索词为空才自动收起，有内容必须保持。悬停临时展开后点击搜索按钮会切换为常驻并聚焦输入框，再点击一次只解除常驻，鼠标随后移出时恢复悬停收起逻辑；按钮从隐藏状态打开、全局快捷键和“搜索相似画廊”均属于显式常驻。关闭悬停配置后不得响应鼠标进入，显式常驻不受该配置影响。
 
-本地资源、收藏、本地历史和在线资源的主搜索框使用 `EhTagSearchLineEdit`。内存索引同时按英文原始标签与中文译名做包含匹配，标签结果以 `namespace：tag` 和译名上下两行显示；插入时使用 Markdown 中声明的缩写，多词标签必须加引号。补全只替换光标所在、引号外由空格分隔的当前条件，不得覆盖前面的条件。本地筛选要把 `o:"full color"` 等缩写还原为 `other:full color` 后匹配，在线搜索保留 EH 查询语法原样提交。候选层先按最近顺序显示匹配的历史输入，再显示标签结果；只有搜索图标、Enter 或页面明确执行搜索时才写历史，不能把逐字输入的中间状态入库。候选层必须复用 QFluentWidgets 的 `CompleterMenu`，限制为最多 8 个可见项并允许滚动；不得直接调用原生 `QCompleter.complete()`，否则会与 `SearchLineEdit` 自带菜单叠加并破坏主题。菜单关闭或搜索框真正失焦时必须取消待显示任务，`PopupFocusReason` 造成的菜单焦点归还不得重新弹出候选或拦截页面其余操作。
+本地资源、收藏、本地历史和在线资源的主搜索框使用 `EhTagSearchLineEdit`。内存索引同时按英文原始标签与中文译名做包含匹配，标签结果以 `namespace：tag` 和译名上下两行显示；补全插入完整 namespace，多词标签必须加引号，已有缩写输入继续兼容。补全只替换光标所在、引号外由空格分隔的当前条件，不得覆盖前面的条件。本地筛选要把 `o:"full color"` 等缩写还原为 `other:full color` 后匹配；在线搜索框和历史保留用户输入，provider 请求边界调用 `adapt_online_query()`：EH/EXH 把完整 namespace 转为缩写，NHN 把缩写还原为完整 namespace并保留其支持的 `female:`/`male:`，NHC 把缩写还原后将 EH 性别等细分 namespace 归入 `tag:`，两种 NH 来源均移除精确后缀 `$`。候选层先按最近顺序显示匹配的历史输入，再显示标签结果；只有搜索图标、Enter 或页面明确执行搜索时才写历史，不能把逐字输入的中间状态入库。候选层必须复用 QFluentWidgets 的 `CompleterMenu`，限制为最多 8 个可见项并允许滚动；不得直接调用原生 `QCompleter.complete()`，否则会与 `SearchLineEdit` 自带菜单叠加并破坏主题。菜单关闭或搜索框真正失焦时必须取消待显示任务，`PopupFocusReason` 造成的菜单焦点归还不得重新弹出候选或拦截页面其余操作。
 
 网格和列表卡片的右键菜单只保留固定的“在资源管理器中打开”“清空阅读记录”“同步在线信息”“搜索相似画廊”“选择分类…”“选择归类…”和“移入回收站”入口，不得重新把大量标签展开为悬浮子菜单。“在资源管理器中打开”和“清空阅读记录”始终只使用实际右键卡片，即使复选模式已有多项选中也不得扩展为批量操作；本地详情和带本地下载标记的在线卡片提供同一打开目录入口。本地详情操作栏还提供“选择分类”，必须复用同一 `MangaLabelSelectionDialog.CATEGORY` 单选流程，替换当前分类或以“未分类”清除，不得再实现另一套分类写入。“搜索相似画廊”必须在后台针对完整本地库执行，按文件元数据括号、语言/数字版标记、章节号、卷数、话数及前后篇等规则提取作品主标题，再进行保守的长标题模糊匹配；修改搜索词或切换标签退出相似模式。标签入口打开主题化 `MangaLabelSelectionDialog`：提供搜索和可滚动树，分类单选并包含“未分类”，树状归类多选；批量目标成员状态不一致时显示半选，半选保持不变，用户明确勾选或取消后才批量写入。归类窗口保留“新建并添加…”入口。右键不需要先开启复选且不得触发详情。分类更新目标 `DOWNLOADS.LABEL`，归类写 RSViewer 自有库；数据库变更应在 Worker 中执行，多项选择变化应合并为单个后台任务。详情触发的分类成功后同样要增量更新分类索引、当前详情和各共享集合，并通过现有多窗口事件同步。
 
@@ -288,7 +296,9 @@ PyInstaller 构建必须使用仓库根目录的 `RSViewer.spec`。自定义样�
 
 ### `app/view/manga_detail_interface.py`
 
-该页面由本地与在线画廊共享。本地模式每页显示 40 个预览格，并在按需读取 `.ehviewer` 后显示真实总页数、磁盘已有页数和完整状态；实际文件数少于 sidecar 页数时按 sidecar 总数创建预览格，已有页读取本地文件，缺失页只请求当前预览分页涉及的在线缩略图；实际文件数大于或等于 sidecar 页数时按实际文件数显示。只要 sidecar 含完整画廊/页面 token，就始终提供源站检查补齐，即使目标 `DOWNLOADS.STATE` 已为完成。本地“同步信息”只在后台请求当前详情 HTML，刷新标签/评论/额外元数据并显示 `#gnd` 版本检测结果，不得启动图片下载；已同步评论和版本状态跨重启恢复。在线模式显示“开始在线阅读”、站点按当前账户设置实际返回的 20/40 张每页缩略预览和只读评论区，分页数量必须使用详情响应推导的实际容量，不能固定按 20 张计算。在线预览只加载当前分页，切页先查内存缓存，未命中才后台请求；点击缩略图必须从对应全局零基页索引进入阅读器。评论作者、时间、上传者标记、评分和正文均可选择复制；评论中的 `OnlineGalleryLink` 以应用内按钮显示，点击按当前在线源重建地址并进入目标详情。主窗口维护最多 32 项的详情内返回栈，连续打开关联画廊后返回应逐级恢复上一在线或本地详情；从列表卡片或网址输入开始新的详情导航时清空旧栈，最终从在线详情返回原在线资源列表。下载控件使用竖直组合：按钮位于进度条上方，下载/排队/暂停/失败时按钮直接显示已完成页数与总页数，下载中点击同一按钮暂停。
+该页面由本地与在线画廊共享。本地模式每页显示 40 个预览格，并在按需读取 `.ehviewer` 后显示真实总页数、磁盘已有页数和完整状态；实际文件数少于 sidecar 页数时按 sidecar 总数创建预览格，已有页读取本地文件，缺失页只请求当前预览分页涉及的在线缩略图；实际文件数大于或等于 sidecar 页数时按实际文件数显示。只要 sidecar 含完整画廊/页面 token，就始终提供源站检查补齐，即使目标 `DOWNLOADS.STATE` 已为完成。本地“同步信息”只在后台请求当前详情 HTML，刷新标签/评论/额外元数据并显示 `#gnd` 版本检测结果，不得启动图片下载；已同步评论和版本状态跨重启恢复。EH/EXH 在线模式显示“开始在线阅读”、站点按当前账户设置实际返回的 20/40 张一页缩略预览和只读评论区，分页数量必须使用详情响应推导的实际容量，不能固定按 20 张计算。在线预览只加载当前分页，切页先查内存缓存，未命中才后台请求；点击缩略图必须从对应全局零基页索引进入阅读器。评论作者、时间、上传者标记、评分和正文均可选择复制；评论中的 `OnlineGalleryLink` 以应用内按钮显示，点击按当前在线源重建地址并进入目标详情。主窗口维护最多 32 项的详情内返回栈，连续打开关联画廊后返回应逐级恢复上一在线或本地详情；从列表卡片或网址输入开始新的详情导航时清空旧栈，最终从在线详情返回原在线资源列表。下载控件使用竖直组合：按钮位于进度条上方，下载/排队/暂停/失败时按钮直接显示已完成页数与总页数，下载中点击同一按钮暂停。
+
+TagChip 的复制查询必须消费当前本地或在线画廊的 `source_site`：EH/EXH 使用带 namespace 缩写和 `$` 的精确格式，NHC/NHN 使用完整 namespace 且不带 `$`。NHC 详情按 category、language、tags、parodies、artists、authors、groups、characters、relationships、attributes 的真实 JSON 集合生成分组，普通彩色标签使用 `tag:`；NHN 详情只按 `/tag/`、`/artist/`、`/group/` 等实际链接路径判定 namespace，不得从标签文字臆测 male/female。NHC/NHN 详情支持预览、在线阅读和基础下载：NHC 只消费同源详情接口返回的 `thumbnail_url` / `source_url`，NHN 从详情页 `/g/{gid}/{page}/` 节点解析 `#image-container`，所有图片 URL 必须严格限制到对应 HTTPS CDN。两站没有独立原图规格，必须隐藏原图下载和评论控件；NH 下载不写 EH 专用 `.ehviewer`，总页数与断点从自有任务记录恢复，并用来源映射后的本地 ID 避免与 EH GID 冲突。
 
 详情页仍在首次打开时后台枚举单本的全部页面路径，以供阅读器随机跳页；缩略预览不得据此一次创建全部控件或解码全部图片。预览固定每页 40 张，只创建并解码当前预览页，切页时取消上一批任务。每个预览块保留全局零基页索引，点击后必须进入对应的真实阅读页。详情标题、英文标题、元数据和标签文字均须支持鼠标/键盘选择及复制；标题选中文字的右键查询只接受至少两个有效字符，本地操作按大小写不敏感字面量匹配英语/原标题并排除当前 GID，在线操作自动组成带引号的精确短语并使用当前在线源。主信息区默认不展示归类、页数、阅读进度、已下载/完整状态、文件大小和可见性，这些低频字段统一放入默认收起且同样可复制的“查看详细”区域；其旁只在当前画廊存在最近查询时显示相似结果按钮。切换画廊时重新收起，同一画廊的异步信息刷新不得打断当前展开状态。主信息区还须显示 `language` 与 `artist` 关键标签；`group`、`parody` 等不纳入关键标签。本地和在线详情的关键标签及完整标签卡统一通过共享 `EhTagSearchIndex` 精确查询中文译名，有记录时仅显示中文、无记录时回退原始 tag；控件 tooltip 必须保留完整 `namespace:value`，`tagNamespace` 与 `rawTag` 属性分别保留原始组成，不得把翻译写回领域对象或数据库。详情标签使用独立卡片，按 EhViewer 命名空间分组并以主题化胶囊控件双栏自动换行；数据源为搜索同时生成的裸标签不得与 `namespace:value` 重复显示。样式由 `StyleSheet.MANGA_DETAIL_INTERFACE` 的 light/dark QSS 管理。
 
@@ -306,7 +316,7 @@ OptionsSettingCard
   -> QFluentWidgets 样式管理器刷新所有已注册 QSS
 ```
 
-设置页提供漫画根目录选择器和“导出 EhViewer 数据库”卡片，不再提供外部数据库路径。导出选择目标文件后必须由 `EhViewerDatabaseExportWorker` 在后台从自有库的一致读取快照新建完整 EhViewer v7 schema，合并自有收藏/历史，执行 `PRAGMA integrity_check`，再原子替换目标；不得把 Cookie 或任何 RSViewer 私有表写入导出文件。在线资源分组提供站点、Cookie/Token、系统/直连/手动代理、手动 HTTP(S) 地址、10/20/30/60 秒超时、默认展示视图、封面并发数、1–3 个画廊下载并发数、默认下载分类、画廊标题/Tag 标记规则和封面缓存过期时间，手动地址只在对应模式启用；默认分类选项消费本地资源加载得到的同一批 `DOWNLOAD_LABELS`，不存在或已删除的配置回退为未分类。画廊标记打开单个 Fluent 对话框，上半区管理标题规则、下半区管理 Tag 规则，各区加号新增且每项减号删除。视图、标记和并发数修改后对应页面或线程池即时同步。快捷键使用点击后捕获一次按键的交互，组合键或单键按下即保存，`Esc` 取消；当前可配置搜索栏、标签栏、返回、阅读器滚动和下一本快捷键。界面设置提供搜索栏鼠标悬停自动展开开关并即时生效。全局设置新增漫画阅读器分组，与阅读页内设置面板共用配置并即时同步。通用 `libraryFolders` 仍未被扫描器消费。
+设置页提供漫画根目录选择器和“导出 EhViewer 数据库”卡片，不再提供外部数据库路径。导出选择目标文件后必须由 `EhViewerDatabaseExportWorker` 在后台从自有库的一致读取快照新建完整 EhViewer v7 schema，合并自有收藏/历史，执行 `PRAGMA integrity_check`，再原子替换目标；不得把 Cookie 或任何 RSViewer 私有表写入导出文件。在线资源分组提供站点、EH Cookie/Token、NHC Cookie、NHN Cookie、系统/直连/手动代理、手动 HTTP(S) 地址、10/20/30/60 秒超时、默认展示视图、封面并发数、1–3 个画廊下载并发数、默认下载分类、画廊标题/Tag 标记规则和封面缓存过期时间，手动地址只在对应模式启用；默认分类选项消费本地资源加载得到的同一批 `DOWNLOAD_LABELS`，不存在或已删除的配置回退为未分类。画廊标记打开单个 Fluent 对话框，上半区管理标题规则、下半区管理 Tag 规则，各区加号新增且每项减号删除。视图、标记和并发数修改后对应页面或线程池即时同步。快捷键使用点击后捕获一次按键的交互，组合键或单键按下即保存，`Esc` 取消；当前可配置搜索栏、标签栏、返回、阅读器滚动和下一本快捷键。界面设置提供搜索栏鼠标悬停自动展开开关并即时生效。全局设置新增漫画阅读器分组，与阅读页内设置面板共用配置并即时同步。通用 `libraryFolders` 仍未被扫描器消费。
 
 ### EhViewer 数据库导入/导出边界
 

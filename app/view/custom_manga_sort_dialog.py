@@ -1,7 +1,21 @@
-from PySide6.QtCore import QObject, QRect, QRunnable, QSize, Qt, QThreadPool, Signal
+import random
+import re
+import unicodedata
+
+from PySide6.QtCore import (
+    QItemSelectionModel,
+    QObject,
+    QRect,
+    QRunnable,
+    QSize,
+    Qt,
+    QThreadPool,
+    Signal,
+)
 from PySide6.QtGui import QIcon, QImage, QImageReader, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QHBoxLayout,
     QListWidgetItem,
     QStyleOptionViewItem,
 )
@@ -10,8 +24,9 @@ from qfluentwidgets import (
     ListItemDelegate,
     ListWidget,
     MessageBoxBase,
-    PushButton,
+    SearchLineEdit,
     SubtitleLabel,
+    ToolButton,
 )
 from qfluentwidgets import FluentIcon as FIF
 
@@ -60,6 +75,32 @@ class _CustomSortListWidget(ListWidget):
             for item in self.selectedItems()
         }
 
+    def _orderedItems(self):
+        return [self.item(row) for row in range(self.count())]
+
+    def _replaceItems(self, ordered_items):
+        ordered_items = list(ordered_items)
+        selected = self.selectedGids()
+        current = self.currentItem()
+        current_gid = (
+            int(current.data(Qt.UserRole)) if current is not None else None
+        )
+        signals_blocked = self.blockSignals(True)
+        self.setUpdatesEnabled(False)
+        try:
+            while self.count():
+                self.takeItem(0)
+            for item in ordered_items:
+                self.addItem(item)
+                item.setSelected(int(item.data(Qt.UserRole)) in selected)
+                if int(item.data(Qt.UserRole)) == current_gid:
+                    self.setCurrentItem(item, QItemSelectionModel.NoUpdate)
+        finally:
+            self.setUpdatesEnabled(True)
+            self.blockSignals(signals_blocked)
+        self.viewport().update()
+        self.orderChanged.emit()
+
     def moveSelection(self, direction):
         direction = -1 if int(direction) < 0 else 1
         selected = self.selectedGids()
@@ -83,6 +124,67 @@ class _CustomSortListWidget(ListWidget):
             item = self.item(row)
             item.setSelected(int(item.data(Qt.UserRole)) in selected)
         self.orderChanged.emit()
+
+    def moveSelectionToBoundary(self, first):
+        selected = self.selectedGids()
+        if not selected:
+            return
+        items = self._orderedItems()
+        selected_items = [
+            item for item in items if int(item.data(Qt.UserRole)) in selected
+        ]
+        remaining_items = [
+            item for item in items if int(item.data(Qt.UserRole)) not in selected
+        ]
+        self._replaceItems(
+            selected_items + remaining_items
+            if first
+            else remaining_items + selected_items
+        )
+
+    def shuffleItems(self):
+        items = self._orderedItems()
+        random.shuffle(items)
+        self._replaceItems(items)
+
+    def sortItemsByName(self):
+        self._replaceItems(
+            sorted(
+                self._orderedItems(),
+                key=lambda item: _naturalNameKey(item.text()),
+            )
+        )
+
+    def reverseItems(self):
+        self._replaceItems(reversed(self._orderedItems()))
+
+
+def _naturalNameKey(value):
+    normalized = unicodedata.normalize("NFKC", str(value)).casefold()
+    return tuple(
+        (0, int(part)) if part.isdigit() else (1, part)
+        for part in re.split(r"(\d+)", normalized)
+        if part
+    )
+
+
+def _normalizedSearchText(value):
+    return unicodedata.normalize("NFKC", str(value)).casefold().strip()
+
+
+class _CustomSortSearchLineEdit(SearchLineEdit):
+    navigateRequested = Signal(int)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_PageUp:
+            self.navigateRequested.emit(-1)
+            event.accept()
+            return
+        if event.key() in (Qt.Key_PageDown, Qt.Key_Return, Qt.Key_Enter):
+            self.navigateRequested.emit(1)
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class _CustomSortCoverSignals(QObject):
@@ -141,20 +243,74 @@ class CustomMangaSortDialog(MessageBoxBase):
         self._items = {int(item.gid): item for item in items}
         self._listItems = {}
         self._coverWorker = None
+        self._searchMatches = []
+        self._searchPosition = -1
+        self._searchActiveGid = None
 
         self.titleLabel = SubtitleLabel(self.tr("自定排序"), self.widget)
         self.scopeLabel = BodyLabel(str(title), self.widget)
         self.scopeLabel.setToolTip(str(title))
         self.listWidget = _CustomSortListWidget(self.widget)
         self.listWidget.setMinimumHeight(500)
-        self.upButton = PushButton(FIF.UP, self.tr("上移"), self.widget)
-        self.downButton = PushButton(FIF.DOWN, self.tr("下移"), self.widget)
+        self.searchEdit = _CustomSortSearchLineEdit(self.widget)
+        self.searchEdit.setPlaceholderText(self.tr("定位标题"))
+        self.searchPreviousButton = self._createOrderButton(
+            FIF.UP, self.tr("上一个匹配项 (Page Up)")
+        )
+        self.searchNextButton = self._createOrderButton(
+            FIF.DOWN, self.tr("下一个匹配项 (Page Down)")
+        )
+        self.searchPositionLabel = BodyLabel("", self.widget)
+        self.searchPositionLabel.setAlignment(Qt.AlignCenter)
+        self.searchPositionLabel.setFixedWidth(58)
+        self.searchLayout = QHBoxLayout()
+        self.searchLayout.setContentsMargins(0, 0, 0, 0)
+        self.searchLayout.setSpacing(6)
+        self.searchLayout.addWidget(self.searchEdit, 1)
+        self.searchLayout.addWidget(self.searchPreviousButton)
+        self.searchLayout.addWidget(self.searchNextButton)
+        self.searchLayout.addWidget(self.searchPositionLabel)
+        self.moveFirstButton = self._createOrderButton(
+            FIF.CARE_UP_SOLID, self.tr("将选中项移到第一个")
+        )
+        self.upButton = self._createOrderButton(FIF.UP, self.tr("上移"))
+        self.downButton = self._createOrderButton(FIF.DOWN, self.tr("下移"))
+        self.moveLastButton = self._createOrderButton(
+            FIF.CARE_DOWN_SOLID, self.tr("将选中项移到最后一个")
+        )
+        self.shuffleButton = self._createOrderButton(
+            FIF.SYNC, self.tr("随机打乱")
+        )
+        self.nameSortButton = self._createOrderButton(
+            FIF.FONT, self.tr("按名称排序")
+        )
+        self.reverseButton = self._createOrderButton(
+            FIF.ROTATE, self.tr("倒序排列")
+        )
+        self.orderToolLayout = QHBoxLayout()
+        self.orderToolLayout.setContentsMargins(0, 0, 0, 0)
+        self.orderToolLayout.setSpacing(6)
+        for button in (
+            self.moveFirstButton,
+            self.upButton,
+            self.downButton,
+            self.moveLastButton,
+        ):
+            self.orderToolLayout.addWidget(button)
+        self.orderToolLayout.addSpacing(8)
+        for button in (
+            self.shuffleButton,
+            self.nameSortButton,
+            self.reverseButton,
+        ):
+            self.orderToolLayout.addWidget(button)
+        self.orderToolLayout.addStretch(1)
 
         self.viewLayout.addWidget(self.titleLabel)
         self.viewLayout.addWidget(self.scopeLabel)
+        self.viewLayout.addLayout(self.searchLayout)
+        self.viewLayout.addLayout(self.orderToolLayout)
         self.viewLayout.addWidget(self.listWidget, 1)
-        self.buttonLayout.insertWidget(0, self.upButton)
-        self.buttonLayout.insertWidget(1, self.downButton)
         self.yesButton.setText(self.tr("保存"))
         self.cancelButton.setText(self.tr("取消"))
 
@@ -170,12 +326,38 @@ class CustomMangaSortDialog(MessageBoxBase):
             )
             self._listItems[int(item.gid)] = row
 
+        self.moveFirstButton.clicked.connect(
+            lambda: self.listWidget.moveSelectionToBoundary(True)
+        )
         self.upButton.clicked.connect(lambda: self.listWidget.moveSelection(-1))
         self.downButton.clicked.connect(lambda: self.listWidget.moveSelection(1))
+        self.moveLastButton.clicked.connect(
+            lambda: self.listWidget.moveSelectionToBoundary(False)
+        )
+        self.shuffleButton.clicked.connect(self.listWidget.shuffleItems)
+        self.nameSortButton.clicked.connect(self.listWidget.sortItemsByName)
+        self.reverseButton.clicked.connect(self.listWidget.reverseItems)
+        self.searchEdit.textChanged.connect(self._refreshSearchMatches)
+        self.searchEdit.searchSignal.connect(
+            lambda _query: self._navigateSearch(1)
+        )
+        self.searchEdit.navigateRequested.connect(self._navigateSearch)
+        self.searchPreviousButton.clicked.connect(
+            lambda: self._navigateSearch(-1)
+        )
+        self.searchNextButton.clicked.connect(lambda: self._navigateSearch(1))
         self.listWidget.itemSelectionChanged.connect(self._updateMoveButtons)
         self.listWidget.orderChanged.connect(self._updateMoveButtons)
+        self.listWidget.orderChanged.connect(self._refreshSearchAfterReorder)
         self._updateMoveButtons()
+        self._updateSearchControls()
         self._startCoverLoad(items)
+
+    def _createOrderButton(self, icon, tooltip):
+        button = ToolButton(icon, self.widget)
+        button.setFixedSize(34, 34)
+        button.setToolTip(tooltip)
+        return button
 
     def orderedGids(self):
         return tuple(
@@ -183,15 +365,104 @@ class CustomMangaSortDialog(MessageBoxBase):
             for row in range(self.listWidget.count())
         )
 
+    def _matchingSearchItems(self):
+        query = _normalizedSearchText(self.searchEdit.text())
+        if not query:
+            return []
+        return [
+            self.listWidget.item(row)
+            for row in range(self.listWidget.count())
+            if query
+            in _normalizedSearchText(self.listWidget.item(row).text())
+        ]
+
+    def _refreshSearchMatches(self, _text=""):
+        self._searchMatches = self._matchingSearchItems()
+        self._searchPosition = 0 if self._searchMatches else -1
+        self._searchActiveGid = None
+        if self._searchPosition >= 0:
+            self._locateSearchMatch()
+        else:
+            self._updateSearchControls()
+
+    def _refreshSearchAfterReorder(self):
+        self._searchMatches = self._matchingSearchItems()
+        matching_position = next(
+            (
+                position
+                for position, item in enumerate(self._searchMatches)
+                if int(item.data(Qt.UserRole)) == self._searchActiveGid
+            ),
+            None,
+        )
+        self._searchPosition = (
+            matching_position
+            if matching_position is not None
+            else (0 if self._searchMatches else -1)
+        )
+        if self._searchMatches:
+            self._searchActiveGid = int(
+                self._searchMatches[self._searchPosition].data(Qt.UserRole)
+            )
+        else:
+            self._searchActiveGid = None
+        self._updateSearchControls()
+
+    def _navigateSearch(self, direction):
+        if not self._searchMatches:
+            self._refreshSearchMatches()
+            if not self._searchMatches:
+                return
+        step = -1 if int(direction) < 0 else 1
+        self._searchPosition = (
+            self._searchPosition + step
+        ) % len(self._searchMatches)
+        self._locateSearchMatch()
+
+    def _locateSearchMatch(self):
+        if not 0 <= self._searchPosition < len(self._searchMatches):
+            self._updateSearchControls()
+            return
+        item = self._searchMatches[self._searchPosition]
+        self._searchActiveGid = int(item.data(Qt.UserRole))
+        self.listWidget.setCurrentItem(
+            item, QItemSelectionModel.ClearAndSelect
+        )
+        self.listWidget.scrollToItem(
+            item, QAbstractItemView.PositionAtCenter
+        )
+        self._updateSearchControls()
+
+    def _updateSearchControls(self):
+        has_matches = bool(self._searchMatches)
+        self.searchPreviousButton.setEnabled(has_matches)
+        self.searchNextButton.setEnabled(has_matches)
+        if not self.searchEdit.text().strip():
+            self.searchPositionLabel.clear()
+        elif has_matches:
+            self.searchPositionLabel.setText(
+                f"{self._searchPosition + 1} / {len(self._searchMatches)}"
+            )
+        else:
+            self.searchPositionLabel.setText("0 / 0")
+
     def _updateMoveButtons(self):
         selected_rows = sorted(
             self.listWidget.row(item) for item in self.listWidget.selectedItems()
         )
-        self.upButton.setEnabled(bool(selected_rows) and selected_rows[0] > 0)
-        self.downButton.setEnabled(
+        can_move_up = bool(selected_rows) and selected_rows[0] > 0
+        can_move_down = (
             bool(selected_rows)
             and selected_rows[-1] < self.listWidget.count() - 1
         )
+        self.moveFirstButton.setEnabled(can_move_up)
+        self.upButton.setEnabled(can_move_up)
+        self.downButton.setEnabled(can_move_down)
+        self.moveLastButton.setEnabled(can_move_down)
+        has_multiple_items = self.listWidget.count() > 1
+        self.shuffleButton.setEnabled(has_multiple_items)
+        self.nameSortButton.setEnabled(has_multiple_items)
+        self.reverseButton.setEnabled(has_multiple_items)
 
     def _startCoverLoad(self, items):
         if not items:
