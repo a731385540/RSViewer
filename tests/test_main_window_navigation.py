@@ -422,6 +422,11 @@ class MainWindowNavigationTests(unittest.TestCase):
         window._currentDetailNavigationEntry = lambda: source_entry
         window.onlineMangaInterface.searchForText = MagicMock()
         window.onlineMangaInterface.setDetailReturnAvailable = MagicMock()
+        browser_state = object()
+        window.onlineMangaInterface.captureNavigationState = MagicMock(
+            return_value=browser_state
+        )
+        window.onlineMangaInterface.restoreNavigationState = MagicMock()
 
         window.searchSelectedTitleOnline("Source title")
         window.openOnlineMangaDetail = MagicMock()
@@ -430,7 +435,58 @@ class MainWindowNavigationTests(unittest.TestCase):
         window.openOnlineMangaDetail.assert_called_once_with(
             source_gallery, provider, b"cover"
         )
+        window.onlineMangaInterface.restoreNavigationState.assert_called_once_with(
+            browser_state
+        )
         self.assertEqual([earlier], list(window._detailNavigationHistory))
+
+    def test_selected_title_search_back_stack_restores_source_result_page(self):
+        window = self.window
+        detail_widget = QWidget(window)
+        detail_widget.setObjectName("sharedDetailInterface")
+        detail_widget.isOnlineGallery = True
+        window.mangaDetailInterface = detail_widget
+        window.mangaReaderInterface = QWidget(window)
+        window.stackedWidget.addWidget(detail_widget)
+        window.switchTo(detail_widget)
+        source_gallery = OnlineGallery(
+            123,
+            "abcdef0123",
+            "https://e-hentai.org/g/123/abcdef0123/",
+            "Source",
+        )
+        provider = SimpleNamespace(settings=SimpleNamespace(site="ehentai"))
+        source_entry = ("online", source_gallery, provider, b"cover")
+        browser_state = object()
+        window._onlineSearchReturnState = None
+        window._detailNavigationHistory = deque()
+        window._readingSequenceContext = None
+        window._currentDetailNavigationEntry = lambda: source_entry
+        window.onlineMangaInterface.captureNavigationState = MagicMock(
+            return_value=browser_state
+        )
+        window.onlineMangaInterface.restoreNavigationState = MagicMock()
+        window.onlineMangaInterface.searchForText = MagicMock()
+        window.onlineMangaInterface.setDetailReturnAvailable = MagicMock()
+
+        window.searchSelectedTitleOnline("Temporary search")
+        window.openOnlineMangaDetail = MagicMock()
+        self.assertTrue(window.navigateBack())
+        window.onlineMangaInterface.restoreNavigationState.assert_called_once_with(
+            browser_state
+        )
+        window.openOnlineMangaDetail.assert_called_once_with(
+            source_gallery, provider, b"cover"
+        )
+
+        window.switchTo(detail_widget)
+        window._onlineDetailWorker = None
+        window._detailNavigationHistory.clear()
+        self.assertTrue(window.navigateBack())
+        self.assertIs(
+            window.onlineMangaInterface,
+            window.stackedWidget.currentWidget(),
+        )
 
     def test_selected_title_online_search_return_expires_on_unrelated_page(self):
         window = self.window

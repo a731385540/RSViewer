@@ -618,6 +618,37 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
         interface.coverThreadPool.waitForDone(1000)
         interface.deleteLater()
 
+    def test_temporary_title_search_restores_previous_result_page(self):
+        interface = OnlineMangaInterface(
+            provider_factory=_FakeOnlineProvider,
+            auto_load_on_show=False,
+        )
+        interface.searchEdit.setText("first search")
+        interface.search()
+        self.assertTrue(self._wait_until(lambda: interface._search_worker is None))
+        original_page = interface.currentState.current_page
+        original_query_count = len(_FakeOnlineProvider.queries)
+        snapshot = interface.captureNavigationState()
+
+        self.assertTrue(interface.searchForText('"temporary title"'))
+        self.assertTrue(self._wait_until(lambda: interface._search_worker is None))
+        self.assertEqual('"temporary title"', interface.currentState.keyword)
+
+        self.assertTrue(interface.restoreNavigationState(snapshot))
+        self.assertEqual("first search", interface.currentState.keyword)
+        self.assertIs(original_page, interface.currentState.current_page)
+        self.assertEqual("first search", interface.searchEdit.text())
+        self.assertEqual(
+            original_query_count + 1,
+            len(_FakeOnlineProvider.queries),
+        )
+        self.assertEqual("ehentai", interface._rendered_site)
+        self.assertEqual("result:first search", interface._cards[0].item.title)
+        interface.cancelLoad()
+        interface.searchThreadPool.waitForDone(1000)
+        interface.coverThreadPool.waitForDone(1000)
+        interface.deleteLater()
+
     def test_gallery_marker_matches_title_and_exact_full_or_bare_tags(self):
         gallery = OnlineGallery(
             1,

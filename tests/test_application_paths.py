@@ -21,6 +21,7 @@ class ApplicationPathsTests(unittest.TestCase):
             data_root / "cache" / "online_thumbnails",
             paths.online_thumbnail_cache_dir,
         )
+        self.assertEqual(data_root / "logs", paths.logs_dir)
         self.assertEqual(
             project_root.resolve() / "app" / "resource" / "qss",
             paths.qss_root,
@@ -64,6 +65,7 @@ class ApplicationPathsTests(unittest.TestCase):
             data_root / "cache" / "online_thumbnails",
             paths.online_thumbnail_cache_dir,
         )
+        self.assertEqual(data_root / "logs", paths.logs_dir)
         self.assertEqual(
             (legacy_root.resolve() / "data" / "rsviewer.db",),
             paths.legacy_database_paths,

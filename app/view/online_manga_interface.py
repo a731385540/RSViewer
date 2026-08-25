@@ -1,3 +1,4 @@
+import logging
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from functools import partial
@@ -54,6 +55,9 @@ from app.view.gallery_source_badge import GallerySourceBadge
 from app.workers.eh_online_worker import OnlineCoverWorker, OnlineSearchWorker
 
 
+logger = logging.getLogger(__name__)
+
+
 PageCacheKey = Tuple[str, str, str, str]
 MAX_MEMORY_PAGES_PER_SITE = 64
 EH_SITES = {"ehentai", "exhentai"}
@@ -84,6 +88,21 @@ class OnlineSiteState:
     current_cache_key: Optional[PageCacheKey] = None
     pages: OrderedDict = field(default_factory=OrderedDict)
     scroll_position: int = 0
+
+
+@dataclass(frozen=True)
+class OnlineNavigationState:
+    """Restorable browser state captured before a temporary detail search."""
+
+    site: str
+    search_text: str = ""
+    keyword: str = ""
+    seek_date: str = ""
+    current_cursor: str = ""
+    current_page: Optional[OnlineGalleryPage] = None
+    current_cache_key: Optional[PageCacheKey] = None
+    scroll_position: int = 0
+    cover_data: Tuple[Tuple[Tuple[str, str], bytes], ...] = ()
 
 
 def _rating_text(item):
@@ -930,6 +949,82 @@ class OnlineMangaInterface(QWidget):
         state.search_text = self.searchEdit.text()
         state.scroll_position = self.scrollArea.verticalScrollBar().value()
 
+    def captureNavigationState(self):
+        """Capture the current result page without coupling it to detail history."""
+
+        self._saveActiveState()
+        site = self._current_site
+        state = self.currentState
+        cover_keys = {
+            self._coverMemoryKey(site, item)
+            for item in (
+                state.current_page.items if state.current_page is not None else ()
+            )
+            if item.thumbnail_url
+        }
+        return OnlineNavigationState(
+            site=site,
+            search_text=state.search_text,
+            keyword=state.keyword,
+            seek_date=state.seek_date,
+            current_cursor=state.current_cursor,
+            current_page=state.current_page,
+            current_cache_key=state.current_cache_key,
+            scroll_position=state.scroll_position,
+            cover_data=tuple(
+                (key, data)
+                for key, data in self._cover_data.items()
+                if key in cover_keys
+            ),
+        )
+
+    def restoreNavigationState(self, snapshot):
+        """Restore and render a captured page without issuing network requests."""
+
+        if not isinstance(snapshot, OnlineNavigationState):
+            return False
+        if snapshot.site not in self._site_states:
+            return False
+        self.cancelLoad()
+        self._current_site = snapshot.site
+        self.siteSwitch.setCurrentItem(snapshot.site)
+        if cfg.get(cfg.onlineEhSite) != snapshot.site:
+            cfg.set(cfg.onlineEhSite, snapshot.site)
+        state = self.currentState
+        state.search_text = snapshot.search_text
+        state.keyword = snapshot.keyword
+        state.seek_date = snapshot.seek_date
+        state.current_cursor = snapshot.current_cursor
+        state.current_page = snapshot.current_page
+        state.current_cache_key = snapshot.current_cache_key
+        state.scroll_position = snapshot.scroll_position
+        if (
+            snapshot.current_page is not None
+            and snapshot.current_cache_key is not None
+        ):
+            self._rememberPage(
+                state, snapshot.current_cache_key, snapshot.current_page
+            )
+        self._cover_data.update(dict(snapshot.cover_data))
+        self.searchEdit.setText(snapshot.search_text or snapshot.keyword)
+        active_date = QDate.fromString(snapshot.seek_date, "yyyy-MM-dd")
+        self.timeSearchPicker.setDate(
+            active_date if active_date.isValid() else QDate.currentDate()
+        )
+        self._pendingScrollRestore = None
+        self._updateSourceCapabilities()
+        if snapshot.current_page is None:
+            self._rendered_site = None
+        else:
+            self._rendered_site = snapshot.site
+            self._displayPage(
+                snapshot.site,
+                state,
+                snapshot.current_page,
+                load_covers=False,
+            )
+        return True
+
     def setFilters(self, filters):
         """Set provider-defined filters without coupling them to this widget."""
 
@@ -1159,6 +1254,16 @@ class OnlineMangaInterface(QWidget):
         force_network=False,
         display_mode=None,
     ):
+        logger.info(
+            "Online page request site=%s keyword_length=%s seek_date=%s "
+            "has_cursor=%s force_network=%s display_mode=%s",
+            site,
+            len(request.keyword),
+            request.seek_date,
+            bool(request.cursor),
+            bool(force_network),
+            display_mode or "",
+        )
         self.cancelLoad()
         state = self._site_states[site]
         cache_key = self._pageCacheKey(
@@ -1216,6 +1321,13 @@ class OnlineMangaInterface(QWidget):
         state.current_page = page
         state.current_cache_key = cache_key
         state.scroll_position = request.scroll_position
+        logger.info(
+            "Online page applied site=%s items=%s has_previous=%s has_next=%s",
+            site,
+            len(page.items),
+            bool(page.previous_cursor),
+            bool(page.next_cursor),
+        )
         self._rememberPage(state, cache_key, page)
         if site == self._current_site and self._rendered_site == site:
             self._displayPage(site, state, page, provider)
@@ -1226,7 +1338,7 @@ class OnlineMangaInterface(QWidget):
         while len(state.pages) > MAX_MEMORY_PAGES_PER_SITE:
             state.pages.popitem(last=False)
 
-    def _displayPage(self, site, state, page, provider=None):
+    def _displayPage(self, site, state, page, provider=None, load_covers=True):
         self._setLoading(False)
         self.nextButton.setEnabled(bool(page.next_cursor))
         self.previousButton.setEnabled(bool(page.previous_cursor))
@@ -1254,7 +1366,7 @@ class OnlineMangaInterface(QWidget):
         self._retainCurrentPageCovers(site, page.items)
         self._setItems(page.items)
         self._restoreScrollPosition(site, state.scroll_position)
-        if not page.items:
+        if not page.items or not load_covers:
             return
         if provider is None:
             provider = self._site_providers.get(site)
@@ -1271,6 +1383,7 @@ class OnlineMangaInterface(QWidget):
             return
         self._search_worker = None
         self._setLoading(False)
+        logger.error("Online page request failed site=%s: %s", site, message)
         if site == self._current_site:
             self._showError(message)
 

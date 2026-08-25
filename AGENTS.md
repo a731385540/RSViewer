@@ -20,7 +20,7 @@ RSViewer 是一个仅供个人、非商业使用的 Windows 桌面媒体管理�
 - GUI：PySide6，依赖范围见 `requirements.txt`。
 - Fluent UI：PySide6-Fluent-Widgets。
 - 主要平台：Windows 10/11；Mica 效果仅在符合条件的 Windows 11 环境启用。
-- 当前持久化：QFluentWidgets 的 JSON 配置，以及单一 `rsviewer.db` 中的 EhViewer 兼容画廊索引/分类和 RSViewer 树状归类、收藏、本地浏览历史、漫画阅读进度、搜索历史、在线下载状态与评论。源码版和 PyInstaller 版都使用运行根目录下的 `data/config.json`、`data/rsviewer.db` 和 `data/cache/`；源码运行根目录是项目根目录，冻结运行根目录是 exe 所在目录。旧播放列表表仅为数据库兼容保留；旧 `eh.db` 仅通过脚本只读导入，需要时由设置页另行导出。
+- 当前持久化：QFluentWidgets 的 JSON 配置，以及单一 `rsviewer.db` 中的 EhViewer 兼容画廊索引/分类和 RSViewer 树状归类、收藏、本地浏览历史、漫画阅读进度、搜索历史、在线下载状态与评论。源码版和 PyInstaller 版都使用运行根目录下的 `data/config.json`、`data/rsviewer.db`、`data/cache/` 和 `data/logs/`；源码运行根目录是项目根目录，冻结运行根目录是 exe 所在目录。旧播放列表表仅为数据库兼容保留；旧 `eh.db` 仅通过脚本只读导入，需要时由设置页另行导出。
 - 规划持久化：SQLite 媒体索引与文件系统缩略图缓存。
 - 规划媒体能力：Qt Multimedia；在确认格式覆盖不足前不要过早引入 VLC/mpv 等额外运行时。
 
@@ -33,7 +33,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-路径由 `app/common/app_paths.py` 统一解析。源码运行通过项目根目录得到稳定绝对路径；PyInstaller 运行时只读资源来自 `_MEIPASS`，配置、数据库和缓存写入 exe 同级的 `data`，不得写入临时 bundle。目标文件缺失时先迁移旧 `app/config`、`app/data` 或 `%LOCALAPPDATA%\RSViewer` 状态，再由配置层和 Repository 自动创建默认文件；已存在的目标文件不得被迁移覆盖。
+路径由 `app/common/app_paths.py` 统一解析。源码运行通过项目根目录得到稳定绝对路径；PyInstaller 运行时只读资源来自 `_MEIPASS`，配置、数据库、缓存和日志写入 exe 同级的 `data`，不得写入临时 bundle。目标文件缺失时先迁移旧 `app/config`、`app/data` 或 `%LOCALAPPDATA%\RSViewer` 状态，再由配置层和 Repository 自动创建默认文件；已存在的目标文件不得被迁移覆盖。
 
 ## 3. 当前目录结构
 
@@ -52,6 +52,7 @@ RSViewer/
 ├─ main.py                           # 唯一应用入口
 └─ app/
    ├─ common/
+   │  ├─ app_logging.py              # 滚动日志、异常钩子、Qt 消息与原生崩溃栈
    │  ├─ app_paths.py                # 源码/冻结环境的资源与可写状态路径
    │  ├─ config.py                   # 配置模型、稳定配置路径、JSON 加载
    │  └─ style_sheet.py              # 自定义 QSS 路径与主题注册
@@ -123,7 +124,9 @@ RSViewer/
 
 ### `main.py`
 
-应用组合根。读取 DPI 和语言配置，创建 `QApplication`，安装 Fluent 翻译器，创建并运行 `MainWindow`。不要在模块导入时创建窗口或进入事件循环；继续保留 `main()` 和 `if __name__ == "__main__"` 保护。
+应用组合根。先安装 `app_logging.py` 的滚动日志、Python/线程异常钩子、Qt 消息处理器和 `faulthandler`，再读取 DPI 和语言配置、创建 `QApplication`、安装 Fluent 翻译器并运行 `MainWindow`；退出事件循环后写入 clean shutdown 标记并关闭日志文件。不要在模块导入时创建窗口或进入事件循环；继续保留 `main()`、`run()` 和 `if __name__ == "__main__"` 保护。
+
+`app/common/app_logging.py` 把普通日志写入 `data/logs/rsviewer.log`，每份 5 MiB、保留 5 份；`crash.log` 保存会话标记和 `faulthandler` 全线程栈并保留 2 份。日志必须覆盖窗口生命周期、导航、任务排队/完成/失败等低频关键边界，禁止逐页打印图片 URL、Cookie、搜索正文或高速进度事件。所有日志统一脱敏 Cookie/Authorization、常见会话键、EH/EX 画廊 token 和代理凭据；异常处理与日志写入失败不得阻止应用启动或退出。
 
 ### `app/common/config.py`
 
@@ -207,6 +210,8 @@ PyInstaller 构建必须使用仓库根目录的 `RSViewer.spec`；用户双击 
 分类和树状归类的持久化事实是 SQLite 关系表；旧播放列表表及 Repository 方法仅为已有数据库兼容保留，不再进入 UI、搜索或阅读序列。本地资源加载后必须构建单一 `MangaClassificationIndex`，以“类型 -> 标签 -> GID 集合”保存分类和归类直接成员关系。“显示全部”通过同一索引的 `all_gids()` 获取全集，分类直接取对应集合，父归类在查询时合并全部后代节点集合。单本增量刷新或分类操作成功后必须同步 `upsert`/重建索引，界面筛选不得再分别扫描每个 `MangaItem` 的分类字段来维护另一套判断。
 
 分类、未分类和每个归类节点各自最多保存一套自定义顺序；“显示全部”、收藏、历史等集合页不支持。没有规则时排序下拉框显示 `+`，新建对话框默认按 `added_time DESC, gid DESC` 罗列完整成员；保存后 `+` 替换为“自定”，且仅选中“自定”时显示编辑按钮。对话框支持整行拖动、多选后保持相对顺序整体上移/下移或移到首尾；列表级操作支持随机打乱、按显示标题不区分大小写且识别数字的自然升序和整表倒序。排序操作使用带中文 tooltip 的紧凑图标按钮，只修改对话框临时顺序，确认保存后才持久化。对话框的标题搜索只能定位，禁止过滤、删除或重排列表；输入时选中首个大小写不敏感的包含匹配，上/下图标按钮及搜索框内的 `Page Up` / `Page Down` 在匹配项间循环定位，并显示当前位置和总匹配数。父归类对合并全部后代的去重成员保存独立顺序；新增成员按时间倒序追加到已保存顺序末尾。卡片显示与分类/归类阅读序列必须调用同一排序实现，自定义顺序不消费搜索词或分页。详情标题只对用户实际选中的至少两个有效字符执行大小写不敏感字面量搜索，同时匹配本地英语标题和原标题并排除源 GID。结果按钮只在当前详情等于最近查询源 GID 时显示；进程内只能存在一个非模态相似画廊窗口，新查询必须替换窗口列表、详情页和返回栈。相似窗口中的本地详情必须转发“同步信息”操作，Worker 的进行中状态、失败提示和完成结果必须更新实际发起操作的详情组件，成功后增量更新相似结果行与本地资源项，禁止硬编码到主窗口详情或触发整库重载。详情标题还可把同一段选中文字去除嵌套双引号后作为带引号精确短语，直接在在线资源当前站点搜索。该跳转须独立保存来源详情、既有详情返回栈和分类/归类阅读序列；结果详情先返回结果列表，再由在线页返回来源详情。主动切换到无关路由时清除临时返回状态。
+
+从详情选中文字发起的临时在线搜索还必须保存原在线页的来源、关键词、游标、响应页、滚动位置和已加载封面。在线页返回来源详情时先在内存恢复该快照；此后来源详情再次返回必须显示原在线结果，且不得为了恢复而重新请求网络。
 
 主窗口必须先初始化唯一的 `UserLibraryRepository`，再把其 `database_path` 传给本地数据源、下载、更新、整理、原图与回收站 Repository；禁止从配置或旧 JSON 键重新接入外部 `eh.db`。随后加载已导入的 EH 标签，构造一个全局共享的 `EhTagSearchIndex`，并创建单一 `SearchHistoryService` 供本地、收藏、本地历史和在线页面共享；不得让各页面重复读取四万多条标签或维护互相独立的搜索历史。标签仓库更新由 `scripts/import_eh_tags.py` 显式执行，主程序启动只加载 SQLite 快照，不扫描 Markdown。
 

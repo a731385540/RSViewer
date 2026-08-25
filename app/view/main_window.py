@@ -1,3 +1,4 @@
+import logging
 from collections import deque
 from dataclasses import replace
 from pathlib import Path
@@ -115,6 +116,9 @@ from app.workers.gallery_trash_worker import GalleryTrashWorker
 from app.workers.ehviewer_database_worker import EhViewerDatabaseExportWorker
 
 
+logger = logging.getLogger(__name__)
+
+
 MAX_ONLINE_DOWNLOAD_CONCURRENCY = 3
 MAX_ONLINE_PAGE_DOWNLOAD_THREADS = 6
 MAX_GALLERY_UPDATE_CONCURRENCY = 1
@@ -128,6 +132,7 @@ def configured_eh_site():
 class MainWindow(FluentWindow):
     def __init__(self, window_coordinator=None):
         super().__init__()
+        logger.info("Main window initialization started window_id=%s", id(self))
         self.windowCoordinator = (
             window_coordinator or application_window_coordinator()
         )
@@ -466,6 +471,7 @@ class MainWindow(FluentWindow):
         self._refreshDownloadManager(publish=False)
         self._refreshUpdateManager(publish=False)
         self.refreshRecycleBin()
+        logger.info("Main window initialization completed window_id=%s", id(self))
 
     def initWindow(self):
         self.resize(960, 780)
@@ -603,6 +609,7 @@ class MainWindow(FluentWindow):
         self._setNavigationMode("manga", switch_page=False)
 
     def openAdditionalWindow(self):
+        logger.info("Additional window requested source_window_id=%s", id(self))
         window = MainWindow(self.windowCoordinator)
         window.show()
         window.raise_()
@@ -1341,9 +1348,24 @@ class MainWindow(FluentWindow):
             )
             return
         reading_context = getattr(self, "_readingSequenceContext", None)
+        logger.info(
+            "Temporary online search started source_kind=%s source_gid=%s "
+            "query_length=%s",
+            previous[0],
+            getattr(previous[1], "gid", None),
+            len(query),
+        )
+        capture_browser_state = getattr(
+            self.onlineMangaInterface, "captureNavigationState", None
+        )
         self._onlineSearchReturnState = {
             "entry": previous,
             "detail_history": tuple(self._detailNavigationHistory),
+            "browser_state": (
+                capture_browser_state()
+                if capture_browser_state is not None
+                else None
+            ),
             "reading_context": (
                 {
                     "items": tuple(reading_context["items"]),
@@ -1560,6 +1582,12 @@ class MainWindow(FluentWindow):
         self.openOnlineMangaDetail(item, provider)
 
     def openOnlineMangaDetail(self, item, provider, cover_data=b""):
+        logger.info(
+            "Online detail opened site=%s gid=%s cached_cover=%s",
+            getattr(provider.settings, "site", ""),
+            getattr(item, "gid", None),
+            bool(cover_data),
+        )
         self._cancelOnlineDetailLoad()
         self._cancelLocalMetadataSync()
         self._clearReadingSequenceContext()
@@ -1620,6 +1648,7 @@ class MainWindow(FluentWindow):
         if self._onlineDetailWorker is not worker:
             return
         self._onlineDetailWorker = None
+        logger.error("Online detail load failed: %s", message)
         self.mangaDetailInterface.setOnlineError(message)
 
     def _cancelOnlineDetailLoad(self, cancel_provider=False):
@@ -3195,6 +3224,16 @@ class MainWindow(FluentWindow):
             metadata=online_detail_metadata(detail, target_label),
             created_at=existing.created_at if existing is not None else 0,
         )
+        logger.info(
+            "Gallery download queued gid=%s site=%s mode=%s completed=%s "
+            "total=%s window_id=%s",
+            gid,
+            provider.settings.site,
+            download_mode,
+            record.completed_pages,
+            record.page_count,
+            id(self),
+        )
         if (
             pre_registered
             and download_mode == DOWNLOAD_MODE_STANDARD
@@ -3533,6 +3572,11 @@ class MainWindow(FluentWindow):
             if local_gid is not None:
                 gid = int(local_gid)
         gid = int(gid)
+        logger.info(
+            "Gallery download pause requested gid=%s window_id=%s",
+            gid,
+            id(self),
+        )
         owner = self._downloadOwner(gid)
         if owner is not None and owner is not self:
             owner.cancelOnlineGalleryDownload(gid)
@@ -3653,6 +3697,11 @@ class MainWindow(FluentWindow):
     def _finishOnlineGalleryDownload(self, worker, gid, folder=None):
         if self._onlineDownloadWorkers.get(int(gid)) is not worker:
             return
+        logger.info(
+            "Gallery download completed gid=%s window_id=%s",
+            gid,
+            id(self),
+        )
         self._onlineDownloadWorkers.pop(int(gid), None)
         self._onlineDownloadSpeeds.pop(int(gid), None)
         pending_delete = int(gid) in self._pendingDownloadDeletes
@@ -3690,6 +3739,12 @@ class MainWindow(FluentWindow):
     def _failOnlineGalleryDownload(self, worker, gid, message):
         if self._onlineDownloadWorkers.get(int(gid)) is not worker:
             return
+        logger.error(
+            "Gallery download failed gid=%s window_id=%s: %s",
+            gid,
+            id(self),
+            message,
+        )
         self._onlineDownloadWorkers.pop(int(gid), None)
         self._onlineDownloadSpeeds.pop(int(gid), None)
         if int(gid) in self._pendingDownloadDeletes:
@@ -3706,6 +3761,11 @@ class MainWindow(FluentWindow):
     def _pauseOnlineGalleryDownload(self, worker, gid):
         if self._onlineDownloadWorkers.get(int(gid)) is not worker:
             return
+        logger.info(
+            "Gallery download paused gid=%s window_id=%s",
+            gid,
+            id(self),
+        )
         self._onlineDownloadWorkers.pop(int(gid), None)
         self._onlineDownloadSpeeds.pop(int(gid), None)
         if int(gid) in self._pendingDownloadDeletes:
@@ -4444,6 +4504,10 @@ class MainWindow(FluentWindow):
 
     def navigateBack(self):
         current = self.stackedWidget.currentWidget()
+        logger.info(
+            "Navigation back requested current_route=%s",
+            current.objectName() if current is not None else "",
+        )
         if current is self.mangaReaderInterface:
             if self.mangaReaderInterface.isFullscreen:
                 self.setReaderFullscreen(False)
@@ -4480,6 +4544,11 @@ class MainWindow(FluentWindow):
             state = self._onlineSearchReturnState
             self._onlineSearchReturnState = None
             self.onlineMangaInterface.setDetailReturnAvailable(False)
+            restore_browser_state = getattr(
+                self.onlineMangaInterface, "restoreNavigationState", None
+            )
+            if restore_browser_state is not None:
+                restore_browser_state(state.get("browser_state"))
             self._detailNavigationHistory.clear()
             self._detailNavigationHistory.extend(state["detail_history"])
             entry = state["entry"]
@@ -4554,6 +4623,7 @@ class MainWindow(FluentWindow):
             self.navigationResizeHandle.syncGeometry()
 
     def closeEvent(self, e):
+        logger.info("Main window shutdown started window_id=%s", id(self))
         self._closing = True
         self.hide()
         self._cancelReadingSequenceLoad()
@@ -4601,6 +4671,11 @@ class MainWindow(FluentWindow):
             global_pool.clear()
             global_pool.waitForDone(3000)
         super().closeEvent(e)
+        logger.info(
+            "Main window shutdown completed window_id=%s last_window=%s",
+            id(self),
+            is_last_window,
+        )
         if is_last_window:
             QApplication.instance().quit()
 

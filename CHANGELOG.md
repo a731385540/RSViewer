@@ -6,6 +6,7 @@
 
 ### Added
 
+- 新增自有滚动诊断日志：源码版与打包版统一写入运行根目录 `data/logs/rsviewer.log`，记录应用版本环境、窗口生命周期、导航、在线页面及下载任务关键事件，并接管主线程、后台线程、不可抛出异常与 Qt 消息；`data/logs/crash.log` 使用 `faulthandler` 保存原生闪退前的全线程 Python 栈和会话完整性标记。日志自动轮转，并统一脱敏 Cookie、授权头、EH/EX token 与代理凭据。
 - 新增根目录 `build_exe.cmd` 一键打包入口：首次运行可自动创建 `.venv` 并安装独立构建依赖，随后始终使用受维护的 `RSViewer.spec` 输出 `dist/RSViewer.exe`。
 - 新增 RSViewer 应用图标，统一用于源码窗口、启动 Splash 和 PyInstaller 可执行文件；图标资源随 QSS 一起从只读 bundle 加载，不写入运行时 `data`。
 - 将“SQLite 作为离线本地主库、MySQL 仅同步可共享元数据”的双库方案记录为待定项，具体同步协议与冲突策略暂不实现。
@@ -198,6 +199,8 @@
 
 ### Fixed
 
+- 修复从在线搜索结果进入画廊、对详情选中文字再次执行在线搜索后，返回来源画廊再返回仍落在临时文本搜索结果的问题；临时搜索现在独立保存并本地恢复原来源、关键词、游标、响应页、滚动位置和封面，返回链保持“原搜索 → 画廊 → 临时搜索 → 画廊 → 原搜索”，恢复时不重复请求网络。
+
 - 修复在线画廊详情固定按 20 张计算预览分页、账户实际返回 40 张时页数翻倍且后半分页重复的问题；详情响应现在记录实际预览容量，Provider、分页控件、缓存和本地缺页缩略图映射共用该值。
 - 修复下载期间打开第二窗口后，两个窗口因下载进度导致资源快照不同而互相触发整库重载、持续重绘卡片的问题；共享状态触发的重载不再回传同一快照，旧资源卡片销毁前会先隐藏且不再解除父对象，避免卡片短暂作为独立窗口闪现。
 - 修复账户设置使 EH/EX 每个画廊预览响应返回 40 项时，版本更新仍按固定 20 项分组跳过请求，导致错误报告“最新画廊页面 ID 不完整”且尚未创建 `new.ehviewer` / `new.json` 的问题；更新任务现在按响应页顺序收集并校验完整页面 ID，不再假定固定预览分组大小。
@@ -268,6 +271,8 @@
 
 ### Validation
 
+- `.venv\Scripts\python.exe -m unittest discover -s tests -v`：282 项测试全部通过；新增日志创建/正常退出标记、上次非正常退出提示、主线程与后台线程 traceback、Qt 告警及 Cookie/token/代理凭据脱敏测试。启用真实 `faulthandler` 的日志文件冒烟、`compileall` 与 `git diff --check` 通过。
+- `.venv\Scripts\python.exe -m unittest discover -s tests -v`：276 项测试全部通过；新增临时在线搜索页面快照、无网络恢复及“原搜索 → 来源画廊 → 临时搜索 → 来源画廊 → 原搜索”返回链测试。`compileall` 与 `git diff --check` 通过。
 - `scripts/build_exe.ps1` 实际单文件构建通过，生成约 101 MiB 的 `dist/RSViewer.exe`；Windows 可提取 32px 关联图标，PyInstaller 归档包含多尺寸 ICO、PNG/SVG 源图和 light/dark QSS。`python -m compileall`、路径专项测试、PowerShell 语法检查、`git diff --check` 及 274 项完整测试通过。
 - `.venv\Scripts\pyinstaller.exe --noconfirm --clean RSViewer.spec`：PyInstaller 6.22.2 单文件构建成功生成 `dist/RSViewer.exe`。隔离目录首次启动自动生成 `data/config.json` 与 schema v22 的 `data/rsviewer.db`，第二次启动保留已修改配置；关闭真实主窗口后 onefile 父子进程均退出，exe 可立即改名，数据库 `PRAGMA integrity_check` 为 `ok`。源码 `compileall`、`git diff --check` 与 238 项完整测试通过。
 - `.venv\Scripts\python.exe -m unittest discover -s tests -v`：215 项测试全部通过；新增服务器响应游标导航、本地筛选标题、画廊任务排队、共享页面线程、速度显示稳定性及归类增量创建测试，覆盖日期定位双向翻页、在线列表无数字页码、分类/播放列表/多级归类标题、归类单窗口表单、空节点免全量刷新、目标漫画增量分配、画廊并发设为 1 时其余任务排队、单画廊占用多条页面线程、并发原图回退 checkpoint、并发暂停收束及零速度不覆盖最近有效值。`compileall`、Qt 离屏界面测试与 `git diff --check` 通过。

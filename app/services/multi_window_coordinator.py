@@ -1,3 +1,4 @@
+import logging
 import time
 
 from PySide6.QtCore import QObject, QThreadPool, Signal
@@ -5,6 +6,9 @@ from PySide6.QtCore import QObject, QThreadPool, Signal
 from app.services.gallery_page_download_scheduler import (
     GalleryPageDownloadScheduler,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class MultiWindowCoordinator(QObject):
@@ -43,12 +47,22 @@ class MultiWindowCoordinator(QObject):
             raise RuntimeError("应用正在退出，不能再注册窗口")
         if window not in self._windows:
             self._windows.append(window)
+            logger.info(
+                "Window registered window_id=%s window_count=%s",
+                id(window),
+                len(self._windows),
+            )
 
     def unregister(self, window):
         try:
             self._windows.remove(window)
         except ValueError:
             pass
+        logger.info(
+            "Window unregistered window_id=%s window_count=%s",
+            id(window),
+            len(self._windows),
+        )
         return not self._windows
 
     def windows(self):
@@ -60,6 +74,11 @@ class MultiWindowCoordinator(QObject):
         if self._shuttingDown:
             return True
         self._shuttingDown = True
+        logger.info(
+            "Shared worker shutdown started windows=%s timeout_ms=%s",
+            len(self._windows),
+            timeout,
+        )
         timeout = max(0, int(timeout))
         deadline = time.monotonic() + timeout / 1000
         pools = (
@@ -77,6 +96,7 @@ class MultiWindowCoordinator(QObject):
         for pool in pools:
             remaining = max(0, round((deadline - time.monotonic()) * 1000))
             completed = pool.waitForDone(remaining) and completed
+        logger.info("Shared worker shutdown completed=%s", completed)
         return completed
 
     def publish(self, source, scope, payload=None):
