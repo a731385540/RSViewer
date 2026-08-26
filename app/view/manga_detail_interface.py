@@ -342,10 +342,12 @@ class PreviewTile(QWidget):
     """详情页中的单页缩略预览。"""
 
     clicked = Signal(int)
+    adCleanupRequested = Signal(int)
 
-    def __init__(self, page_index: int, parent=None):
+    def __init__(self, page_index: int, parent=None, allow_ad_cleanup=False):
         super().__init__(parent)
         self.pageIndex = page_index
+        self.allowAdCleanup = bool(allow_ad_cleanup)
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedSize(126, 184)
         self.imageLabel = QLabel(self)
@@ -382,6 +384,19 @@ class PreviewTile(QWidget):
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def contextMenuEvent(self, event):
+        if not self.allowAdCleanup:
+            super().contextMenuEvent(event)
+            return
+        menu = RoundMenu(parent=self)
+        action = QAction(FIF.BROOM.icon(), self.tr("从此页清理广告页"), menu)
+        action.triggered.connect(
+            lambda _checked=False: self.adCleanupRequested.emit(self.pageIndex)
+        )
+        menu.addAction(action)
+        menu.exec(event.globalPos())
+        event.accept()
 
 
 class PreviewLoadSignals(QObject):
@@ -450,6 +465,7 @@ class PageDiscoveryWorker(QRunnable):
         try:
             item = self.source.load_pages(self.item)
             original_state = self.user_repository.gallery_original_state(item.gid)
+            ad_cleanup = self.user_repository.gallery_ad_cleanup(item.gid)
             original_paths = ()
             if original_state is not None and original_state.state in {
                 ORIGINAL_STATE_STAGED,
@@ -472,13 +488,22 @@ class PageDiscoveryWorker(QRunnable):
                 original_page_modes=(
                     original_state.page_modes if original_state is not None else ()
                 ),
+                ad_cleanup_state=ad_cleanup.state if ad_cleanup else "",
+                ad_cleanup_cutoff_page_index=(
+                    ad_cleanup.cutoff_page_index if ad_cleanup else None
+                ),
+                ad_cleanup_pending_action=(
+                    ad_cleanup.pending_action if ad_cleanup else ""
+                ),
+                ad_cleanup_error=ad_cleanup.error if ad_cleanup else "",
             )
             progress = self.user_repository.resolve_progress(
                 item.gid,
                 self.source.read_ehviewer_progress(item),
             )
-            if progress is not None and item.page_paths:
-                clamped_progress = min(progress, local_page_slot_count(item) - 1)
+            slot_count = local_page_slot_count(item)
+            if progress is not None and item.page_paths and slot_count > 0:
+                clamped_progress = min(progress, slot_count - 1)
                 item = replace(item, progress_page_index=clamped_progress)
             if not self.cancelled:
                 try:
@@ -508,6 +533,9 @@ class MangaDetailInterface(QWidget):
     localOriginalDownloadRequested = Signal(object)
     originalReplaceRequested = Signal(object)
     compressedCleanupRequested = Signal(object)
+    adCleanupRequested = Signal(object, int)
+    adCleanupDeleteRequested = Signal(object)
+    adCleanupRestoreRequested = Signal(object)
     localMetadataSyncRequested = Signal(object)
     galleryUpdateRequested = Signal(object)
     folderOpenRequested = Signal(object)
@@ -555,6 +583,7 @@ class MangaDetailInterface(QWidget):
         self._online_download_active = False
         self._original_download_active = False
         self._original_operation_active = False
+        self._ad_cleanup_operation_active = False
         self._preview_source = "standard"
         self._local_sync_active = False
         self._gallery_update_locked = False
@@ -835,6 +864,20 @@ class MangaDetailInterface(QWidget):
         )
         self.deleteCompressedButton.clicked.connect(self._requestCompressedCleanup)
         action_layout.addWidget(self.deleteCompressedButton)
+        self.adCleanupDeleteButton = PushButton(
+            FIF.BROOM,
+            self.tr("清理广告页"),
+            self.operationCard,
+        )
+        self.adCleanupDeleteButton.clicked.connect(self._requestAdCleanupDelete)
+        action_layout.addWidget(self.adCleanupDeleteButton)
+        self.adCleanupRestoreButton = PushButton(
+            FIF.RETURN,
+            self.tr("还原广告页"),
+            self.operationCard,
+        )
+        self.adCleanupRestoreButton.clicked.connect(self._requestAdCleanupRestore)
+        action_layout.addWidget(self.adCleanupRestoreButton)
         self.readButton = PrimaryPushButton(
             FIF.BOOK_SHELF,
             self.tr("开始阅读"),
@@ -858,6 +901,8 @@ class MangaDetailInterface(QWidget):
         self.originalDownloadControls.hide()
         self.originalReplaceButton.hide()
         self.deleteCompressedButton.hide()
+        self.adCleanupDeleteButton.hide()
+        self.adCleanupRestoreButton.hide()
         self.syncButton.hide()
         self.updateButton.hide()
         self.openFolderButton.hide()
@@ -1010,14 +1055,15 @@ class MangaDetailInterface(QWidget):
         self.setSimilarSearchRecord(None)
         self._original_download_active = False
         self._original_operation_active = False
+        self._ad_cleanup_operation_active = False
         self._preview_source = "standard"
         self.previewSourceSwitch.setCurrentItem("standard")
         self.previewSourceSwitch.hide()
         self._local_sync_active = False
         self._gallery_update_locked = False
         self._updateOriginalQualityBadges(
-            item.original_page_modes,
-            item.page_count,
+            item.original_page_modes[: self._adEffectiveTotal(item, item.page_count)],
+            self._adEffectiveTotal(item, item.page_count),
             item.original_state,
         )
         is_nh = item.source_site in {"nhc", "nhn"}
@@ -1037,6 +1083,8 @@ class MangaDetailInterface(QWidget):
         self.originalDownloadButton.setText(self.tr("下载原图"))
         self.originalReplaceButton.hide()
         self.deleteCompressedButton.hide()
+        self.adCleanupDeleteButton.hide()
+        self.adCleanupRestoreButton.hide()
         self.syncButton.setVisible(not is_nh)
         self.openFolderButton.show()
         self.categoryButton.show()
@@ -1044,6 +1092,7 @@ class MangaDetailInterface(QWidget):
         self.clearProgressButton.setVisible(
             item.progress_page_index is not None or item.reading_completed
         )
+        self._syncAdCleanupControls(item)
         self.syncButton.setEnabled(bool(item.gallery_token) and not is_nh)
         self.syncButton.setText(self.tr("同步信息"))
         self.syncButton.setToolTip(
@@ -1064,7 +1113,10 @@ class MangaDetailInterface(QWidget):
         elif item.progress_page_number is not None:
             self.readButton.setText(
                 self.tr("继续阅读（第 {} 页）").format(
-                    min(item.progress_page_number, item.page_count)
+                    min(
+                        item.progress_page_number,
+                        self._adEffectiveTotal(item, item.page_count),
+                    )
                 )
             )
         else:
@@ -1128,6 +1180,7 @@ class MangaDetailInterface(QWidget):
         self.setSimilarSearchRecord(None)
         self._original_download_active = False
         self._original_operation_active = False
+        self._ad_cleanup_operation_active = False
         self._preview_source = "standard"
         self.previewSourceSwitch.setCurrentItem("standard")
         self.previewSourceSwitch.hide()
@@ -1155,6 +1208,8 @@ class MangaDetailInterface(QWidget):
         self.originalDownloadButton.setText(self.tr("正在读取画廊信息…"))
         self.originalReplaceButton.hide()
         self.deleteCompressedButton.hide()
+        self.adCleanupDeleteButton.hide()
+        self.adCleanupRestoreButton.hide()
         self.syncButton.hide()
         self.updateButton.hide()
         self.openFolderButton.hide()
@@ -1341,6 +1396,16 @@ class MangaDetailInterface(QWidget):
         state = str(record.state) if record is not None else "idle"
         completed = max(0, int(record.completed_pages)) if record else 0
         total = max(0, int(record.page_count)) if record else 0
+        quality_item = self._item or self._folder_open_item
+        quality_cutoff = getattr(
+            quality_item, "ad_cleanup_cutoff_page_index", None
+        )
+        if (
+            quality_item is not None
+            and quality_cutoff is not None
+        ):
+            total = min(total, quality_cutoff)
+            completed = min(completed, total)
         self._original_download_active = bool(
             active and state in {ORIGINAL_STATE_QUEUED, ORIGINAL_STATE_DOWNLOADING}
         )
@@ -1370,13 +1435,16 @@ class MangaDetailInterface(QWidget):
         fallback_to_standard = bool(
             record is not None and record.fallback_to_standard
         )
+        effective_modes = (
+            tuple(record.page_modes[:total]) if record is not None else ()
+        )
         self._updateOriginalQualityBadges(
-            record.page_modes if record is not None else (),
+            effective_modes,
             total,
             state,
         )
-        original_count = record.original_page_count if record is not None else 0
-        base_count = record.base_page_count if record is not None else 0
+        original_count = effective_modes.count(ORIGINAL_PAGE_MODE_ORIGINAL)
+        base_count = effective_modes.count(ORIGINAL_PAGE_MODE_BASE)
         status_message = str(
             message
             or (record.error if record else "")
@@ -1624,6 +1692,16 @@ class MangaDetailInterface(QWidget):
         if self._item is not None and not self._original_operation_active:
             self.compressedCleanupRequested.emit(self._item)
 
+    def _requestAdCleanupDelete(self):
+        item = self._item or self._folder_open_item
+        if item is not None and not self._ad_cleanup_operation_active:
+            self.adCleanupDeleteRequested.emit(item)
+
+    def _requestAdCleanupRestore(self):
+        item = self._item or self._folder_open_item
+        if item is not None and not self._ad_cleanup_operation_active:
+            self.adCleanupRestoreRequested.emit(item)
+
     def _requestGalleryUpdate(self):
         if (
             self._item is not None
@@ -1662,6 +1740,103 @@ class MangaDetailInterface(QWidget):
                 or bool(getattr(item, "reading_completed", False))
             )
         )
+        if self._item is None:
+            self._syncAdCleanupControls(item)
+            self._updatePreviewAdCleanupAvailability()
+
+    def setAdCleanupOperationState(self, record=None, active=False, message=""):
+        item = self._item or self._folder_open_item
+        self._ad_cleanup_operation_active = bool(active)
+        if item is not None and record is not None:
+            item = replace(
+                item,
+                ad_cleanup_state=record.state,
+                ad_cleanup_cutoff_page_index=record.cutoff_page_index,
+                ad_cleanup_pending_action=record.pending_action,
+                ad_cleanup_error=str(message or record.error or ""),
+            )
+            if self._item is not None:
+                self._item = item
+            else:
+                self._folder_open_item = item
+        self._syncAdCleanupControls(item)
+        self._updatePreviewAdCleanupAvailability()
+
+    def _syncAdCleanupControls(self, item=None):
+        if item is None or not getattr(item, "ad_cleanup_state", ""):
+            self.adCleanupDeleteButton.hide()
+            self.adCleanupRestoreButton.hide()
+            return
+        state = str(getattr(item, "ad_cleanup_state", ""))
+        pending = str(getattr(item, "ad_cleanup_pending_action", "") or "")
+        if state != "cleaned":
+            self.originalReplaceButton.setEnabled(False)
+            self.deleteCompressedButton.setEnabled(False)
+        self.adCleanupDeleteButton.show()
+        error = str(getattr(item, "ad_cleanup_error", "") or "")
+        self.adCleanupDeleteButton.setToolTip(error)
+        self.adCleanupRestoreButton.setToolTip(error)
+        if state == "cleaned":
+            self.adCleanupDeleteButton.setText(self.tr("广告页已清理"))
+            self.adCleanupDeleteButton.setEnabled(False)
+            self.adCleanupRestoreButton.hide()
+            return
+        if self._ad_cleanup_operation_active or state in {
+            "moving", "restoring", "deleting"
+        }:
+            text = {
+                "moving": self.tr("正在暂存广告页"),
+                "restoring": self.tr("正在还原广告页"),
+                "deleting": self.tr("正在清理广告页"),
+            }.get(state, self.tr("正在处理广告页"))
+            self.adCleanupDeleteButton.setText(text)
+            self.adCleanupDeleteButton.setEnabled(False)
+            self.adCleanupRestoreButton.setVisible(state != "deleting")
+            self.adCleanupRestoreButton.setEnabled(False)
+            return
+        if state == "failed" and pending == "stage":
+            self.adCleanupDeleteButton.setText(self.tr("继续暂存广告页"))
+        elif state == "failed" and pending == "delete":
+            self.adCleanupDeleteButton.setText(self.tr("继续清理广告页"))
+            self.adCleanupRestoreButton.hide()
+        elif state == "failed" and pending == "restore":
+            self.adCleanupDeleteButton.setText(self.tr("请继续还原广告页"))
+            self.adCleanupDeleteButton.setEnabled(False)
+        else:
+            self.adCleanupDeleteButton.setText(self.tr("清理广告页"))
+        if not (state == "failed" and pending == "restore"):
+            self.adCleanupDeleteButton.setEnabled(not self._gallery_update_locked)
+        if not (state == "failed" and pending == "delete"):
+            self.adCleanupRestoreButton.show()
+            self.adCleanupRestoreButton.setEnabled(not self._gallery_update_locked)
+
+    def _canRequestAdCleanup(self):
+        item = self._item or self._folder_open_item
+        return bool(
+            item is not None
+            and Path(item.folder).is_dir()
+            and not getattr(item, "ad_cleanup_state", "")
+            and not self._gallery_update_locked
+            and not self._ad_cleanup_operation_active
+        )
+
+    @staticmethod
+    def _adEffectiveTotal(item, total):
+        total = max(0, int(total or 0))
+        cutoff = getattr(item, "ad_cleanup_cutoff_page_index", None)
+        if item is not None and cutoff is not None:
+            total = min(total, max(0, int(cutoff)))
+        return total
+
+    def _requestAdCleanupFromPage(self, page_index):
+        item = self._item or self._folder_open_item
+        if item is not None and self._canRequestAdCleanup():
+            self.adCleanupRequested.emit(item, int(page_index))
+
+    def _updatePreviewAdCleanupAvailability(self):
+        enabled = self._canRequestAdCleanup()
+        for tile in self._preview_tiles:
+            tile.allowAdCleanup = enabled
 
     def setGalleryUpdateState(self, record=None, active=False, speed=0):
         """Lock destructive gallery actions while an update is unfinished."""
@@ -1701,6 +1876,7 @@ class MangaDetailInterface(QWidget):
                 self.deleteCompressedButton.isVisible()
                 and not self._original_operation_active
             )
+            self._syncAdCleanupControls(self._item)
             self.readButton.setEnabled(bool(self._item.page_paths))
             return
         self.updateButton.show()
@@ -1723,6 +1899,8 @@ class MangaDetailInterface(QWidget):
         self.originalDownloadButton.setEnabled(False)
         self.originalReplaceButton.setEnabled(False)
         self.deleteCompressedButton.setEnabled(False)
+        self.adCleanupDeleteButton.setEnabled(False)
+        self.adCleanupRestoreButton.setEnabled(False)
         self.readButton.setEnabled(False)
 
     def reloadCurrentMangaPages(self):
@@ -1852,11 +2030,16 @@ class MangaDetailInterface(QWidget):
         end = min(total, start + self.PREVIEW_PAGE_SIZE)
         paths_by_index = local_page_path_map(paths)
         self._preview_tiles = [
-            PreviewTile(index, self.previewWidget)
+            PreviewTile(
+                index,
+                self.previewWidget,
+                allow_ad_cleanup=self._canRequestAdCleanup(),
+            )
             for index in range(start, end)
         ]
         for tile in self._preview_tiles:
             tile.clicked.connect(self._requestLocalPreviewRead)
+            tile.adCleanupRequested.connect(self._requestAdCleanupFromPage)
         self.previewTitle.setText(
             (
                 self.tr("原图页面预览（共 {} 页，第 {} / {} 页）")
@@ -1906,7 +2089,7 @@ class MangaDetailInterface(QWidget):
             self._item is not None
             and self._online_detail is None
             and self._item.original_page_paths
-            and len(self._item.original_page_paths) >= self._item.page_count
+            and len(self._item.original_page_paths) >= local_page_slot_count(self._item)
         )
         self.previewSourceSwitch.setVisible(has_original_preview)
         if not has_original_preview and self._preview_source == "original":
@@ -2139,10 +2322,11 @@ class MangaDetailInterface(QWidget):
     def _progressText(self, item: MangaItem) -> str:
         if item.progress_page_number is None:
             return self.tr("未开始")
-        if item.page_count:
+        total = self._adEffectiveTotal(item, item.page_count)
+        if total:
             return self.tr("第 {} / {} 页").format(
-                min(item.progress_page_number, item.page_count),
-                item.page_count,
+                min(item.progress_page_number, total),
+                total,
             )
         return self.tr("第 {} 页").format(item.progress_page_number)
 
@@ -2176,17 +2360,27 @@ class MangaDetailInterface(QWidget):
 
     def _detailedMetadataText(self, item: MangaItem) -> str:
         taxonomy = "、".join(item.taxonomy_labels) or self.tr("无")
+        effective_total = self._adEffectiveTotal(item, item.page_count)
         values = [
             self.tr("归类：{}").format(taxonomy),
-            self.tr("页数：{}").format(item.page_count or self.tr("读取中…")),
+            self.tr("页数：{}").format(
+                effective_total if item.page_count else self.tr("读取中…")
+            ),
             self.tr("阅读进度：{}").format(self._progressText(item)),
         ]
+        if getattr(item, "ad_cleanup_state", ""):
+            values.append(
+                self.tr("广告页：从原第 {} 页起已隐藏（源站共 {} 页）").format(
+                    int(item.ad_cleanup_cutoff_page_index) + 1,
+                    item.page_count,
+                )
+            )
         if item.download_complete is not None:
             values.extend(
                 (
                     self.tr("已下载：{} / {} 页").format(
                         item.downloaded_page_count,
-                        item.page_count,
+                        effective_total,
                     ),
                     self.tr("下载状态：{}").format(
                         self.tr("完整")
@@ -2456,7 +2650,11 @@ class MangaDetailInterface(QWidget):
         self._clearPreviewTiles()
         self._preview_page = int(page.page_number)
         self._preview_tiles = [
-            PreviewTile(preview.page_index, self.previewWidget)
+            PreviewTile(
+                preview.page_index,
+                self.previewWidget,
+                allow_ad_cleanup=self._canRequestAdCleanup(),
+            )
             for preview in page.items
         ]
         for tile in self._preview_tiles:
@@ -2465,6 +2663,7 @@ class MangaDetailInterface(QWidget):
                     detail, page_index
                 )
             )
+            tile.adCleanupRequested.connect(self._requestAdCleanupFromPage)
         self.previewTitle.setText(
             self.tr("页面预览（共 {} 页，第 {} / {} 页）").format(
                 self._online_detail.page_count,

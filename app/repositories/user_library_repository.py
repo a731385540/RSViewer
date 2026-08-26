@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from app.domain.gallery_ad_cleanup import GalleryAdCleanupRecord
 from app.domain.gallery_update import GalleryUpdateRecord
 from app.domain.gallery_trash import GalleryTrashRecord
 from app.domain.online_download import (
@@ -24,7 +25,7 @@ from app.repositories.ehviewer_schema import ensure_ehviewer_schema
 class UserLibraryRepository:
     """RSViewer's complete application and local-gallery database."""
 
-    SCHEMA_VERSION = 24
+    SCHEMA_VERSION = 25
     CUSTOM_SORT_CATEGORY = "category"
     CUSTOM_SORT_TAXONOMY = "taxonomy"
 
@@ -620,6 +621,29 @@ class UserLibraryRepository:
                     END;
 
                     PRAGMA user_version = 24;
+                    """
+                )
+            if version < 25:
+                connection.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS gallery_ad_cleanup_states (
+                        gid INTEGER PRIMARY KEY,
+                        dirname TEXT NOT NULL,
+                        cutoff_page_index INTEGER NOT NULL
+                            CHECK(cutoff_page_index >= 0),
+                        page_count INTEGER NOT NULL CHECK(page_count > 0),
+                        state TEXT NOT NULL,
+                        pending_action TEXT NOT NULL DEFAULT '',
+                        manifest_json TEXT NOT NULL DEFAULT '[]',
+                        error TEXT NOT NULL DEFAULT '',
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_gallery_ad_cleanup_state
+                        ON gallery_ad_cleanup_states(state, updated_at DESC);
+
+                    PRAGMA user_version = 25;
                     """
                 )
 
@@ -1880,6 +1904,7 @@ class UserLibraryRepository:
                 ("manga_reading_progress", "gid"),
                 ("gallery_update_tasks", "source_gid"),
                 ("gallery_original_states", "gid"),
+                ("gallery_ad_cleanup_states", "gid"),
                 ("online_gallery_downloads", "gid"),
                 ("gallery_sync_records", "gid"),
                 ("manga_custom_sort_entries", "gid"),
@@ -2081,6 +2106,11 @@ class UserLibraryRepository:
         source_gid = int(source_gid)
         target_gid = int(target_gid)
         if source_gid == target_gid:
+            with self._connect() as connection:
+                connection.execute(
+                    "DELETE FROM gallery_ad_cleanup_states WHERE gid = ?",
+                    (source_gid,),
+                )
             return
         with self._connect() as connection:
             custom_sort_scopes = connection.execute(
@@ -2233,6 +2263,10 @@ class UserLibraryRepository:
             )
             connection.execute(
                 "DELETE FROM gallery_original_states WHERE gid = ?", (source_gid,)
+            )
+            connection.execute(
+                "DELETE FROM gallery_ad_cleanup_states WHERE gid = ?",
+                (source_gid,),
             )
             connection.execute(
                 "DELETE FROM online_gallery_downloads WHERE gid = ?", (source_gid,)
@@ -2530,6 +2564,129 @@ class UserLibraryRepository:
                 (int(gid),),
             )
 
+    def save_gallery_ad_cleanup(self, record: GalleryAdCleanupRecord):
+        self.initialize()
+        now = time.time_ns()
+        manifest_json = json.dumps(
+            [dict(entry) for entry in tuple(record.manifest or ())],
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO gallery_ad_cleanup_states(
+                    gid, dirname, cutoff_page_index, page_count, state,
+                    pending_action, manifest_json, error, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(gid) DO UPDATE SET
+                    dirname = excluded.dirname,
+                    cutoff_page_index = excluded.cutoff_page_index,
+                    page_count = excluded.page_count,
+                    state = excluded.state,
+                    pending_action = excluded.pending_action,
+                    manifest_json = excluded.manifest_json,
+                    error = excluded.error,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    int(record.gid),
+                    str(record.dirname),
+                    max(0, int(record.cutoff_page_index)),
+                    max(1, int(record.page_count)),
+                    str(record.state),
+                    str(record.pending_action or ""),
+                    manifest_json,
+                    str(record.error or ""),
+                    int(record.created_at or now),
+                    int(record.updated_at or now),
+                ),
+            )
+
+    def update_gallery_ad_cleanup(
+        self,
+        gid,
+        state,
+        pending_action="",
+        error="",
+    ):
+        self.initialize()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE gallery_ad_cleanup_states
+                SET state = ?, pending_action = ?, error = ?, updated_at = ?
+                WHERE gid = ?
+                """,
+                (
+                    str(state),
+                    str(pending_action or ""),
+                    str(error or ""),
+                    time.time_ns(),
+                    int(gid),
+                ),
+            )
+
+    def gallery_ad_cleanup(self, gid: int) -> Optional[GalleryAdCleanupRecord]:
+        self.initialize()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT gid, dirname, cutoff_page_index, page_count, state,
+                       pending_action, manifest_json, error, created_at, updated_at
+                FROM gallery_ad_cleanup_states WHERE gid = ?
+                """,
+                (int(gid),),
+            ).fetchone()
+        return self._gallery_ad_cleanup_from_row(row) if row is not None else None
+
+    def gallery_ad_cleanups_for_mangas(
+        self, gids: Sequence[int]
+    ) -> Dict[int, GalleryAdCleanupRecord]:
+        self.initialize()
+        target_gids = {int(gid) for gid in gids}
+        if not target_gids:
+            return {}
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT gid, dirname, cutoff_page_index, page_count, state,
+                       pending_action, manifest_json, error, created_at, updated_at
+                FROM gallery_ad_cleanup_states
+                """
+            ).fetchall()
+        return {
+            int(row[0]): self._gallery_ad_cleanup_from_row(row)
+            for row in rows
+            if int(row[0]) in target_gids
+        }
+
+    def delete_gallery_ad_cleanup(self, gid: int):
+        self.initialize()
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM gallery_ad_cleanup_states WHERE gid = ?",
+                (int(gid),),
+            )
+
+    def mark_interrupted_gallery_ad_cleanups(self):
+        self.initialize()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE gallery_ad_cleanup_states
+                SET state = 'failed',
+                    error = CASE
+                        WHEN error = '' THEN '上次广告页文件操作已中断，可继续处理或还原'
+                        ELSE error
+                    END,
+                    updated_at = ?
+                WHERE state IN ('moving', 'restoring', 'deleting')
+                """,
+                (time.time_ns(),),
+            )
+
     def delete_online_gallery_download(self, gid: int):
         self.initialize()
         with self._connect() as connection:
@@ -2808,6 +2965,34 @@ class UserLibraryRepository:
             updated_at=int(row[10]),
             database_path=Path(str(row[11])) if str(row[11] or "") else None,
             manga_root=Path(str(row[12])) if str(row[12] or "") else None,
+        )
+
+    @staticmethod
+    def _gallery_ad_cleanup_from_row(row) -> GalleryAdCleanupRecord:
+        try:
+            raw_manifest = json.loads(str(row[6] or "[]"))
+        except (TypeError, ValueError):
+            raw_manifest = []
+        manifest = []
+        if isinstance(raw_manifest, list):
+            for entry in raw_manifest:
+                if not isinstance(entry, dict):
+                    continue
+                source = str(entry.get("source") or "")
+                target = str(entry.get("target") or "")
+                if source and target:
+                    manifest.append({"source": source, "target": target})
+        return GalleryAdCleanupRecord(
+            gid=int(row[0]),
+            dirname=str(row[1]),
+            cutoff_page_index=max(0, int(row[2])),
+            page_count=max(1, int(row[3])),
+            state=str(row[4]),
+            pending_action=str(row[5] or ""),
+            manifest=tuple(manifest),
+            error=str(row[7] or ""),
+            created_at=int(row[8]),
+            updated_at=int(row[9]),
         )
 
     @staticmethod

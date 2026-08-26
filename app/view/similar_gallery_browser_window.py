@@ -74,6 +74,9 @@ class SimilarGalleryBrowserWindow(FluentWindow):
     readingRecordClearRequested = Signal(int)
     selectedTitleSearchRequested = Signal(int, str)
     localMetadataSyncRequested = Signal(object)
+    adCleanupRequested = Signal(object, int)
+    adCleanupDeleteRequested = Signal(object)
+    adCleanupRestoreRequested = Signal(object)
 
     def __init__(self, source, repository, tag_search_index=None, parent=None):
         super().__init__(parent)
@@ -124,6 +127,9 @@ class SimilarGalleryBrowserWindow(FluentWindow):
         self.detail.localMetadataSyncRequested.connect(
             self.localMetadataSyncRequested
         )
+        self.detail.adCleanupRequested.connect(self.adCleanupRequested)
+        self.detail.adCleanupDeleteRequested.connect(self.adCleanupDeleteRequested)
+        self.detail.adCleanupRestoreRequested.connect(self.adCleanupRestoreRequested)
         self.stack.addWidget(self.resultPage)
         self.stack.addWidget(self.detail)
         self.stack.setCurrentWidget(self.resultPage)
@@ -137,6 +143,9 @@ class SimilarGalleryBrowserWindow(FluentWindow):
         clear_action,
         search_action,
         sync_action,
+        ad_stage_action=None,
+        ad_delete_action=None,
+        ad_restore_action=None,
     ):
         """Route singleton-window actions without blind signal disconnection."""
         if self._boundOwner is owner:
@@ -147,12 +156,19 @@ class SimilarGalleryBrowserWindow(FluentWindow):
             except (RuntimeError, TypeError):
                 pass
         self._boundOwner = owner
-        self._actionConnections = (
+        self._actionConnections = tuple(
+            connection
+            for connection in (
             (self.readRequested, read_action),
             (self.folderOpenRequested, folder_action),
             (self.readingRecordClearRequested, clear_action),
             (self.selectedTitleSearchRequested, search_action),
             (self.localMetadataSyncRequested, sync_action),
+            (self.adCleanupRequested, ad_stage_action),
+            (self.adCleanupDeleteRequested, ad_delete_action),
+            (self.adCleanupRestoreRequested, ad_restore_action),
+            )
+            if connection[1] is not None
         )
         for signal, slot in self._actionConnections:
             signal.connect(slot)
@@ -183,6 +199,9 @@ class SimilarGalleryBrowserWindow(FluentWindow):
         if gid not in self._items:
             return False
         self._items[gid] = item
+        current = self.detail.currentItem
+        if current is not None and int(current.gid) == gid:
+            self.detail.setManga(item)
         for index in range(self.resultList.count()):
             row = self.resultList.item(index)
             if int(row.data(Qt.UserRole)) != gid:

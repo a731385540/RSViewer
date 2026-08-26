@@ -734,6 +734,7 @@ class MangaLoadWorker(QRunnable):
         reading_states = user_repository.reading_states_for_mangas(gids)
         online_downloads = user_repository.online_gallery_downloads_for_mangas(gids)
         original_states = user_repository.gallery_original_states_for_mangas(gids)
+        ad_cleanups = user_repository.gallery_ad_cleanups_for_mangas(gids)
         sync_records = user_repository.gallery_sync_records_for_mangas(gids)
         favorite_gids = set(user_repository.favorite_gids(gids))
         return [
@@ -741,6 +742,7 @@ class MangaLoadWorker(QRunnable):
                 item,
                 online_downloads.get(item.gid),
                 original_states.get(item.gid),
+                ad_cleanups.get(item.gid),
                 sync_records.get(item.gid),
                 progress_page_index=(
                     reading_states[item.gid][0]
@@ -811,6 +813,7 @@ class MangaLoadWorker(QRunnable):
         item,
         download_record,
         original_state,
+        ad_cleanup,
         sync_record,
         **values,
     ):
@@ -820,7 +823,10 @@ class MangaLoadWorker(QRunnable):
             and download_record.download_mode == DOWNLOAD_MODE_STANDARD
         ):
             total = max(0, int(download_record.page_count))
+            if ad_cleanup is not None:
+                total = min(total, ad_cleanup.retained_page_count)
             completed = max(0, int(download_record.completed_pages))
+            completed = min(completed, total) if total else completed
             values.update(
                 {
                     "downloaded_page_count": completed,
@@ -850,6 +856,14 @@ class MangaLoadWorker(QRunnable):
                     and download_record.download_mode == DOWNLOAD_MODE_STANDARD
                     and download_record.state != ONLINE_DOWNLOAD_COMPLETED
                 ),
+                "ad_cleanup_state": ad_cleanup.state if ad_cleanup else "",
+                "ad_cleanup_cutoff_page_index": (
+                    ad_cleanup.cutoff_page_index if ad_cleanup else None
+                ),
+                "ad_cleanup_pending_action": (
+                    ad_cleanup.pending_action if ad_cleanup else ""
+                ),
+                "ad_cleanup_error": ad_cleanup.error if ad_cleanup else "",
             }
         )
         return replace(item, **values)

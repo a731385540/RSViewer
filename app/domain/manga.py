@@ -47,7 +47,11 @@ def local_page_slot_count(item):
         and len(item.page_tokens) == sidecar_count
         and all(item.page_tokens)
     )
-    return max(actual_count, sidecar_count if has_complete_sidecar else 0)
+    total = max(actual_count, sidecar_count if has_complete_sidecar else 0)
+    cutoff = getattr(item, "ad_cleanup_cutoff_page_index", None)
+    if cutoff is not None:
+        total = min(total, max(0, int(cutoff)))
+    return total
 
 
 @dataclass(frozen=True)
@@ -97,6 +101,10 @@ class MangaItem:
     original_fallback_to_standard: bool = False
     original_page_modes: Tuple[str, ...] = ()
     standard_download_pending: bool = False
+    ad_cleanup_state: str = ""
+    ad_cleanup_cutoff_page_index: Optional[int] = None
+    ad_cleanup_pending_action: str = ""
+    ad_cleanup_error: str = ""
 
     @property
     def cover_image_path(self) -> Path:

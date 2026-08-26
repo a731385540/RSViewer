@@ -352,10 +352,11 @@ class GalleryUpdateWorker(QRunnable):
         return tuple(previews[index].page_token for index in range(total))
 
     def _tag_source_files(self, source_sidecar):
+        recoverable_tokens = self._recoverable_source_tokens(source_sidecar)
         available_tokens = self._marked_token_counts(include_history=True)
-        missing_tokens = Counter(source_sidecar.page_tokens) - available_tokens
+        missing_tokens = Counter(recoverable_tokens) - available_tokens
         normal = self._normal_page_files()
-        for index, token in enumerate(source_sidecar.page_tokens):
+        for index, token in enumerate(recoverable_tokens):
             self._check_cancelled()
             if missing_tokens[token] <= 0:
                 continue
@@ -374,10 +375,21 @@ class GalleryUpdateWorker(QRunnable):
         all_tokens = (
             root_tokens if require_root else self._marked_token_counts(include_history=True)
         )
-        missing = Counter(source_sidecar.page_tokens) - all_tokens
+        missing = Counter(self._recoverable_source_tokens(source_sidecar)) - all_tokens
         missing_count = sum(missing.values())
         if missing_count:
             raise ValueError(f"旧画廊仍有 {missing_count} 个页面缺少可恢复标识")
+
+    def _recoverable_source_tokens(self, source_sidecar):
+        cleanup = self.user_repository.gallery_ad_cleanup(
+            self.record.source_gid
+        )
+        cutoff = (
+            cleanup.retained_page_count
+            if cleanup is not None
+            else source_sidecar.page_count
+        )
+        return tuple(source_sidecar.page_tokens[:cutoff])
 
     def _remap_marked_files(self, source_sidecar, target_sidecar):
         target_indexes = defaultdict(deque)
@@ -706,6 +718,7 @@ class GalleryUpdateWorker(QRunnable):
             rename_without_overwrite(staged, current)
 
     def _finalize_databases(self, detail, target_sidecar, mapped_progress):
+        self._archive_ad_cleanup_backup()
         self.ehviewer_repository.promote_update(
             self.record.source_gid, detail, self.folder
         )
@@ -752,6 +765,28 @@ class GalleryUpdateWorker(QRunnable):
             ),
             detail.comments,
         )
+
+    def _archive_ad_cleanup_backup(self):
+        cleanup = self.user_repository.gallery_ad_cleanup(
+            self.record.source_gid
+        )
+        if cleanup is None:
+            return
+        source = self.folder / "delete"
+        target = (
+            self.folder
+            / "history"
+            / f"ad-delete-{int(self.record.source_gid)}"
+        )
+        if source.exists():
+            if not source.is_dir() or source.is_symlink():
+                raise ValueError("广告页 delete 路径不是可归档目录")
+            if target.exists():
+                raise FileExistsError("广告页历史归档目录已存在")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            rename_without_overwrite(source, target)
+        elif target.exists() and not target.is_dir():
+            raise ValueError("广告页历史归档目标不是目录")
 
     def _finish(self, detail):
         self.state_repository.write(
@@ -830,6 +865,14 @@ class GalleryUpdateWorker(QRunnable):
         if progress is None or not 0 <= int(progress) < source_sidecar.page_count:
             return 0
         source_index = int(progress)
+        cleanup = self.user_repository.gallery_ad_cleanup(
+            self.record.source_gid
+        )
+        if cleanup is not None:
+            source_index = min(
+                source_index,
+                max(0, cleanup.retained_page_count - 1),
+            )
         token = source_sidecar.page_tokens[source_index]
         occurrence = source_sidecar.page_tokens[:source_index + 1].count(token) - 1
         target_indexes = [

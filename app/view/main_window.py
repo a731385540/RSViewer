@@ -44,6 +44,10 @@ from app.domain.online_download import (
     ORIGINAL_STATE_QUEUED,
     ORIGINAL_PAGE_MODE_BASE,
 )
+from app.domain.gallery_ad_cleanup import (
+    AD_ACTION_STAGE,
+    AD_CLEANUP_FAILED,
+)
 from app.domain.gallery_update import (
     GalleryUpdateRecord,
     UPDATE_COMPLETED,
@@ -108,6 +112,7 @@ from app.workers.online_gallery_download_worker import (
 )
 from app.workers.gallery_update_worker import GalleryUpdateWorker
 from app.workers.original_gallery_worker import OriginalGalleryFileWorker
+from app.workers.gallery_ad_cleanup_worker import GalleryAdCleanupWorker
 from app.workers.library_organizer_worker import (
     LibraryOrganizerActionWorker,
     LibraryOrganizerScanWorker,
@@ -151,6 +156,7 @@ class MainWindow(FluentWindow):
             self.userLibraryRepository.mark_interrupted_online_downloads()
             self.userLibraryRepository.mark_interrupted_gallery_updates()
             self.userLibraryRepository.mark_interrupted_gallery_trash()
+            self.userLibraryRepository.mark_interrupted_gallery_ad_cleanups()
         self.ehTagSearchIndex = EhTagSearchIndex.from_repository(
             self.userLibraryRepository
         )
@@ -217,6 +223,7 @@ class MainWindow(FluentWindow):
         )
         self.galleryUpdateThreadPool = self.windowCoordinator.galleryUpdateThreadPool
         self.originalFileThreadPool = self.windowCoordinator.originalFileThreadPool
+        self.adCleanupThreadPool = self.windowCoordinator.adCleanupThreadPool
         self.organizerThreadPool = self.windowCoordinator.organizerThreadPool
         self.trashThreadPool = self.windowCoordinator.trashThreadPool
         self._onlineDetailWorker = None
@@ -240,6 +247,7 @@ class MainWindow(FluentWindow):
         self._galleryUpdateSpeeds = {}
         self._pendingUpdateDeletes = set()
         self._originalFileWorkers = {}
+        self._adCleanupWorkers = {}
         self._organizerWorker = None
         self._trashWorker = None
         self._ehViewerExportWorker = None
@@ -334,6 +342,15 @@ class MainWindow(FluentWindow):
         )
         self.mangaDetailInterface.compressedCleanupRequested.connect(
             self.cleanupOriginalGalleryBackup
+        )
+        self.mangaDetailInterface.adCleanupRequested.connect(
+            self.stageGalleryAdCleanup
+        )
+        self.mangaDetailInterface.adCleanupDeleteRequested.connect(
+            self.cleanupGalleryAdPages
+        )
+        self.mangaDetailInterface.adCleanupRestoreRequested.connect(
+            self.restoreGalleryAdPages
         )
         self.mangaDetailInterface.localMetadataSyncRequested.connect(
             self.syncLocalGalleryMetadata
@@ -666,6 +683,8 @@ class MainWindow(FluentWindow):
             item = self.mangaDetailInterface.currentItem
             if item is not None:
                 self._syncCurrentGalleryUpdate(item.gid)
+        elif scope == "ad_cleanup":
+            self._refreshAdCleanupGallery(int(payload), publish=False)
         elif scope == "organizer":
             if self.libraryOrganizerInterface._scanned:
                 self.scanUnregisteredGalleryFolders()
@@ -778,6 +797,12 @@ class MainWindow(FluentWindow):
         if coordinator is not None:
             return coordinator.hasOriginalOperation(gid)
         return int(gid) in self._originalFileWorkers
+
+    def _isAdCleanupOperationActive(self, gid):
+        coordinator = getattr(self, "windowCoordinator", None)
+        if coordinator is not None:
+            return coordinator.adCleanupOwner(gid) is not None
+        return int(gid) in self._adCleanupWorkers
 
     def _isGalleryTrashed(self, gid):
         coordinator = getattr(self, "windowCoordinator", None)
@@ -1319,6 +1344,7 @@ class MainWindow(FluentWindow):
             self._latestSimilarSearch
         )
         self._syncCurrentGalleryUpdate(item.gid)
+        self._syncGalleryAdCleanupState(item.gid)
         self.switchTo(self.mangaDetailInterface)
 
     def searchSelectedTitleText(self, source_gid, selected_text):
@@ -1475,6 +1501,9 @@ class MainWindow(FluentWindow):
             self.clearReadingRecord,
             self.searchSelectedTitleText,
             self.syncSimilarGalleryMetadata,
+            self.stageGalleryAdCleanup,
+            self.cleanupGalleryAdPages,
+            self.restoreGalleryAdPages,
         )
         window.setSearch(record, items)
         window.show()
@@ -1731,7 +1760,7 @@ class MainWindow(FluentWindow):
     def startOnlineGalleryDownload(self, detail):
         gid = self._onlineGalleryLocalGid(detail.gallery, create=False)
         gid = int(gid if gid is not None else detail.gallery.gid)
-        if self._isGalleryTrashed(gid):
+        if self._isGalleryTrashed(gid) or self._isAdCleanupOperationActive(gid):
             return
         original = self.userLibraryRepository.gallery_original_state(gid)
         if (
@@ -1782,7 +1811,7 @@ class MainWindow(FluentWindow):
         if detail.gallery.source_site in {"nhc", "nhn"}:
             return
         gid = int(detail.gallery.gid)
-        if self._isGalleryTrashed(gid):
+        if self._isGalleryTrashed(gid) or self._isAdCleanupOperationActive(gid):
             return
         if self._downloadOwner(gid) is not None:
             return
@@ -2135,7 +2164,7 @@ class MainWindow(FluentWindow):
 
     def startLocalGalleryDownload(self, item):
         gid = int(item.gid)
-        if self._isGalleryTrashed(gid):
+        if self._isGalleryTrashed(gid) or self._isAdCleanupOperationActive(gid):
             return
         original = self.userLibraryRepository.gallery_original_state(gid)
         if (
@@ -2185,7 +2214,7 @@ class MainWindow(FluentWindow):
 
     def startLocalOriginalGalleryDownload(self, item):
         gid = int(item.gid)
-        if self._isGalleryTrashed(gid):
+        if self._isGalleryTrashed(gid) or self._isAdCleanupOperationActive(gid):
             return
         if self._downloadOwner(gid) is not None or self._isOriginalOperationActive(gid):
             return
@@ -2241,10 +2270,16 @@ class MainWindow(FluentWindow):
 
     def _startOriginalFileOperation(self, item, action):
         gid = int(item.gid)
+        ad_cleanup = self.userLibraryRepository.gallery_ad_cleanup(gid)
         if (
             self._isOriginalOperationActive(gid)
             or self._downloadOwner(gid) is not None
             or self._updateOwner(gid) is not None
+            or self._isAdCleanupOperationActive(gid)
+            or (
+                ad_cleanup is not None
+                and ad_cleanup.state != "cleaned"
+            )
         ):
             return
         record = self.userLibraryRepository.gallery_original_state(gid)
@@ -2317,6 +2352,172 @@ class MainWindow(FluentWindow):
             parent=self,
         )
 
+    def stageGalleryAdCleanup(self, item, page_index):
+        gid = int(item.gid)
+        if self.userLibraryRepository.gallery_ad_cleanup(gid) is not None:
+            return
+        self._startGalleryAdCleanupOperation(
+            item,
+            GalleryAdCleanupWorker.STAGE,
+            page_index=int(page_index),
+        )
+
+    def cleanupGalleryAdPages(self, item):
+        record = self.userLibraryRepository.gallery_ad_cleanup(item.gid)
+        if record is None:
+            return
+        if record.state == AD_CLEANUP_FAILED and record.pending_action == AD_ACTION_STAGE:
+            self._startGalleryAdCleanupOperation(
+                item, GalleryAdCleanupWorker.STAGE
+            )
+            return
+        message_box = MessageBox(
+            self.tr("清理广告页"),
+            self.tr(
+                "将永久删除 delete 中暂存的广告尾页。广告页截止位置仍会保留，基础下载和原图下载不会重新补回这些页面。删除后无法还原。"
+            ),
+            self,
+        )
+        message_box.yesButton.setText(self.tr("删除"))
+        message_box.cancelButton.setText(self.tr("取消"))
+        if not message_box.exec():
+            return
+        self._startGalleryAdCleanupOperation(item, GalleryAdCleanupWorker.DELETE)
+
+    def restoreGalleryAdPages(self, item):
+        self._startGalleryAdCleanupOperation(item, GalleryAdCleanupWorker.RESTORE)
+
+    def _startGalleryAdCleanupOperation(self, item, action, page_index=None):
+        gid = int(item.gid)
+        if self.windowCoordinator.galleryMutationBusy(gid) or self._isGalleryTrashed(gid):
+            InfoBar.warning(
+                title=self.tr("暂时不能处理广告页"),
+                content=self.tr("这个画廊正在下载、更新、阅读或执行其他文件操作。"),
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=3500,
+                parent=self,
+            )
+            return
+        total = max(int(item.page_count or 0), local_page_slot_count(item))
+        original = self.userLibraryRepository.gallery_original_state(gid)
+        worker = GalleryAdCleanupWorker(
+            gid,
+            item.folder,
+            cfg.get(cfg.ehViewerMangaRoot),
+            self.userLibraryRepository,
+            action,
+            page_count=total,
+            cutoff_page_index=page_index,
+            original_state=original,
+        )
+        worker.signals.stageChanged.connect(
+            lambda message: self._updateGalleryAdCleanupOperation(
+                worker, gid, message
+            )
+        )
+        worker.signals.completed.connect(
+            lambda completed_gid, completed_action: (
+                self._finishGalleryAdCleanupOperation(
+                    worker, completed_gid, completed_action
+                )
+            )
+        )
+        worker.signals.failed.connect(
+            lambda failed_gid, message: self._failGalleryAdCleanupOperation(
+                worker, failed_gid, message
+            )
+        )
+        self._adCleanupWorkers[gid] = worker
+        self.windowCoordinator.registerAdCleanupOwner(gid, self)
+        logger.info(
+            "Gallery ad cleanup started gid=%s action=%s cutoff=%s",
+            gid,
+            action,
+            page_index,
+        )
+        self._syncGalleryAdCleanupState(gid, active=True)
+        self._publishSharedState("ad_cleanup", gid)
+        self.adCleanupThreadPool.start(worker)
+
+    def _updateGalleryAdCleanupOperation(self, worker, gid, message):
+        if self._adCleanupWorkers.get(int(gid)) is not worker:
+            return
+        self._syncGalleryAdCleanupState(gid, active=True, message=message)
+        self._publishSharedState("ad_cleanup", int(gid))
+
+    def _finishGalleryAdCleanupOperation(self, worker, gid, action):
+        gid = int(gid)
+        if self._adCleanupWorkers.get(gid) is not worker:
+            return
+        self._adCleanupWorkers.pop(gid, None)
+        self.windowCoordinator.releaseAdCleanupOwner(gid, self)
+        logger.info("Gallery ad cleanup completed gid=%s action=%s", gid, action)
+        self._refreshAdCleanupGallery(gid, publish=not self._closing)
+        if self._closing:
+            self.windowCoordinator.publish(self, "ad_cleanup", gid)
+
+    def _failGalleryAdCleanupOperation(self, worker, gid, message):
+        gid = int(gid)
+        if self._adCleanupWorkers.get(gid) is not worker:
+            return
+        self._adCleanupWorkers.pop(gid, None)
+        self.windowCoordinator.releaseAdCleanupOwner(gid, self)
+        logger.warning("Gallery ad cleanup failed gid=%s error=%s", gid, message)
+        self._refreshAdCleanupGallery(gid, publish=not self._closing)
+        if self._closing:
+            self.windowCoordinator.publish(self, "ad_cleanup", gid)
+        InfoBar.error(
+            title=self.tr("广告页文件操作失败"),
+            content=str(message),
+            orient=Qt.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP_RIGHT,
+            duration=6000,
+            parent=self,
+        )
+
+    def _syncGalleryAdCleanupState(self, gid, active=None, message=""):
+        gid = int(gid)
+        record = self.userLibraryRepository.gallery_ad_cleanup(gid)
+        if active is None:
+            active = self._isAdCleanupOperationActive(gid)
+        current = self.mangaDetailInterface.currentItem
+        online = self.mangaDetailInterface.currentOnlineDetail
+        online_gid = None
+        if online is not None:
+            online_gid = self._onlineGalleryLocalGid(online.gallery, create=False)
+        if (
+            (current is not None and int(current.gid) == gid)
+            or (online_gid is not None and int(online_gid) == gid)
+        ):
+            self.mangaDetailInterface.setAdCleanupOperationState(
+                record, active=active, message=message
+            )
+
+    def _refreshAdCleanupGallery(self, gid, publish=True):
+        gid = int(gid)
+        item = self._loadLocalGalleryItem(gid)
+        if item is not None:
+            self._applyLocalGalleryItem(item, publish=False)
+            current = self.mangaDetailInterface.currentItem
+            if current is not None and int(current.gid) == gid:
+                self.mangaDetailInterface.setManga(item)
+                self._syncLocalDownloadState(item, publish=False)
+                self._syncCurrentGalleryUpdate(gid)
+            online = self.mangaDetailInterface.currentOnlineDetail
+            if online is not None:
+                online_gid = self._onlineGalleryLocalGid(
+                    online.gallery, create=False
+                )
+                if online_gid is not None and int(online_gid) == gid:
+                    self.mangaDetailInterface.setFolderOpenTarget(item)
+                    self._syncOnlineDownloadState(online)
+        self._syncGalleryAdCleanupState(gid)
+        if publish:
+            self._publishSharedState("ad_cleanup", gid)
+
     @staticmethod
     def _originalBackupExists(record):
         if record is None or not record.dirname:
@@ -2361,7 +2562,14 @@ class MainWindow(FluentWindow):
 
     def downloadLocalGalleryPage(self, item, page_index):
         gid = int(item.gid)
-        if self._isGalleryTrashed(gid) or self._isGalleryUpdating(gid):
+        if (
+            self._isGalleryTrashed(gid)
+            or self._isGalleryUpdating(gid)
+            or self._isAdCleanupOperationActive(gid)
+        ):
+            return
+        cutoff = item.ad_cleanup_cutoff_page_index
+        if cutoff is not None and int(page_index) >= int(cutoff):
             return
         page_index = int(page_index)
         key = (gid, page_index)
@@ -2765,7 +2973,7 @@ class MainWindow(FluentWindow):
     def requestGalleryUpdate(self, item):
         """Create a durable update task and satisfy an incomplete source first."""
         gid = int(item.gid)
-        if self._isGalleryTrashed(gid):
+        if self._isGalleryTrashed(gid) or self._isAdCleanupOperationActive(gid):
             return
         original = self.userLibraryRepository.gallery_original_state(gid)
         if original is not None and original.state != ORIGINAL_STATE_ACTIVE:

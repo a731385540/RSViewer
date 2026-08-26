@@ -25,6 +25,10 @@ from app.domain.online_download import (
     ORIGINAL_STATE_REPLACING_ORIGINAL,
     ORIGINAL_STATE_STAGED,
 )
+from app.domain.gallery_ad_cleanup import (
+    AD_CLEANUP_CLEANED,
+    GalleryAdCleanupRecord,
+)
 from app.domain.online_gallery import (
     OnlineGallery,
     OnlineGalleryComment,
@@ -328,6 +332,32 @@ class OnlineGalleryDownloadTests(unittest.TestCase):
         self.assertEqual([], provider.page_calls)
         self.assertFalse((folder / "original").exists())
         self.assertEqual(3, len(tuple(folder.glob("*.png"))))
+
+    def test_cleaned_ad_tail_is_not_downloaded_again(self):
+        self.user_repository.save_gallery_ad_cleanup(
+            GalleryAdCleanupRecord(
+                gid=self.detail.gallery.gid,
+                dirname="download-title",
+                cutoff_page_index=2,
+                page_count=3,
+                state=AD_CLEANUP_CLEANED,
+                pending_action="",
+            )
+        )
+        provider = FakeDownloadProvider(self.pages)
+
+        self._worker(provider).run()
+
+        record = self.user_repository.online_gallery_download(
+            self.detail.gallery.gid
+        )
+        folder = self.download_root / record.dirname
+        self.assertEqual(ONLINE_DOWNLOAD_COMPLETED, record.state)
+        self.assertEqual(2, record.completed_pages)
+        self.assertEqual([0, 1], provider.page_calls)
+        self.assertFalse((folder / "00000003.png").exists())
+        sidecar = (folder / ".ehviewer").read_text("ascii").splitlines()
+        self.assertEqual(3, int(sidecar[7]))
 
     def test_one_gallery_uses_multiple_shared_page_threads(self):
         class ConcurrentProvider(FakeDownloadProvider):

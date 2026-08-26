@@ -273,17 +273,22 @@ class OnlineGalleryDownloadWorker(QRunnable):
                 if self._is_original_download
                 else None
             )
-            total = int(self.detail.page_count)
+            remote_total = int(self.detail.page_count)
+            total = self._effective_target_total(remote_total)
             self._page_modes = list(
                 normalize_original_page_modes(
                     previous.page_modes if previous is not None else (),
-                    total,
+                    remote_total,
                     previous.completed_pages if previous is not None else 0,
                     previous.fallback_to_standard if previous is not None else False,
                 )
             )
             target_folder = self._target_folder(folder)
-            existing_indexes = self._existing_page_indexes(target_folder)
+            existing_indexes = {
+                index
+                for index in self._existing_page_indexes(target_folder)
+                if index < total
+            }
             if self._is_original_download:
                 completed_indexes = {
                     index
@@ -300,7 +305,7 @@ class OnlineGalleryDownloadWorker(QRunnable):
                 token=self.detail.gallery.token,
                 title=self.detail.title,
                 dirname=dirname,
-                page_count=int(self.detail.page_count),
+                page_count=remote_total,
                 completed_pages=completed_pages,
                 state=ONLINE_DOWNLOAD_DOWNLOADING,
                 download_mode=self.download_mode,
@@ -323,7 +328,7 @@ class OnlineGalleryDownloadWorker(QRunnable):
                         mode=self.download_mode,
                         state=ORIGINAL_STATE_DOWNLOADING,
                         completed_pages=completed_pages,
-                        page_count=int(self.detail.page_count),
+                        page_count=remote_total,
                         fallback_to_standard=(
                             ORIGINAL_PAGE_MODE_BASE in self._page_modes
                         ),
@@ -336,7 +341,7 @@ class OnlineGalleryDownloadWorker(QRunnable):
                     )
                 )
             self.signals.progressChanged.emit(
-                completed_pages, int(self.detail.page_count)
+                completed_pages, total
             )
 
             if self.download_mode != DOWNLOAD_MODE_ORIGINAL_LOCAL:
@@ -389,14 +394,15 @@ class OnlineGalleryDownloadWorker(QRunnable):
                         else ORIGINAL_STATE_STAGED
                     ),
                     total,
-                    total,
+                    remote_total,
                     fallback_to_standard=(
                         ORIGINAL_PAGE_MODE_BASE in self._page_modes
                     ),
                     page_modes=tuple(self._page_modes),
                 )
-            original_count = self._page_modes.count(ORIGINAL_PAGE_MODE_ORIGINAL)
-            base_count = self._page_modes.count(ORIGINAL_PAGE_MODE_BASE)
+            effective_modes = self._page_modes[:total]
+            original_count = effective_modes.count(ORIGINAL_PAGE_MODE_ORIGINAL)
+            base_count = effective_modes.count(ORIGINAL_PAGE_MODE_BASE)
             self.signals.stageChanged.emit(
                 f"下载完成（{original_count} 张原图，{base_count} 张基础图）"
                 if self._is_original_download and base_count
@@ -461,6 +467,15 @@ class OnlineGalleryDownloadWorker(QRunnable):
                     message,
                 )
             self.signals.failed.emit(gid, message)
+
+    def _effective_target_total(self, remote_total):
+        total = max(0, int(remote_total))
+        cleanup = self.user_repository.gallery_ad_cleanup(
+            int(self.detail.gallery.gid)
+        )
+        if cleanup is not None:
+            total = min(total, cleanup.retained_page_count)
+        return total
 
     @property
     def _is_original_download(self):

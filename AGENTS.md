@@ -61,6 +61,7 @@ RSViewer/
    ├─ domain/online_download.py      # 在线下载任务状态模型
    ├─ domain/gallery_update.py       # 本地画廊版本更新任务模型
    ├─ domain/gallery_trash.py        # 本地画廊回收记录与持久状态
+   ├─ domain/gallery_ad_cleanup.py   # 画廊广告尾页截止位置与文件阶段
    ├─ domain/similar_gallery.py      # 最近一次选中文字相似查询记录
    ├─ repositories/user_library_repository.py # RSViewer 用户标签与阅读进度库
    ├─ repositories/ehviewer_schema.py # EhViewer v7 兼容表结构与校验工具
@@ -87,6 +88,7 @@ RSViewer/
    ├─ workers/ehviewer_database_worker.py # 设置页兼容数据库导出 Worker
    ├─ workers/online_gallery_download_worker.py # 在线画廊断点下载 Worker
    ├─ workers/original_gallery_worker.py # 原图替换与压缩图备份清理 Worker
+   ├─ workers/gallery_ad_cleanup_worker.py # 广告尾页暂存、还原与永久清理 Worker
    ├─ workers/library_organizer_worker.py # 整理页扫描、同步和回收站操作 Worker
    ├─ workers/gallery_trash_worker.py # 回收站串行批处理 Worker
    ├─ workers/gallery_update_worker.py # 本地画廊新版本可恢复更新 Worker
@@ -182,6 +184,8 @@ RSViewer 自有 SQLite 使用 `PRAGMA user_version` 执行可重复迁移。版�
 
 版本 24 新增独立 `gallery_sources(local_gid, source, remote_id)`，来源只允许 `ehentai`、`exhentai`、`nhc`、`nhn`。兼容 `DOWNLOADS` 不承载该字段；历史记录优先读取同步记录、其次下载记录，无法判定时默认为 EXH。新增兼容下载行由触发器先登记 EXH，取得明确来源的同步或下载事务随后原位纠正。软删除保留来源，永久删除清理来源，GID 晋升同步迁移。
 
+版本 25 新增 `gallery_ad_cleanup_states`，以 GID 保存一基界面所选页对应的零基广告起点、源版本总页数、精确源/目标文件清单、`moving`、`staged`、`restoring`、`deleting`、`cleaned`、`failed` 阶段及待重试动作。右键某页必须包含该页并处理到源版本末页；基础图与原图暂存分别进入画廊 `delete/standard/`、`delete/original/`，已提升原图画廊的 `history/del/` 基础备份也要一并处理。只能移动、还原或删除清单中的文件，未知非空 `delete/` 必须拒绝覆盖。永久删除后仍保留截止位置，阅读、预览、补页、基础下载、原图下载和原图替换均以截止位置前的页数为有效总数，但 `.ehviewer` 继续保存源站完整 page token。软删除保留状态，永久删除画廊清理状态；应用启动把中断文件阶段标为可重试失败。画廊更新不得继承旧版本的广告页码边界：更新可忽略旧广告尾页缺失，完成前把尚存的 `delete/` 原位归档到 `history/ad-delete-{source_gid}/`，随后清除旧状态并完整建立新版本。
+
 ### `app/common/style_sheet.py`
 
 把 RSViewer 自定义样式注册到 QFluentWidgets 的样式管理器。设置页、阅读设置弹窗、漫画详情标签、在线资源页和相似画廊窗口分别注册 `StyleSheet.SETTING_INTERFACE`、`StyleSheet.READER_SETTING_DIALOG`、`StyleSheet.MANGA_DETAIL_INTERFACE`、`StyleSheet.ONLINE_MANGA_INTERFACE`、`StyleSheet.SIMILAR_GALLERY_BROWSER_WINDOW`，`setTheme()` 会自动重新加载对应的 light/dark QSS。阅读设置弹窗和相似画廊浏览器都是独立窗口，不能依赖主窗口背景透传，必须分别定义浅色与深色实体背景；相似浏览器必须使用 Fluent 顶层窗口和标题栏，内部详情继续复用共享 `MangaDetailInterface`。在线资源滚动区、viewport、内容容器、结果卡片和封面占位也必须保持主题透明背景与对应明暗配色。
@@ -203,7 +207,7 @@ PyInstaller 构建必须使用仓库根目录的 `RSViewer.spec`；用户双击 
 
 主窗口基于 `FluentWindow`，负责窗口、导航、主题、数据源组合，以及本地资源/收藏/历史之间的共享数据同步。左侧导航不使用树状父子路由：底部“漫画”“视频”两个模式按钮按当前模式切换顶部扁平入口，“新窗口”动作紧邻“设置”上方；漫画模式显示本地资源、收藏、在线资源、历史记录、正在下载、更新管理、整理和回收站，视频模式当前只显示资源，切换模式分别进入本地资源或视频资源默认页。页面和路由对象保持常驻，只切换导航项可见性，不应因模式切换重新创建页面。可配置的搜索栏与标签栏快捷键使用应用级 `QShortcut`，会先切回漫画模式的本地资源再展开搜索或切换标签侧栏，并随配置即时更新。在线资源路由使用 `OnlineMangaInterface`，不得在主窗口或 GUI 线程直接执行网络请求。收藏与本地历史不得各自重新执行大型库加载，而应消费 `LocalMangaInterface.libraryLoaded` 的同一批元数据。打开详情和阅读时由主窗口即时更新历史顺序，并在单线程后台队列保存。
 
-“新窗口”必须创建同一进程内的完整 `MainWindow`，并复用单一 `MultiWindowCoordinator`。协调器持有全局下载、画廊更新、原图文件操作、整理和回收站线程池，聚合各窗口活动任务与速度；下载总并发硬上限 3，更新总并发硬上限 1，同一 GID 的开始/暂停/删除必须路由到实际任务所有者。只有第一个窗口可执行启动中断恢复，后续窗口不得把正在运行的任务误标为暂停。收藏、历史、阅读进度、标签变更、自定义排序、资源重载、下载、更新、整理、回收站和数据源切换通过进程内事件总线同步；接收窗口更新 UI 或从共享数据库重载时不得再次回传同一事件形成循环。关闭一个窗口只能取消该窗口拥有的 Worker，禁止 `clear()` 共享线程池而影响仍打开的其他窗口。
+“新窗口”必须创建同一进程内的完整 `MainWindow`，并复用单一 `MultiWindowCoordinator`。协调器持有全局下载、画廊更新、原图文件操作、广告页文件操作、整理和回收站线程池，聚合各窗口活动任务与速度；下载总并发硬上限 3，更新总并发硬上限 1，同一 GID 的开始/暂停/删除必须路由到实际任务所有者。只有第一个窗口可执行启动中断恢复，后续窗口不得把正在运行的任务误标为暂停。收藏、历史、阅读进度、标签变更、自定义排序、资源重载、下载、更新、广告页清理、整理、回收站和数据源切换通过进程内事件总线同步；接收窗口更新 UI 或从共享数据库重载时不得再次回传同一事件形成循环。关闭一个窗口只能取消该窗口拥有的 Worker，禁止 `clear()` 共享线程池而影响仍打开的其他窗口。
 
 资源浏览、画廊详情和阅读器是三个独立刷新层级。资源浏览页只管理当前查询集合、分页和卡片摘要：只有集合成员真正变化时才更新容器，新资源增量插入，下载/阅读摘要变化时只按 GID 更新现有卡片；下载页数、速度、详情预览和阅读图片不得触发资源页 `reload()`、重建当前页或改变滚动位置。下载管理页只有可见时才重建任务卡。窗口首次整库加载只初始化本窗口，禁止广播整库快照；跨窗口普通下载生命周期使用单 GID 事件，只有分类/归类集合变更、回收站增删或数据源切换等真正改变集合结构的操作才允许显式整库重载。
 

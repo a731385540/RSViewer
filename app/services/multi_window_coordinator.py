@@ -21,6 +21,7 @@ class MultiWindowCoordinator(QObject):
         self._windows = []
         self._startupRecoveryClaimed = False
         self._shuttingDown = False
+        self._adCleanupOwners = {}
         self.similarGalleryWindow = None
         self.onlineDownloadThreadPool = QThreadPool(self)
         self.onlineDownloadThreadPool.setMaxThreadCount(3)
@@ -31,6 +32,8 @@ class MultiWindowCoordinator(QObject):
         self.galleryUpdateThreadPool.setMaxThreadCount(1)
         self.originalFileThreadPool = QThreadPool(self)
         self.originalFileThreadPool.setMaxThreadCount(1)
+        self.adCleanupThreadPool = QThreadPool(self)
+        self.adCleanupThreadPool.setMaxThreadCount(1)
         self.organizerThreadPool = QThreadPool(self)
         self.organizerThreadPool.setMaxThreadCount(1)
         self.trashThreadPool = QThreadPool(self)
@@ -86,6 +89,7 @@ class MultiWindowCoordinator(QObject):
             self.downloadRegistrationThreadPool,
             self.galleryUpdateThreadPool,
             self.originalFileThreadPool,
+            self.adCleanupThreadPool,
             self.organizerThreadPool,
             self.trashThreadPool,
         )
@@ -96,6 +100,8 @@ class MultiWindowCoordinator(QObject):
         for pool in pools:
             remaining = max(0, round((deadline - time.monotonic()) * 1000))
             completed = pool.waitForDone(remaining) and completed
+        if completed:
+            self._adCleanupOwners.clear()
         logger.info("Shared worker shutdown completed=%s", completed)
         return completed
 
@@ -133,6 +139,21 @@ class MultiWindowCoordinator(QObject):
             if gid in window._galleryUpdateWorkers:
                 return window
         return None
+
+    def adCleanupOwner(self, gid):
+        return self._adCleanupOwners.get(int(gid))
+
+    def registerAdCleanupOwner(self, gid, window):
+        gid = int(gid)
+        owner = self._adCleanupOwners.get(gid)
+        if owner is not None and owner is not window:
+            raise ValueError("这个画廊正在执行广告页文件操作")
+        self._adCleanupOwners[gid] = window
+
+    def releaseAdCleanupOwner(self, gid, window):
+        gid = int(gid)
+        if self._adCleanupOwners.get(gid) is window:
+            self._adCleanupOwners.pop(gid, None)
 
     def downloadActivity(self):
         active = set()
@@ -185,10 +206,22 @@ class MultiWindowCoordinator(QObject):
             self.downloadOwner(gid) is not None
             or self.updateOwner(gid) is not None
             or self.originalOwner(gid) is not None
+            or self.adCleanupOwner(gid) is not None
             or self.hasTrashOperation(gid)
         ):
             return True
         for window in self.windows():
+            reader = getattr(window, "mangaReaderInterface", None)
+            stack = getattr(window, "stackedWidget", None)
+            reader_item = getattr(reader, "currentItem", None) if reader else None
+            if (
+                reader is not None
+                and stack is not None
+                and stack.currentWidget() is reader
+                and reader_item is not None
+                and int(reader_item.gid) == gid
+            ):
+                return True
             page_workers = getattr(window, "_localPageDownloadWorkers", {})
             if any(int(key[0]) == gid for key in page_workers):
                 return True

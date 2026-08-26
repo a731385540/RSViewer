@@ -18,6 +18,10 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 from app.domain.manga import MangaItem
+from app.domain.gallery_ad_cleanup import (
+    AD_CLEANUP_STAGED,
+    GalleryAdCleanupRecord,
+)
 from app.domain.similar_gallery import LatestSimilarSearch
 from app.domain.online_download import (
     DOWNLOAD_MODE_ORIGINAL_LOCAL,
@@ -528,6 +532,42 @@ class ReadingProgressTests(unittest.TestCase):
         self.assertEqual("1 BASE", detail.baseCountBadge.text())
         self.assertFalse(detail.originalCountBadge.isHidden())
         self.assertFalse(detail.baseCountBadge.isHidden())
+        detail.cancelLoads()
+        detail.close()
+        detail.deleteLater()
+
+    def test_local_preview_routes_actual_tile_to_ad_cleanup_controls(self):
+        pages = self._create_pages(4)
+        item = make_item(self.root, pages)
+        detail = MangaDetailInterface(
+            EhViewerDataSource(self.root / "unused.db", self.root),
+            self.repository,
+        )
+        requested = []
+        detail.adCleanupRequested.connect(
+            lambda target, page_index: requested.append((target.gid, page_index))
+        )
+        detail.setManga(item)
+        detail.show()
+        QApplication.processEvents()
+
+        self.assertTrue(detail._preview_tiles[2].allowAdCleanup)
+        detail._preview_tiles[2].adCleanupRequested.emit(2)
+        self.assertEqual([(123, 2)], requested)
+
+        record = GalleryAdCleanupRecord(
+            gid=123,
+            dirname=self.root.name,
+            cutoff_page_index=2,
+            page_count=4,
+            state=AD_CLEANUP_STAGED,
+            pending_action="",
+        )
+        detail.setAdCleanupOperationState(record)
+        self.assertFalse(detail.adCleanupDeleteButton.isHidden())
+        self.assertFalse(detail.adCleanupRestoreButton.isHidden())
+        self.assertFalse(detail._preview_tiles[2].allowAdCleanup)
+
         detail.cancelLoads()
         detail.close()
         detail.deleteLater()

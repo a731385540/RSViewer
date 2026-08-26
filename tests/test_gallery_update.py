@@ -11,6 +11,10 @@ from PySide6.QtCore import QByteArray, QBuffer, QIODevice
 from PySide6.QtGui import QColor, QImage
 
 from app.domain.gallery_update import GalleryUpdateRecord, UPDATE_COMPLETED
+from app.domain.gallery_ad_cleanup import (
+    AD_CLEANUP_STAGED,
+    GalleryAdCleanupRecord,
+)
 from app.domain.online_download import (
     DOWNLOAD_MODE_ORIGINAL_LOCAL,
     GalleryOriginalState,
@@ -237,6 +241,66 @@ class GalleryUpdateTests(unittest.TestCase):
         self.assertEqual([(200,)], gids)
         self.assertEqual([(200,)], dirname_gid)
         self.assertGreater(updated_time, 123)
+
+    def test_update_ignores_old_ad_tail_and_does_not_inherit_cutoff(self):
+        delete_page = self.folder / "delete" / "standard" / "00000003.png"
+        delete_page.parent.mkdir(parents=True)
+        (self.folder / "00000003.png").rename(delete_page)
+        self.user_repository.save_gallery_ad_cleanup(
+            GalleryAdCleanupRecord(
+                gid=100,
+                dirname=self.folder.name,
+                cutoff_page_index=2,
+                page_count=3,
+                state=AD_CLEANUP_STAGED,
+                pending_action="",
+                manifest=(
+                    {
+                        "source": "00000003.png",
+                        "target": "delete/standard/00000003.png",
+                    },
+                ),
+            )
+        )
+        record = GalleryUpdateRecord(
+            source_gid=100,
+            source_token="abcdef1234",
+            site="exhentai",
+            title="Old",
+            folder=str(self.folder),
+            latest_url=self.latest_gallery.url,
+        )
+        self.user_repository.save_gallery_update(record)
+        provider = UpdateProvider(
+            self.latest_detail,
+            {0: image_bytes("green"), 1: image_bytes("yellow"), 2: image_bytes("red")},
+        )
+        completed = []
+        failed = []
+        worker = GalleryUpdateWorker(
+            record,
+            provider,
+            OnlineGalleryMemoryCache(),
+            self.external_repository,
+            self.user_repository,
+        )
+        worker.signals.completed.connect(lambda *values: completed.append(values))
+        worker.signals.failed.connect(lambda *values: failed.append(values))
+
+        worker.run()
+
+        self.assertEqual([(100, 200)], completed, failed)
+        self.assertIsNone(self.user_repository.gallery_ad_cleanup(100))
+        self.assertIsNone(self.user_repository.gallery_ad_cleanup(200))
+        archived = (
+            self.folder
+            / "history"
+            / "ad-delete-100"
+            / "standard"
+            / "00000003.png"
+        )
+        self.assertTrue(archived.is_file())
+        self.assertEqual(3, len(tuple(self.folder.glob("*.png"))))
 
     def test_page_token_collection_supports_forty_preview_items_per_page(self):
         total = 151

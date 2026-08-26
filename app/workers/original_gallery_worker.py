@@ -65,6 +65,9 @@ class OriginalGalleryFileWorker(QRunnable):
     def _replace(self, folder):
         gid = int(self.record.gid)
         total = int(self.record.page_count)
+        cleanup = self.user_repository.gallery_ad_cleanup(gid)
+        if cleanup is not None:
+            total = min(total, cleanup.retained_page_count)
         original = folder / "original"
         backup = folder / "history" / "del"
         state = self.user_repository.gallery_original_state(gid)
@@ -124,7 +127,7 @@ class OriginalGalleryFileWorker(QRunnable):
             gid,
             ORIGINAL_STATE_ACTIVE,
             completed_pages=total,
-            page_count=total,
+            page_count=int(self.record.page_count),
             error="",
         )
 

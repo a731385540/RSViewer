@@ -80,6 +80,18 @@ class MultiWindowCoordinatorTests(unittest.TestCase):
         )
         self.assertEqual(1, self.coordinator.galleryUpdateThreadPool.maxThreadCount())
 
+    def test_ad_cleanup_owner_survives_window_unregister_until_release(self):
+        window = self._window()
+        self.coordinator.register(window)
+        self.coordinator.registerAdCleanupOwner(42, window)
+
+        self.coordinator.unregister(window)
+
+        self.assertIs(window, self.coordinator.adCleanupOwner(42))
+        self.assertTrue(self.coordinator.galleryMutationBusy(42))
+        self.coordinator.releaseAdCleanupOwner(42, window)
+        self.assertIsNone(self.coordinator.adCleanupOwner(42))
+
     def test_gallery_limit_one_keeps_other_galleries_queued(self):
         lock = threading.Lock()
         release = threading.Event()
