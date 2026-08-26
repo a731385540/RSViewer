@@ -314,6 +314,9 @@ class MainWindow(FluentWindow):
         self.mangaDetailInterface.categorySelectionRequested.connect(
             self.localMangaInterface.openCategorySelection
         )
+        self.mangaDetailInterface.deleteRequested.connect(
+            lambda item: self.trashLocalGalleries((item,))
+        )
         self.mangaDetailInterface.similarResultsRequested.connect(
             self.showSimilarGalleryResults
         )
@@ -382,6 +385,9 @@ class MainWindow(FluentWindow):
         )
         self.onlineMangaInterface.localFolderOpenRequested.connect(
             self._openOnlineGalleryFolder
+        )
+        self.onlineMangaInterface.localDeleteRequested.connect(
+            self._trashDownloadedOnlineGallery
         )
         self.downloadManagerInterface = DownloadManagerInterface(self)
         self.downloadManagerInterface.startRequested.connect(
@@ -1133,7 +1139,16 @@ class MainWindow(FluentWindow):
     def _leaveDeletedGallery(self, gids):
         gids = {int(gid) for gid in gids}
         item = self.mangaDetailInterface.currentItem
+        online_detail = self.mangaDetailInterface.currentOnlineDetail
         reader_item = self.mangaReaderInterface.currentItem
+        if online_detail is not None:
+            online_local_gid = self._onlineGalleryLocalGid(
+                online_detail.gallery, create=False
+            )
+            if online_local_gid is not None and int(online_local_gid) in gids:
+                self.mangaDetailInterface.setFolderOpenTarget(None)
+                self.navigateBack()
+                return
         if (
             item is not None and int(item.gid) in gids
         ) or (
@@ -1170,8 +1185,11 @@ class MainWindow(FluentWindow):
         )
         detail = self.mangaDetailInterface.currentOnlineDetail
         if detail is not None:
+            local_gid = self._onlineGalleryLocalGid(
+                detail.gallery, create=False
+            )
             self.mangaDetailInterface.setFolderOpenTarget(
-                MainWindow._localGalleryItem(self, detail.gallery.gid)
+                MainWindow._localGalleryItem(self, local_gid)
             )
             self._syncOnlineDownloadState(detail)
         self._refreshDownloadManager(publish=False)
@@ -1218,8 +1236,15 @@ class MainWindow(FluentWindow):
             item.gid, *local_gallery_states(item)
         )
         detail = self.mangaDetailInterface.currentOnlineDetail
-        if detail is not None and int(detail.gallery.gid) == int(item.gid):
-            self.mangaDetailInterface.setFolderOpenTarget(item)
+        if detail is not None:
+            detail_local_gid = self._onlineGalleryLocalGid(
+                detail.gallery, create=False
+            )
+            if (
+                detail_local_gid is not None
+                and int(detail_local_gid) == int(item.gid)
+            ):
+                self.mangaDetailInterface.setFolderOpenTarget(item)
         if publish:
             self._publishSharedState("library_item", item)
         coordinator = getattr(self, "windowCoordinator", None)
@@ -1504,7 +1529,29 @@ class MainWindow(FluentWindow):
             local_gid if local_gid is not None else int(remote_gid)
         )
 
+    def _trashDownloadedOnlineGallery(self, gallery):
+        local_gid = self._onlineGalleryLocalGid(gallery, create=False)
+        item = (
+            self._localGalleryItem(local_gid)
+            if local_gid is not None
+            else None
+        )
+        if item is None:
+            InfoBar.warning(
+                title=self.tr("删除失败"),
+                content=self.tr("找不到该在线画廊对应的本地资源记录。"),
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=3500,
+                parent=self.onlineMangaInterface,
+            )
+            return
+        self.trashLocalGalleries((item,))
+
     def _localGalleryItem(self, gid):
+        if gid is None:
+            return None
         return next(
             (
                 current
@@ -1607,7 +1654,10 @@ class MainWindow(FluentWindow):
             self._latestSimilarSearch
         )
         self.mangaDetailInterface.setFolderOpenTarget(
-            MainWindow._localGalleryItem(self, item.gid)
+            MainWindow._localGalleryItem(
+                self,
+                self._onlineGalleryLocalGid(item, create=False),
+            )
         )
         self.switchTo(self.mangaDetailInterface)
         cached_detail = self.onlineGalleryCache.get_detail(site, item)

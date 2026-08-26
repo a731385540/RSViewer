@@ -1160,6 +1160,36 @@ class MainWindowNavigationTests(unittest.TestCase):
         self.assertEqual(folder.resolve(), Path(opened_url.toLocalFile()))
         window._showGalleryFolderError.assert_not_called()
 
+    def test_online_delete_resolves_source_mapping_before_trashing(self):
+        local_item = SimpleNamespace(gid=900, folder=Path(__file__).parent)
+        repository = SimpleNamespace(
+            local_gid_for_source=MagicMock(return_value=900)
+        )
+        window = SimpleNamespace(
+            userLibraryRepository=repository,
+            _libraryItems=[local_item],
+            trashLocalGalleries=MagicMock(),
+        )
+        window._onlineGalleryLocalGid = lambda gallery, create=False: (
+            MainWindow._onlineGalleryLocalGid(window, gallery, create)
+        )
+        window._localGalleryItem = lambda gid: MainWindow._localGalleryItem(
+            window, gid
+        )
+        gallery = OnlineGallery(
+            123,
+            "",
+            "https://nhentai.net/g/123/",
+            "Remote gallery",
+            source_site="nhn",
+            source_id="123",
+        )
+
+        MainWindow._trashDownloadedOnlineGallery(window, gallery)
+
+        repository.local_gid_for_source.assert_called_once_with("nhn", "123")
+        window.trashLocalGalleries.assert_called_once_with((local_item,))
+
     def test_download_concurrency_is_hard_capped_at_three(self):
         pool = FakeThreadPool()
         window = SimpleNamespace(onlineDownloadThreadPool=pool)

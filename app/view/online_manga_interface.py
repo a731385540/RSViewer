@@ -246,11 +246,13 @@ class _OnlineGalleryCardBase(CardWidget):
         open_callback=None,
         download_callback=None,
         open_folder_callback=None,
+        delete_callback=None,
     ):
         super().__init__(parent)
         self.item = item
         self.downloadCallback = download_callback
         self.openFolderCallback = open_folder_callback
+        self.deleteCallback = delete_callback
         self.isDownloaded = False
         self.isMarked = False
         self.setCursor(Qt.PointingHandCursor)
@@ -330,6 +332,18 @@ class _OnlineGalleryCardBase(CardWidget):
             )
             menu.addAction(open_folder_action)
             has_action = True
+        if self.isDownloaded and self.deleteCallback is not None:
+            delete_action = QAction(
+                FIF.DELETE.icon(),
+                self.tr("删除"),
+                menu,
+            )
+            delete_action.setToolTip(self.tr("移入回收站"))
+            delete_action.triggered.connect(
+                lambda _checked=False: self.deleteCallback(self.item)
+            )
+            menu.addAction(delete_action)
+            has_action = True
         if not has_action:
             event.accept()
             return
@@ -352,6 +366,7 @@ class OnlineGalleryCard(_OnlineGalleryCardBase):
         open_callback=None,
         download_callback=None,
         open_folder_callback=None,
+        delete_callback=None,
     ):
         super().__init__(
             item,
@@ -359,6 +374,7 @@ class OnlineGalleryCard(_OnlineGalleryCardBase):
             open_callback,
             download_callback,
             open_folder_callback,
+            delete_callback,
         )
         self.setObjectName("onlineGalleryCard")
         self.setFixedWidth(ONLINE_CARD_WIDTH)
@@ -435,6 +451,7 @@ class OnlineGalleryListCard(_OnlineGalleryCardBase):
         open_callback=None,
         download_callback=None,
         open_folder_callback=None,
+        delete_callback=None,
     ):
         super().__init__(
             item,
@@ -442,6 +459,7 @@ class OnlineGalleryListCard(_OnlineGalleryCardBase):
             open_callback,
             download_callback,
             open_folder_callback,
+            delete_callback,
         )
         self.setObjectName("onlineGalleryListCard")
         self.setFixedHeight(116)
@@ -492,6 +510,7 @@ class OnlineGalleryExtendedCard(_OnlineGalleryCardBase):
         open_callback=None,
         download_callback=None,
         open_folder_callback=None,
+        delete_callback=None,
     ):
         super().__init__(
             item,
@@ -499,6 +518,7 @@ class OnlineGalleryExtendedCard(_OnlineGalleryCardBase):
             open_callback,
             download_callback,
             open_folder_callback,
+            delete_callback,
         )
         self.setObjectName("onlineGalleryExtendedCard")
         self.setMinimumWidth(520)
@@ -588,6 +608,7 @@ class OnlineMangaInterface(QWidget):
     galleryActivated = Signal(object, object, bytes)
     galleryDownloadRequested = Signal(object, object, bytes)
     localFolderOpenRequested = Signal(int)
+    localDeleteRequested = Signal(object)
 
     def __init__(
         self,
@@ -1428,6 +1449,7 @@ class OnlineMangaInterface(QWidget):
                 open_callback=self._openGallery,
                 download_callback=self._downloadGallery,
                 open_folder_callback=self._openDownloadedFolder,
+                delete_callback=self._deleteDownloadedGallery,
             )
             for item in items
         ]
@@ -1488,6 +1510,10 @@ class OnlineMangaInterface(QWidget):
     def _openDownloadedFolder(self, item):
         if int(item.gid) in self._downloaded_gids:
             self.localFolderOpenRequested.emit(int(item.gid))
+
+    def _deleteDownloadedGallery(self, item):
+        if int(item.gid) in self._downloaded_gids:
+            self.localDeleteRequested.emit(item)
 
     def _startCoverLoads(self, site, provider, items):
         self._cancelCoverLoads()

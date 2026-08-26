@@ -519,6 +519,7 @@ class MangaDetailInterface(QWidget):
     selectedTitleSearchRequested = Signal(int, str)
     selectedTitleOnlineSearchRequested = Signal(str)
     categorySelectionRequested = Signal(object)
+    deleteRequested = Signal(object)
     similarResultsRequested = Signal()
 
     def __init__(
@@ -763,6 +764,14 @@ class MangaDetailInterface(QWidget):
         )
         self.categoryButton.clicked.connect(self._requestCategorySelection)
         action_layout.addWidget(self.categoryButton)
+        self.deleteButton = PushButton(
+            FIF.DELETE,
+            self.tr("删除"),
+            self.operationCard,
+        )
+        self.deleteButton.setToolTip(self.tr("移入回收站"))
+        self.deleteButton.clicked.connect(self._requestDelete)
+        action_layout.addWidget(self.deleteButton)
 
         self.downloadControls = QWidget(self.operationCard)
         self.downloadControls.setFixedWidth(160)
@@ -853,6 +862,7 @@ class MangaDetailInterface(QWidget):
         self.updateButton.hide()
         self.openFolderButton.hide()
         self.categoryButton.hide()
+        self.deleteButton.hide()
         self.clearProgressButton.hide()
 
         self.previewCard = SimpleCardWidget(self)
@@ -1030,6 +1040,7 @@ class MangaDetailInterface(QWidget):
         self.syncButton.setVisible(not is_nh)
         self.openFolderButton.show()
         self.categoryButton.show()
+        self.deleteButton.show()
         self.clearProgressButton.setVisible(
             item.progress_page_index is not None or item.reading_completed
         )
@@ -1148,6 +1159,7 @@ class MangaDetailInterface(QWidget):
         self.updateButton.hide()
         self.openFolderButton.hide()
         self.categoryButton.hide()
+        self.deleteButton.hide()
         self.clearProgressButton.hide()
         self.downloadButton.setEnabled(False)
         self.downloadButton.setText(self.tr("正在读取画廊信息…"))
@@ -1629,6 +1641,11 @@ class MangaDetailInterface(QWidget):
         if self._item is not None and self._online_detail is None:
             self.categorySelectionRequested.emit(self._item)
 
+    def _requestDelete(self):
+        item = self._item or self._folder_open_item
+        if item is not None:
+            self.deleteRequested.emit(item)
+
     def _requestClearProgress(self):
         item = self._item or self._folder_open_item
         if item is not None:
@@ -1637,6 +1654,7 @@ class MangaDetailInterface(QWidget):
     def setFolderOpenTarget(self, item=None):
         self._folder_open_item = item
         self.openFolderButton.setVisible(item is not None)
+        self.deleteButton.setVisible(item is not None)
         self.clearProgressButton.setVisible(
             item is not None
             and (

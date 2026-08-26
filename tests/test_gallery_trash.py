@@ -111,6 +111,15 @@ class GalleryTrashTests(unittest.TestCase):
                 ).fetchone(),
             )
 
+    def _assert_restored_with_new_time(self, before, restored, minimum_time):
+        before_download, before_dirname, before_tags = before
+        download, dirname, tags = restored
+        self.assertEqual(before_download[:12], download[:12])
+        self.assertGreaterEqual(download[12], minimum_time)
+        self.assertEqual(before_download[13:], download[13:])
+        self.assertEqual(before_dirname, dirname)
+        self.assertEqual(before_tags, tags)
+
     def test_trash_and_restore_preserve_external_rows_and_own_relations(self):
         before = self._external_rows()
         playlist = self.user_repository.create_playlist("Keep playlist")
@@ -139,16 +148,40 @@ class GalleryTrashTests(unittest.TestCase):
             ),
         )
 
+        restore_started = int(time.time() * 1000)
+        with closing(sqlite3.connect(self.external_db)) as connection:
+            connection.execute(
+                """
+                INSERT INTO DOWNLOADS(
+                    GID, TOKEN, TITLE, TITLE_JPN, THUMB, CATEGORY, POSTED,
+                    UPLOADER, RATING, SIMPLE_LANGUAGE, STATE, LEGACY, TIME,
+                    LABEL, ARCHIVE_URI
+                ) VALUES (43, '', 'Existing gallery', '', '', 4, '', '', 0,
+                          NULL, 3, 0, ?, '', NULL)
+                """,
+                (restore_started - 1000,),
+            )
+            connection.commit()
         restore_trashed_gallery(
             record, self.external_repository, self.user_repository
         )
 
-        self.assertEqual(before, self._external_rows())
+        self._assert_restored_with_new_time(
+            before, self._external_rows(), restore_started
+        )
         self.assertIsNone(self.user_repository.gallery_trash(42))
         self.assertEqual((42,), self.user_repository.playlist_items(playlist))
         self.assertEqual((42,), self.user_repository.favorite_gids())
         self.assertEqual(9, self.user_repository.progress_for_manga(42))
         self.assertEqual(1, self.user_repository.list_playlists()[0][2])
+        with closing(sqlite3.connect(self.external_db)) as connection:
+            ordered_gids = tuple(
+                row[0]
+                for row in connection.execute(
+                    "SELECT GID FROM DOWNLOADS ORDER BY TIME DESC, GID DESC"
+                )
+            )
+        self.assertEqual((42, 43), ordered_gids)
 
     def test_restore_uses_the_data_source_saved_with_the_trash_record(self):
         before = self._external_rows()
@@ -170,9 +203,12 @@ class GalleryTrashTests(unittest.TestCase):
         )
         worker.signals.completed.connect(results.append)
 
+        restore_started = int(time.time() * 1000)
         worker.run()
 
-        self.assertEqual(before, self._external_rows())
+        self._assert_restored_with_new_time(
+            before, self._external_rows(), restore_started
+        )
         self.assertIsNone(self.user_repository.gallery_trash(42))
         self.assertEqual(1, len(results[0].succeeded))
         self.assertEqual((), results[0].failed)

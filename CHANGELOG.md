@@ -6,6 +6,7 @@
 
 ### Added
 
+- 本地画廊详情和已下载在线画廊详情的操作栏新增“删除”，在线资源三种卡片视图对已下载画廊新增右键“删除”；三个入口统一按来源映射定位本地 GID 并移入 RSViewer 回收站。画廊还原时在兼容登记恢复事务内刷新 `DOWNLOADS.TIME`，时间倒序下立即排到本地资源最前面。
 - 新增自有滚动诊断日志：源码版与打包版统一写入运行根目录 `data/logs/rsviewer.log`，记录应用版本环境、窗口生命周期、导航、在线页面及下载任务关键事件，并接管主线程、后台线程、不可抛出异常与 Qt 消息；`data/logs/crash.log` 使用 `faulthandler` 保存原生闪退前的全线程 Python 栈和会话完整性标记。日志自动轮转，并统一脱敏 Cookie、授权头、EH/EX token 与代理凭据。
 - 新增根目录 `build_exe.cmd` 一键打包入口：首次运行可自动创建 `.venv` 并安装独立构建依赖，随后始终使用受维护的 `RSViewer.spec` 输出 `dist/RSViewer.exe`。
 - 新增 RSViewer 应用图标，统一用于源码窗口、启动 Splash 和 PyInstaller 可执行文件；图标资源随 QSS 一起从只读 bundle 加载，不写入运行时 `data`。
@@ -271,6 +272,7 @@
 
 ### Validation
 
+- `.venv\Scripts\python.exe -m unittest discover -s tests -v`：284 项测试全部通过；新增本地/在线详情删除按钮、在线 Card/List/Extended 已下载卡片右键删除、NH 来源到本地 GID 映射及回收站还原刷新时间并排到首位的覆盖。`compileall` 与 `git diff --check` 通过。
 - `.venv\Scripts\python.exe -m unittest discover -s tests -v`：282 项测试全部通过；新增日志创建/正常退出标记、上次非正常退出提示、主线程与后台线程 traceback、Qt 告警及 Cookie/token/代理凭据脱敏测试。启用真实 `faulthandler` 的日志文件冒烟、`compileall` 与 `git diff --check` 通过。
 - `.venv\Scripts\python.exe -m unittest discover -s tests -v`：276 项测试全部通过；新增临时在线搜索页面快照、无网络恢复及“原搜索 → 来源画廊 → 临时搜索 → 来源画廊 → 原搜索”返回链测试。`compileall` 与 `git diff --check` 通过。
 - `scripts/build_exe.ps1` 实际单文件构建通过，生成约 101 MiB 的 `dist/RSViewer.exe`；Windows 可提取 32px 关联图标，PyInstaller 归档包含多尺寸 ICO、PNG/SVG 源图和 light/dark QSS。`python -m compileall`、路径专项测试、PowerShell 语法检查、`git diff --check` 及 274 项完整测试通过。

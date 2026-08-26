@@ -592,6 +592,49 @@ class OnlineMangaInterfaceTests(unittest.TestCase):
         )
         interface.deleteLater()
 
+    def test_downloaded_card_context_menu_can_delete_in_all_view_modes(self):
+        interface = OnlineMangaInterface(
+            provider_factory=_FakeOnlineProvider,
+            auto_load_on_show=False,
+        )
+        provider = interface._makeProvider("ehentai")
+        item = provider.search(
+            type("Query", (), {"keyword": "", "cursor": ""})()
+        ).items[0]
+        interface.setGalleryDownloaded(item.gid)
+        deleted = []
+        interface.localDeleteRequested.connect(deleted.append)
+        interface.resize(1100, 760)
+        interface.show()
+
+        for view_mode in ("card", "list", "extended"):
+            with self.subTest(view_mode=view_mode):
+                cfg.set(cfg.onlineEhViewMode, view_mode)
+                interface._setItems((item,))
+                QApplication.processEvents()
+                card = interface._cards[0]
+                event = QContextMenuEvent(
+                    QContextMenuEvent.Mouse,
+                    QPoint(10, 10),
+                    card.mapToGlobal(QPoint(10, 10)),
+                )
+
+                def trigger_delete(menu, _position):
+                    next(
+                        action
+                        for action in menu.actions()
+                        if action.text() == "删除"
+                    ).trigger()
+
+                with patch(
+                    "app.view.online_manga_interface.RoundMenu.exec",
+                    trigger_delete,
+                ):
+                    QApplication.sendEvent(card, event)
+
+        self.assertEqual([item, item, item], deleted)
+        interface.deleteLater()
+
     def test_selected_title_search_runs_exact_query_and_shows_return_button(self):
         interface = OnlineMangaInterface(
             provider_factory=_FakeOnlineProvider,

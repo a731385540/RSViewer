@@ -645,9 +645,13 @@ class ReadingProgressTests(unittest.TestCase):
         self.assertTrue(detail.detailMetadataLabel.isHidden())
         self.assertIn("第 3 / 4 页", detail.detailMetadataLabel.text())
         opened = []
+        deleted = []
         detail.folderOpenRequested.connect(lambda value: opened.append(value.gid))
+        detail.deleteRequested.connect(lambda value: deleted.append(value.gid))
         detail.openFolderButton.click()
+        detail.deleteButton.click()
         self.assertEqual([item.gid], opened)
+        self.assertEqual([item.gid], deleted)
         detail.cancelLoads()
         detail.close()
         detail.deleteLater()
@@ -856,7 +860,9 @@ class ReadingProgressTests(unittest.TestCase):
             tag_search_index=make_tag_search_index(),
         )
         folder_requests = []
+        delete_requests = []
         detail_widget.folderOpenRequested.connect(folder_requests.append)
+        detail_widget.deleteRequested.connect(delete_requests.append)
         sprite = QImage(4, 2, QImage.Format_RGB32)
         sprite.fill(QColor("red"))
         for x in range(2, 4):
@@ -900,12 +906,16 @@ class ReadingProgressTests(unittest.TestCase):
         )
         detail_widget.setOnlineLoading(gallery, provider, cache)
         self.assertTrue(detail_widget.openFolderButton.isHidden())
+        self.assertTrue(detail_widget.deleteButton.isHidden())
         self.assertTrue(detail_widget.categoryButton.isHidden())
         local_item = SimpleNamespace(gid=gallery.gid, folder=self.root)
         detail_widget.setFolderOpenTarget(local_item)
         self.assertFalse(detail_widget.openFolderButton.isHidden())
+        self.assertFalse(detail_widget.deleteButton.isHidden())
         detail_widget.openFolderButton.click()
+        detail_widget.deleteButton.click()
         self.assertEqual([gallery.gid], [item.gid for item in folder_requests])
+        self.assertEqual([gallery.gid], [item.gid for item in delete_requests])
         self.assertTrue(detail_widget.isOnlineGallery)
         self.assertFalse(detail_widget.operationCard.isHidden())
         self.assertFalse(detail_widget.previewCard.isHidden())

@@ -306,9 +306,10 @@ class EhViewerDownloadRepository:
             connection.commit()
 
     def restore_gallery_from_trash(self, gid, folder, snapshot):
-        """Restore exact EhViewer rows without overwriting a new collision."""
+        """Restore rows and promote the gallery to the front of recent sorting."""
         self._validate_targets()
         gid = int(gid)
+        restored_at = int(time.time() * 1000)
         folder = self._validated_existing_root_folder(folder)
         self._validate_snapshot_identity(snapshot, gid, folder.name)
         with closing(sqlite3.connect(str(self.database_path), timeout=30)) as connection:
@@ -316,6 +317,11 @@ class EhViewerDownloadRepository:
             current = self._gallery_snapshot(connection, gid)
             if any(current.get(table) is not None for table in current):
                 if current == snapshot:
+                    connection.execute(
+                        "UPDATE DOWNLOADS SET TIME = ? WHERE GID = ?",
+                        (restored_at, gid),
+                    )
+                    connection.commit()
                     return
                 if (
                     current.get("DOWNLOADS") is not None
@@ -325,6 +331,11 @@ class EhViewerDownloadRepository:
                     # same gallery and then changed mutable metadata. Keep its
                     # newer rows instead of overwriting them with the snapshot.
                     self._validate_snapshot_identity(current, gid, folder.name)
+                    connection.execute(
+                        "UPDATE DOWNLOADS SET TIME = ? WHERE GID = ?",
+                        (restored_at, gid),
+                    )
+                    connection.commit()
                     return
                 raise ValueError(f"EhViewer 数据库中 GID {gid} 已被其他记录占用")
             collision = connection.execute(
@@ -346,6 +357,10 @@ class EhViewerDownloadRepository:
                 self._insert_table_snapshot(
                     connection, "Gallery_Tags", snapshot["Gallery_Tags"]
                 )
+            connection.execute(
+                "UPDATE DOWNLOADS SET TIME = ? WHERE GID = ?",
+                (restored_at, gid),
+            )
             connection.commit()
 
     def _validated_existing_root_folder(self, folder):
