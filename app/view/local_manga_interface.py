@@ -1107,6 +1107,7 @@ class LocalMangaInterface(QWidget):
     TAG_TAXONOMY = "taxonomy"
     mangaActivated = Signal(object)
     readingSequenceMangaActivated = Signal(object, object, int)
+    readRequested = Signal(object, object, int)
     libraryLoaded = Signal(object)
     libraryMutated = Signal()
     favoriteChanged = Signal(object, bool)
@@ -2026,6 +2027,11 @@ class LocalMangaInterface(QWidget):
             lambda: self._setMangaFavorite(target_gids, favorite)
         )
         menu.addAction(favorite_action)
+        read_action = QAction(FIF.BOOK_SHELF.icon(), self.tr("阅读"), menu)
+        read_action.triggered.connect(
+            lambda _checked=False, current=item: self._requestRead(current)
+        )
+        menu.addAction(read_action)
         open_folder_action = QAction(
             FIF.FOLDER.icon(), self.tr("在资源管理器中打开"), menu
         )
@@ -2880,7 +2886,7 @@ class LocalMangaInterface(QWidget):
             item for item in self._all_items if item.gid in active_gids
         )
 
-    def _activateManga(self, item: MangaItem):
+    def _readingSequenceForItem(self, item: MangaItem):
         if self._tag_mode in (self.TAG_CATEGORY, self.TAG_TAXONOMY):
             items = self._orderedReadingSequenceItems()
             try:
@@ -2889,9 +2895,22 @@ class LocalMangaInterface(QWidget):
                     if current.gid == item.gid
                 )
             except StopIteration:
-                self.mangaActivated.emit(item)
-                return
-            self.readingSequenceMangaActivated.emit(item, tuple(items), position)
+                return None
+            return tuple(items), position
+        return None
+
+    def _requestRead(self, item: MangaItem):
+        sequence = self._readingSequenceForItem(item)
+        if sequence is None:
+            sequence = ((item,), 0)
+        items, position = sequence
+        self.readRequested.emit(item, items, position)
+
+    def _activateManga(self, item: MangaItem):
+        sequence = self._readingSequenceForItem(item)
+        if sequence is not None:
+            items, position = sequence
+            self.readingSequenceMangaActivated.emit(item, items, position)
             return
         self.mangaActivated.emit(item)
 

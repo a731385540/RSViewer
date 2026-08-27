@@ -285,6 +285,7 @@ class MainWindow(FluentWindow):
             self.favoriteMangaInterface,
             self.mangaHistoryInterface.localHistoryInterface,
         ):
+            interface.readRequested.connect(self.openLocalMangaReader)
             interface.favoriteChanged.connect(self._onFavoriteChanged)
             interface.libraryMutated.connect(
                 lambda: self._publishSharedState("library_refresh")
@@ -1614,6 +1615,21 @@ class MainWindow(FluentWindow):
         )
         self._syncCurrentGalleryUpdate(item.gid)
         self.switchTo(self.mangaDetailInterface)
+
+    def openLocalMangaReader(self, item, items, position):
+        if self._isGalleryUpdating(item.gid):
+            return
+        sequence = tuple(items) or (item,)
+        position = int(position)
+        if not 0 <= position < len(sequence) or sequence[position].gid != item.gid:
+            sequence = (item,)
+            position = 0
+        self._clearOnlineSearchReturn()
+        self._cancelOnlineDetailLoad()
+        self._cancelLocalMetadataSync()
+        self.mangaDetailInterface.cancelLoads()
+        self._setReadingSequenceContext(sequence, position)
+        self._loadReadingSequenceManga(position, -1)
 
     def _openOnlineMangaDetailFromBrowser(self, item, provider, cover_data=b""):
         self._detailNavigationHistory.clear()

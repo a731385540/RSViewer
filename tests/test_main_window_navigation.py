@@ -165,6 +165,28 @@ class MainWindowNavigationTests(unittest.TestCase):
         self.window.deleteLater()
         QApplication.processEvents()
 
+    def test_direct_local_read_keeps_sequence_and_restores_progress(self):
+        item = SimpleNamespace(gid=22)
+        sequence = (
+            SimpleNamespace(gid=11),
+            item,
+            SimpleNamespace(gid=33),
+        )
+        host = SimpleNamespace(
+            _isGalleryUpdating=MagicMock(return_value=False),
+            _clearOnlineSearchReturn=MagicMock(),
+            _cancelOnlineDetailLoad=MagicMock(),
+            _cancelLocalMetadataSync=MagicMock(),
+            mangaDetailInterface=SimpleNamespace(cancelLoads=MagicMock()),
+            _setReadingSequenceContext=MagicMock(),
+            _loadReadingSequenceManga=MagicMock(),
+        )
+
+        MainWindow.openLocalMangaReader(host, item, sequence, 1)
+
+        host._setReadingSequenceContext.assert_called_once_with(sequence, 1)
+        host._loadReadingSequenceManga.assert_called_once_with(1, -1)
+
     def test_bottom_mode_buttons_switch_flat_top_navigation(self):
         navigation = self.window.navigationInterface
         manga_routes = self.window._navigationRoutes["manga"]

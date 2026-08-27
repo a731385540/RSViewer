@@ -718,6 +718,7 @@ class LocalLibraryControlsTests(unittest.TestCase):
         self.assertEqual(
             [
                 "添加到收藏",
+                "阅读",
                 "在资源管理器中打开",
                 "同步在线信息",
                 "搜索相似画廊",
@@ -962,6 +963,23 @@ class LocalLibraryControlsTests(unittest.TestCase):
         action.trigger()
 
         self.assertEqual([right_clicked.gid], opened)
+
+    def test_read_context_action_only_targets_right_clicked_gallery(self):
+        requests = []
+        self.interface.readRequested.connect(
+            lambda item, items, position: requests.append(
+                (item.gid, tuple(current.gid for current in items), position)
+            )
+        )
+        right_clicked = self.items[2]
+        menu = self.interface._buildLabelMenu(right_clicked, (1, 2))
+        action = next(
+            action for action in menu.menuActions() if action.text() == "阅读"
+        )
+
+        action.trigger()
+
+        self.assertEqual([(right_clicked.gid, (2, 3, 1), 1)], requests)
 
     def test_collection_mode_reuses_items_and_preserves_repository_order(self):
         collection = LocalMangaInterface(
