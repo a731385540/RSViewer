@@ -1,8 +1,11 @@
+import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from app.common.app_paths import migrate_state_file, resolve_application_paths
+from app.repositories.user_library_repository import UserLibraryRepository
 
 
 class ApplicationPathsTests(unittest.TestCase):
@@ -85,6 +88,25 @@ class ApplicationPathsTests(unittest.TestCase):
             second.write_bytes(b"changed")
             self.assertFalse(migrate_state_file(target, (second,)))
             self.assertEqual(b"legacy", target.read_bytes())
+
+    def test_first_run_creates_a_new_database_when_no_legacy_file_exists(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "data" / "rsviewer.db"
+
+            self.assertFalse(migrate_state_file(database_path, ()))
+            self.assertFalse(database_path.exists())
+
+            repository = UserLibraryRepository(database_path)
+            repository.initialize()
+
+            self.assertTrue(database_path.is_file())
+            with closing(sqlite3.connect(str(database_path))) as connection:
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+                download_count = connection.execute(
+                    "SELECT COUNT(*) FROM DOWNLOADS"
+                ).fetchone()[0]
+            self.assertEqual(25, version)
+            self.assertEqual(0, download_count)
 
 
 if __name__ == "__main__":

@@ -199,6 +199,8 @@ RSViewer 自有 SQLite 使用 `PRAGMA user_version` 执行可重复迁移。版�
 
 PyInstaller 构建必须使用仓库根目录的 `RSViewer.spec`；用户双击 `build_exe.cmd` 时由 `scripts/build_exe.ps1` 检查或创建 `.venv`、补齐 `requirements-build.txt` 后调用该 spec。自定义样式和应用图标保持文件形式，并由 spec 将完整 `app/resource/qss` 与 `app/resource/icons` 目录复制到 bundle 内的同一相对位置，使源码运行与 `_MEIPASS` 解包环境使用相同路径；Windows exe 图标使用同目录的 `rsviewer.ico`。新增 QSS 不需要逐文件登记，但不得把 spec 的 `datas` 恢复为空。`data` 及旧迁移来源 `app/data`、`app/config/config.json`、`app/cache` 都不得作为构建数据打入 exe；冻结环境的可写状态必须消费 `app_paths.py` 提供的 exe 同级 `data` 路径。新增任何可写资源时必须接入该路径层，禁止从业务模块的 `__file__` 或 `_MEIPASS` 派生。
 
+一键构建还必须把曾经直接运行 `dist/RSViewer.exe` 产生的 `dist/data/` 原样移动到被忽略的 `build/dist-data-backups/时间戳/` 后再构建，禁止删除该用户状态或让它留在发布目录；构建结束须检查 PyInstaller onefile 归档和整个 `dist`，一旦存在 `rsviewer.db` 或 `config.json` 就失败。干净发布只能包含 exe 及明确发布产物；首次运行时才由配置层和 `UserLibraryRepository` 在 exe 同级创建新状态。
+
 ### `app/view/main_window.py`
 
 主 stacked widget 的整页位移动画保持关闭。媒体页已经常驻，切换时只更换当前 widget；不要恢复 Fluent 默认 300ms 动画，否则最大化或全屏窗口会连续重绘透明页面和媒体卡片并明显掉帧。

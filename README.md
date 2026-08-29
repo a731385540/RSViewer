@@ -52,6 +52,8 @@ pyinstaller --noconfirm --clean RSViewer.spec
 
 产物位于 `dist/RSViewer.exe`。`RSViewer.spec` 会嵌入 RSViewer 图标，并把 `app/resource/qss` 的 light/dark 样式与 `app/resource/icons` 完整复制到 PyInstaller 运行目录；不要使用 `pyi-makespec main.py` 生成的默认空 `datas` 配置直接构建，否则详情、在线资源和设置页样式或窗口图标无法打开。
 
+构建产物不包含 `config.json`、`rsviewer.db`、缓存或日志。如果之前直接运行过 `dist/RSViewer.exe`，它生成的 `dist/data/` 会在下次构建前完整移动到被 Git 忽略的 `build/dist-data-backups/时间戳/`，避免把测试数据误当成发布文件；该目录是保留备份，不会被构建脚本删除。构建结束还会检查 exe 内部归档和整个 `dist`，发现可写状态文件时直接报错。新用户首次运行 exe 时，程序才会在 exe 同级生成新的 `data/config.json` 和空的 `data/rsviewer.db`。
+
 单文件 exe 解包到 `_MEI...` 的内容只用于读取资源。可写状态统一保存在 exe 同级的 `data` 目录：`config.json` 是设置，`rsviewer.db` 是画廊索引及用户状态，`cache/online_thumbnails` 是可删除的在线封面缓存。源码运行使用项目根目录下相同的 `data` 结构；路径不受启动时当前工作目录影响。缺少配置或数据库时会自动生成默认文件；若目标文件尚不存在，程序会优先迁移旧版项目内 `app/config`、`app/data` 或 `%LOCALAPPDATA%\RSViewer` 中的现有数据，且不会覆盖已经存在的新文件。移动 exe 时应连同 `data` 目录一起移动。
 
 ## 日志与闪退排查
