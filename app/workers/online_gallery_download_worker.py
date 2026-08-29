@@ -2,10 +2,12 @@ import inspect
 import os
 import time
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from queue import Queue
 from threading import Lock
 
+from PIL import Image, UnidentifiedImageError
 from PySide6.QtCore import QObject, QRunnable, Signal
 from PySide6.QtGui import QImage, QImageReader
 
@@ -796,7 +798,7 @@ class OnlineGalleryDownloadWorker(QRunnable):
                     f"第 {index + 1} 页基础图",
                     speed_key=speed_key,
                 )
-        if not data or QImage.fromData(data).isNull():
+        if not _is_decodable_image_data(data):
             raise ValueError(f"第 {index + 1} 页不是有效图片")
         return data, page_mode
 
@@ -898,6 +900,26 @@ def _image_extension(data):
     return ".jpg"
 
 
+def _is_decodable_image_data(data):
+    """Validate image integrity without expanding a full-size original."""
+
+    data = bytes(data or b"")
+    if not data:
+        return False
+    try:
+        with Image.open(BytesIO(data)) as image:
+            width, height = image.size
+            if width <= 0 or height <= 0:
+                return False
+            image.verify()
+        return True
+    except UnidentifiedImageError:
+        # Keep Qt-only formats working when Pillow has no matching decoder.
+        return not QImage.fromData(data).isNull()
+    except (OSError, SyntaxError, ValueError):
+        return False
+
+
 class LocalGalleryPageDownloadSignals(QObject):
     speedChanged = Signal(float)
     saved = Signal(int, int, str, int, int)
@@ -993,7 +1015,7 @@ class LocalGalleryPageDownloadWorker(QRunnable):
             elapsed = max(0.001, time.monotonic() - started_at)
             if self.cancelled:
                 return
-            if not data or QImage.fromData(data).isNull():
+            if not _is_decodable_image_data(data):
                 raise ValueError(f"第 {self.page_index + 1} 页不是有效图片")
             if not speed_was_reported:
                 self.signals.speedChanged.emit(len(data) / elapsed)

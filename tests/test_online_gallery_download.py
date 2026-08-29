@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from PySide6.QtCore import QByteArray, QBuffer, QIODevice
-from PySide6.QtGui import QColor, QImage
+from PySide6.QtGui import QColor, QImage, QImageReader
 
 from app.domain.online_download import (
     DOWNLOAD_MODE_ORIGINAL_DIRECT,
@@ -49,6 +49,7 @@ from app.sources.ehviewer_source import EhViewerDataSource
 from app.workers.online_gallery_download_worker import (
     LocalGalleryPageDownloadWorker,
     OnlineGalleryDownloadWorker,
+    _is_decodable_image_data,
 )
 from app.services.gallery_page_download_scheduler import (
     GalleryPageDownloadScheduler,
@@ -256,6 +257,24 @@ class OnlineGalleryDownloadTests(unittest.TestCase):
                 gallery=replace(self.detail.gallery, gid=999999),
             )
             self.external_repository.prepare_download(replacement_detail, "不存在")
+
+    def test_large_original_validation_does_not_use_qt_full_decode_limit(self):
+        image = QImage(2048, 2048, QImage.Format_RGB32)
+        image.fill(QColor("red"))
+        encoded = QByteArray()
+        buffer = QBuffer(encoded)
+        buffer.open(QIODevice.WriteOnly)
+        self.assertTrue(image.save(buffer, "PNG"))
+        del image
+
+        previous_limit = QImageReader.allocationLimit()
+        QImageReader.setAllocationLimit(8)
+        try:
+            self.assertTrue(QImage.fromData(encoded).isNull())
+            self.assertTrue(_is_decodable_image_data(bytes(encoded)))
+            self.assertFalse(_is_decodable_image_data(bytes(encoded)[:-12]))
+        finally:
+            QImageReader.setAllocationLimit(previous_limit)
 
     def test_single_page_worker_only_downloads_requested_missing_page(self):
         _dirname, folder = self.external_repository.prepare_download(self.detail)
