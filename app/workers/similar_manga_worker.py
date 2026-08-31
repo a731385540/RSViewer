@@ -12,6 +12,11 @@ class SimilarMangaSignals(QObject):
     failed = Signal(str)
 
 
+class SelectedTitleSearchSignals(QObject):
+    found = Signal(object, object)
+    failed = Signal(object, str)
+
+
 class SimilarMangaWorker(QRunnable):
     """Compare already-loaded manga metadata away from the GUI thread."""
 
@@ -52,7 +57,7 @@ class SelectedTitleSearchWorker(QRunnable):
         self.selected_text = " ".join(str(selected_text).split())
         self.items = tuple(items)
         self.cancelled = False
-        self.signals = SimilarMangaSignals()
+        self.signals = SelectedTitleSearchSignals()
 
     def run(self):
         try:
@@ -86,10 +91,10 @@ class SelectedTitleSearchWorker(QRunnable):
             )
             self.repository.save_latest_similar_search(record)
             if not self.cancelled:
-                self.signals.found.emit((record, matches))
+                self.signals.found.emit(self, (record, matches))
         except Exception as error:
             if not self.cancelled:
                 try:
-                    self.signals.failed.emit(str(error))
+                    self.signals.failed.emit(self, str(error))
                 except RuntimeError:
                     pass

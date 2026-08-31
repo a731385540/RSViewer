@@ -1361,22 +1361,37 @@ class MainWindow(FluentWindow):
                 parent=self.mangaDetailInterface,
             )
             return
-        if self._selectedTitleSearchWorker is not None:
-            self._selectedTitleSearchWorker.cancelled = True
+        logger.info(
+            "Selected-title local search started source_gid=%s query_length=%s",
+            int(source_gid),
+            len(selected_text),
+        )
+        self._cancelSelectedTitleSearch()
         worker = SelectedTitleSearchWorker(
             self.userLibraryRepository,
             source_gid,
             selected_text,
             self._libraryItems,
         )
-        worker.signals.found.connect(
-            lambda result: self._finishSelectedTitleSearch(worker, result)
-        )
-        worker.signals.failed.connect(
-            lambda message: self._failSelectedTitleSearch(worker, message)
-        )
+        worker.signals.found.connect(self._finishSelectedTitleSearch)
+        worker.signals.failed.connect(self._failSelectedTitleSearch)
         self._selectedTitleSearchWorker = worker
         self.similarSearchThreadPool.start(worker)
+
+    def _cancelSelectedTitleSearch(self):
+        worker = self._selectedTitleSearchWorker
+        if worker is not None:
+            worker.cancelled = True
+            self._selectedTitleSearchWorker = None
+
+    def _currentDetailGid(self):
+        item = self.mangaDetailInterface.currentItem
+        if item is not None:
+            return int(item.gid)
+        detail = self.mangaDetailInterface.currentOnlineDetail
+        if detail is not None:
+            return int(detail.gallery.gid)
+        return None
 
     @staticmethod
     def _onlineTitlePhraseQuery(selected_text):
@@ -1445,10 +1460,22 @@ class MainWindow(FluentWindow):
         self._selectedTitleSearchWorker = None
         record, items = result
         self._latestSimilarSearch = record
-        self.mangaDetailInterface.setSimilarSearchRecord(record)
+        current_source = (
+            not self._closing
+            and self._currentDetailGid() == int(record.source_gid)
+        )
+        if current_source:
+            self.mangaDetailInterface.setSimilarSearchRecord(record)
+        logger.info(
+            "Selected-title local search completed source_gid=%s results=%s "
+            "current_source=%s",
+            int(record.source_gid),
+            len(items),
+            current_source,
+        )
         self._publishSharedState("similar_search", record)
         self._updateVisibleSimilarGalleryWindow()
-        if not items:
+        if current_source and not items:
             InfoBar.info(
                 title=self.tr("没有相似画廊"),
                 content=self.tr("本地标题中没有找到“{}”。").format(
@@ -1458,13 +1485,26 @@ class MainWindow(FluentWindow):
                 isClosable=True,
                 position=InfoBarPosition.TOP_RIGHT,
                 duration=3000,
-                parent=self.mangaDetailInterface,
+                parent=self,
             )
 
     def _failSelectedTitleSearch(self, worker, message):
         if self._selectedTitleSearchWorker is not worker:
             return
         self._selectedTitleSearchWorker = None
+        current_source = (
+            not self._closing
+            and self._currentDetailGid() == int(worker.source_gid)
+        )
+        logger.warning(
+            "Selected-title local search failed source_gid=%s "
+            "current_source=%s: %s",
+            int(worker.source_gid),
+            current_source,
+            message,
+        )
+        if not current_source:
+            return
         InfoBar.error(
             title=self.tr("搜索相似画廊失败"),
             content=str(message),
@@ -1472,7 +1512,7 @@ class MainWindow(FluentWindow):
             isClosable=True,
             position=InfoBarPosition.TOP_RIGHT,
             duration=4000,
-            parent=self.mangaDetailInterface,
+            parent=self,
         )
 
     def showSimilarGalleryResults(self):
@@ -4900,6 +4940,7 @@ class MainWindow(FluentWindow):
         logger.info("Main window shutdown started window_id=%s", id(self))
         self._closing = True
         self.hide()
+        self._cancelSelectedTitleSearch()
         self._cancelReadingSequenceLoad()
         self._cancelOnlineDetailLoad(cancel_provider=True)
         self._cancelLocalMetadataSync()

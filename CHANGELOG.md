@@ -204,6 +204,7 @@
 
 ### Fixed
 
+- 修复选中文字搜索本地相似画廊后立即切换到另一画廊时，旧 Worker 完成回调仍在已复用的详情组件上创建 Fluent 提示条，可能触发 Qt/Shiboken 原生访问冲突并使进程失去响应的问题；搜索结果仍持久化为最新记录，但只有当前详情仍是请求源画廊时才更新详情或显示提示，窗口关闭会取消并注销活动 Worker。
 - 修复超大原图下载完成后被 Qt 的默认 256 MB 解码分配上限误判为“第 N 页不是有效图片”的问题；下载与单页补图改用不展开完整像素缓冲的格式完整性校验，真实损坏响应仍会被拒绝。
 - 修复一键构建复用 `dist` 时，先前运行打包版生成的 `dist/data/config.json` 与 `dist/data/rsviewer.db` 会残留在发布目录、随整个目录分发而看似被打进 exe 的问题；构建前现将旧运行数据完整移至 `build/dist-data-backups/`，构建后检查 exe 归档及发布目录并拒绝任何可写状态文件。首次运行仍在 exe 同级 `data/` 新建默认配置和空数据库。
 - 修复从在线搜索结果进入画廊、对详情选中文字再次执行在线搜索后，返回来源画廊再返回仍落在临时文本搜索结果的问题；临时搜索现在独立保存并本地恢复原来源、关键词、游标、响应页、滚动位置和封面，返回链保持“原搜索 → 画廊 → 临时搜索 → 画廊 → 原搜索”，恢复时不重复请求网络。
@@ -278,6 +279,7 @@
 
 ### Validation
 
+- `.venv\Scripts\python.exe -m unittest discover -s tests -v`：299 项测试全部通过；新增相似搜索结果迟到时不接触已复用详情页，以及当前结果提示以存活主窗口为父对象的生命周期测试。`compileall`、`git diff --check` 与 `scripts/build_exe.ps1` 真实单文件构建通过，发布目录不含数据库或配置。
 - `.venv\Scripts\python.exe -m unittest discover -s tests -v`：297 项测试全部通过；新增把 Qt 图片分配上限降至 8 MB 的超大原图回归测试，确认旧完整解码失败时新校验仍接受完整 PNG 并拒绝截断内容。`compileall`、`pip check`、`git diff --check` 与 `scripts/build_exe.ps1` 真实单文件构建通过；递归归档确认包含 Pillow/JPEG/PNG 模块且不包含数据库或配置。
 - `scripts/build_exe.ps1` 真实单文件构建通过，先将既有 `dist/data` 中约 29 MB 的测试数据库与配置原样备份到 `build/dist-data-backups/20260827-202732-174/`；新 `dist` 仅含 `RSViewer.exe`，PyInstaller 归档检查未发现 `rsviewer.db` 或 `config.json`。新增首次运行路径测试确认无旧状态时由 Repository 创建 schema v25 空数据库；`compileall`、PowerShell 语法检查、`git diff --check` 与 296 项完整测试通过。
 - `.venv\Scripts\python.exe -m unittest discover -s tests -v`：284 项测试全部通过；新增本地/在线详情删除按钮、在线 Card/List/Extended 已下载卡片右键删除、NH 来源到本地 GID 映射及回收站还原刷新时间并排到首位的覆盖。`compileall` 与 `git diff --check` 通过。

@@ -24,6 +24,7 @@ from app.domain.online_gallery import (
     OnlineGalleryDetail,
     OnlineGalleryLink,
 )
+from app.domain.similar_gallery import LatestSimilarSearch
 from app.repositories.user_library_repository import UserLibraryRepository
 from app.services.online_gallery_memory_cache import OnlineGalleryMemoryCache
 from app.sources.ehviewer_source import EhViewerDataSource
@@ -164,6 +165,62 @@ class MainWindowNavigationTests(unittest.TestCase):
         self.window.close()
         self.window.deleteLater()
         QApplication.processEvents()
+
+    def test_stale_selected_title_result_does_not_touch_reused_detail_page(self):
+        worker = SimpleNamespace(source_gid=11, cancelled=False)
+        record = LatestSimilarSearch(
+            source_gid=11,
+            selected_text="old gallery",
+            result_gids=(),
+            searched_at=1,
+        )
+        detail = SimpleNamespace(
+            currentItem=None,
+            currentOnlineDetail=SimpleNamespace(
+                gallery=SimpleNamespace(gid=22)
+            ),
+            setSimilarSearchRecord=MagicMock(),
+        )
+        self.window._closing = False
+        self.window._selectedTitleSearchWorker = worker
+        self.window.mangaDetailInterface = detail
+        self.window._publishSharedState = MagicMock()
+        self.window._updateVisibleSimilarGalleryWindow = MagicMock()
+
+        with patch("app.view.main_window.InfoBar.info") as info:
+            self.window._finishSelectedTitleSearch(worker, (record, ()))
+
+        self.assertEqual(record, self.window._latestSimilarSearch)
+        detail.setSimilarSearchRecord.assert_not_called()
+        info.assert_not_called()
+        self.window._publishSharedState.assert_called_once_with(
+            "similar_search", record
+        )
+
+    def test_current_selected_title_result_uses_live_window_for_info_bar(self):
+        worker = SimpleNamespace(source_gid=11, cancelled=False)
+        record = LatestSimilarSearch(
+            source_gid=11,
+            selected_text="current gallery",
+            result_gids=(),
+            searched_at=1,
+        )
+        detail = SimpleNamespace(
+            currentItem=SimpleNamespace(gid=11),
+            currentOnlineDetail=None,
+            setSimilarSearchRecord=MagicMock(),
+        )
+        self.window._closing = False
+        self.window._selectedTitleSearchWorker = worker
+        self.window.mangaDetailInterface = detail
+        self.window._publishSharedState = MagicMock()
+        self.window._updateVisibleSimilarGalleryWindow = MagicMock()
+
+        with patch("app.view.main_window.InfoBar.info") as info:
+            self.window._finishSelectedTitleSearch(worker, (record, ()))
+
+        detail.setSimilarSearchRecord.assert_called_once_with(record)
+        self.assertIs(self.window, info.call_args.kwargs["parent"])
 
     def test_direct_local_read_keeps_sequence_and_restores_progress(self):
         item = SimpleNamespace(gid=22)

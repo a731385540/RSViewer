@@ -79,10 +79,15 @@ class MangaTitleSimilarityTests(unittest.TestCase):
             worker = SelectedTitleSearchWorker(
                 repository, 1, "alpha part", items
             )
-            worker.signals.found.connect(found.append)
+            worker.signals.found.connect(
+                lambda emitted_worker, result: found.append(
+                    (emitted_worker, result)
+                )
+            )
             worker.run()
 
-            record, matches = found[0]
+            emitted_worker, (record, matches) = found[0]
+            self.assertIs(worker, emitted_worker)
             self.assertEqual((2, 3), tuple(item.gid for item in matches))
             self.assertEqual((2, 3), record.result_gids)
             self.assertEqual(record, repository.latest_similar_search())
